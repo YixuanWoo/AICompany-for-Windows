@@ -277,6 +277,10 @@ export function normalizeConfig(config) {
   const artifacts = {
     // 受管代码默认交给谁审（岗位 id）。
     defaultReviewer: config.artifacts?.defaultReviewer ?? 'engineering',
+    // 日常循环任务（巡检 / 体检 / 清理 / 简报）默认交给谁审。
+    // 这类活审的是「有没有照做、数字对不对」，不是方向；每轮都惊动总经理等于烧钱买一句「知道了」。
+    // 方向性任务（会改项目走向 / 对外承诺 / 技术路线）由 CEO 在排班建议里显式写 reviewBy: ceo。
+    routineReviewer: config.artifacts?.routineReviewer ?? null,
     // 认不出发布者时（老数据 / policy）怎么走。
     // 正常卡不看这个：董事会派的 → 落盘；上级 agent 派的 → 回上级审。这是「谁发布谁负责」。
     //   byAssigner = 按发布者推导（默认，推荐）

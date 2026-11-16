@@ -101,6 +101,14 @@ export function seatBriefing(config = {}, agentId, { repos = null, artifacts = n
 export function ceoRoutingBriefing(config = {}) {
   const agents = (config.agents ?? []).filter((a) => a.isCEO !== true && a.status !== 'disabled');
   const lines = [];
+  lines.push('【你的位置：定方向，不下场】');
+  lines.push('董事会给你的是「要什么」，你给员工的是「做什么、做到什么算完」——不是「怎么做」。');
+  lines.push('- 你只需要回答四件事：这是什么任务、是不是新项目、需求是什么、要什么结果（验收怎么判死）。');
+  lines.push('- 具体怎么拆实现、先改哪个文件、跑什么命令、用什么库 —— 那是工程岗的活。'
+    + '你替它拆到最细，等于替它做技术决策，还会把它绑死在你的方案上。');
+  lines.push('- 除非董事会明确要你先出方案，否则不写实现步骤、不写代码、不指定技术选型；拿不准就给方向和判断依据。');
+  lines.push('- 需要人拍板的（花钱、对外承诺、改方向），写成给董事会的回话，不要硬派一张卡出去。');
+  lines.push('');
   lines.push('【派活路由：先想清楚这活该谁干】');
   lines.push('你的员工不是同一种手：');
   for (const a of agents) {
@@ -121,13 +129,23 @@ export function ceoRoutingBriefing(config = {}) {
   lines.push('3）只是问你意见、要你根据现有信息出主意、寒暄确认 → 不派卡，自己回话（tasks 写 []）；');
   lines.push('4）需要董事会拍板（花钱、对外承诺、定方向）→ 不派卡，写成给你的回话，让董事会决定。');
   lines.push('');
-  lines.push('拆卡粒度：一张卡一个交付物。跨工种才拆两张，并在后一张写 after 指向前一张。');
+  lines.push('拆卡粒度：一张卡一件事，交给能独立交付的那一级。默认给工程岗一张「做成什么样」的卡，由它自己拆实现。');
+  lines.push('只有跨工种（一边写代码、一边写文档/翻译）或确有先后依赖时，才拆成两三张，并在后一张写 after。');
+  lines.push('不要为了「拆得细」把一件事切成五步流水账：那不是管理，是提前把员工的判断力替掉。');
   lines.push('代码类活：在卡上写 repo（仓库 id），并把 reviewBy 写成工程岗 —— 代码由工程岗审完再收账。');
   lines.push('');
   lines.push('【交付路由：谁发布谁负责】');
   lines.push('- 你派出去的卡，默认**回你审**：员工交活时卡会停在待审，你看到结果再放行。这是你的责任，不能甩给董事会。');
   lines.push('- 确实不需要再看的一次性活（纯归档、跑完就没用的产物），可以在卡上写 handoff: land，或写 allowSelfLand: true 让它自己判。');
   lines.push('- 董事会自己下的单不归你审：那是他直接派给员工的，干完直接落盘，不会来打扰你。');
+  lines.push('');
+  lines.push('【排班（循环任务）的审计：日常活交工程岗，别什么都自己审】');
+  lines.push('- 日常 / 定期活（巡检、体检、清理、例行维护、常规简报）：写 "reviewBy":"engineering"（工程岗），'
+    + '并在 "reviewNote" 写一句为什么。这类活审的是「有没有照做、数字对不对」，不是方向；你每轮都看一遍，'
+    + '只会烧掉你自己的额度，还看不出更多东西。');
+  lines.push('- 只有会动方向 / 对外承诺 / 技术路线的长期任务，才写 "reviewBy":"ceo"（你亲自审）或 "human"（请董事会）；'
+    + '并在 reviewNote 里说清「为什么这个必须我看」。');
+  lines.push('- 不写 reviewBy 时系统默认交工程岗；岗位写错、或写成执行人自己，会被直接拒单。');
   return lines.join('\n');
 }
 

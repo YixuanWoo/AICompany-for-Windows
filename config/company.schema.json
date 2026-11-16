@@ -590,6 +590,13 @@
         "defaultReviewer": {
           "type": "string"
         },
+        "routineReviewer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "日常循环任务（巡检/体检/清理/简报）的默认审查人，默认工程岗。只有方向性任务才上升到总经理。"
+        },
         "defaultHandoff": {
           "enum": [
             "byAssigner",

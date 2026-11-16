@@ -19,6 +19,14 @@
       "description": "这一系列循环卡归属的项目 id。写了就继承该项目的规范与交付落盘；空 = 不归属任何项目（产物只留在公司）。"
     },
     "reportsTo": { "type": ["string", "null"] },
+    "reviewBy": {
+      "type": ["string", "null"],
+      "description": "每一轮由谁审（岗位 id，或 human＝董事会亲审）。日常巡检/体检/清理默认交工程岗，不该每轮都烧总经理的额度；只有方向性任务才写 ceo。"
+    },
+    "reviewNote": {
+      "type": ["string", "null"],
+      "description": "一句话说明为什么由这个人审，给董事会审批时看。"
+    },
     "status": { "enum": ["active", "paused", "ended"] },
     "trigger": {
       "type": "object",

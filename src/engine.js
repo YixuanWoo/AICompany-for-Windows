@@ -157,6 +157,38 @@ export function createEngine({
     return hit.id;
   }
 
+  /** 日常循环任务的默认审查人：工程岗。
+   * 为什么不能在代码里写死 'engineering'：这家公司是可以换人的，配置里没这个岗就该按能力找。
+   * 为什么绝不默认回总经理：巡检 / 体检 / 清理这类活，CEO 看得再勤也只是一句「知道了」，
+   * 每轮都烧一次按量计费的 CEO Run，是纯浪费；方向性的东西才该惊动他。
+   */
+  function defaultRoutineReviewer(assignee = null) {
+    const agents = (config.agents ?? []).filter((a) => a.status !== 'disabled');
+    const byRef = (id) => (id ? agents.find((a) => a.id === id || a.postTitle === id) : null);
+    const preferred = byRef(config.artifacts?.routineReviewer)
+      ?? byRef(config.artifacts?.defaultReviewer)
+      ?? agents.find((a) => a.isCEO !== true && (a.capabilities ?? []).includes('review'));
+    // 没有工程岗也不能默认回 CEO：交给董事会亲审（出一张待拍板单），至少不会白烧额度。
+    let reviewer = preferred?.id ?? 'human';
+    // 审查人不能是执行人自己；撞车就上升一级（它的上级），再撞就交董事会。
+    if (reviewer === assignee) {
+      const boss = cfgFor(assignee)?.reportsTo;
+      reviewer = boss && boss !== assignee ? boss : 'human';
+    }
+    return reviewer;
+  }
+
+  /** 排班时定审查人：CEO 显式写了就按它（可写 ceo / human / 岗位 id），没写就用日常默认。 */
+  function resolveCycleReviewer({ wanted = null, assignee }) {
+    const raw = String(wanted ?? '').trim();
+    if (raw) {
+      const explicit = assertReviewSeat(raw);
+      if (explicit === assignee) throw new Error(`不能让自己审自己（${assignee}）`);
+      return { reviewer: explicit, explicit: true };
+    }
+    return { reviewer: defaultRoutineReviewer(assignee), explicit: false };
+  }
+
   /** 派活人写错了路由参数：不炸整单，留痕后当没写（走默认推导）。 */
   function softRoute(fn, { action, who, taskId, field, value }) {
     try {
@@ -1343,6 +1375,15 @@ export function createEngine({
     const difficulty = normalizeDifficulty(sug.difficulty ?? 'normal', { field: 'difficulty' });
     const picked = resolveChildSeat({ preferred: sug.assignee ?? firstWorker(), difficulty, managerId: requestedBy });
     if (!picked.assignee) return { error: '没有能接这活的执行席位' };
+    // 每一轮由谁审：日常巡检 / 体检 / 清理 / 简报默认交工程岗，
+    // 只有「方向性」的循环（改项目走向、对外承诺、技术路线）才由 CEO 在建议里写 reviewBy: ceo。
+    // 这个判断在排班时就定死写进 job，之后每一轮照着用，不用每轮再猜一次。
+    let review;
+    try {
+      review = resolveCycleReviewer({ wanted: sug.reviewBy, assignee: picked.assignee });
+    } catch (error) {
+      return { error: `reviewBy 不可用：${error.message}` };
+    }
     // 归属项目：只认已有且配了规范的；写了不存在的就拒，别让循环卡落到野地里。
     let project = null;
     if (sug.project) {
@@ -1366,7 +1407,12 @@ export function createEngine({
       job: {
         schema: 'aicompany.recurring/v1',
         jobId, jobVersion: 1, title, kind,
-        owner: ceoId() ?? 'ceo', assignee: picked.assignee, reportsTo: ceoId() ?? null,
+        owner: ceoId() ?? 'ceo', assignee: picked.assignee,
+        // 汇报对象跟着审查人走：日常循环报给工程岗，别让执行人每轮都以为要惊动总经理。
+        // 审查人是董事会时留空（它汇报的是人，不是某个席位）。
+        reportsTo: review.reviewer === 'human' ? null : review.reviewer,
+        reviewBy: review.reviewer,
+        reviewNote: String(sug.reviewNote ?? '').trim().slice(0, 300) || null,
         project, status: 'active',
         trigger: { type: 'cron', rrule, timezone },
         misfirePolicy: sug.misfirePolicy ?? 'run_once', misfireGraceMin: 720,
@@ -1420,6 +1466,10 @@ export function createEngine({
       `多久一次：${describeRRule(job.trigger.rrule)}（时区 ${job.trigger.timezone}）`,
       `每轮干什么：${job.taskTemplate.instructions.slice(0, 400)}`,
       `谁干：${seat?.postTitle ?? job.assignee}（担任：${seat?.holderName ?? job.assignee}）`,
+      `每轮谁来审：${job.reviewBy === 'human'
+        ? '董事会亲审（每轮出一张待你拍板的单）'
+        : (cfgFor(job.reviewBy)?.postTitle ?? job.reviewBy ?? '未指定')}`
+        + `${job.reviewNote ? `　←　${job.reviewNote}` : ''}`,
       `归属项目：${job.project ?? '不归属任何项目（产物只留在公司）'}`,
       `每轮怎么算干完：${job.taskTemplate.acceptance.join('；')}`,
       `消耗：每轮最多 2 次唤醒；连续失败 3 轮会自动暂停等你处理。`,
@@ -2362,8 +2412,9 @@ export function createEngine({
 
     if (declared) {
       // ③ 上级派的活，员工无权替上级免审：自报 land 一律降级为交审（除非发布者授权）。
-      if (declared === 'land' && issuer.kind === 'agent' && !task.allowSelfLand) {
-        out.downgraded = 'agent-card-cannot-self-land';
+      // 卡上已经写死「谁来审」的也一样：那是排班 / 下单时定的责任链，执行人不能自己把它改成落盘。
+      if (declared === 'land' && (issuer.kind === 'agent' || task.reviewBy) && !task.allowSelfLand) {
+        out.downgraded = task.reviewBy ? 'reviewer-pinned-cannot-self-land' : 'agent-card-cannot-self-land';
         out.handoff = 'review';
       } else {
         out.handoff = declared;
@@ -3040,6 +3091,21 @@ export function createEngine({
       actor: 'control-plane', action: 'review_queued',
       newValue: `${reviewer}|${kind}|${task.repo ?? '无仓库'}`, runId: outcome.runId, taskId: task.taskId,
     });
+    // 循环轮次卡在「人叫才醒」的席位手上时，必须提醒董事会一句：
+    // 这一轮不收账，下一轮到点就会被 overlapPolicy=skip 当成「上一轮还没完」跳掉，
+    // 而循环卡本身不出声 —— 不说一句，董事会会以为它一直在正常跑。
+    if (task.origin?.jobId) {
+      try {
+        recordMessage(db, {
+          from: 'system', kind: 'notice', taskId: task.taskId, project: task.project ?? null,
+          title: `等你审：${String(task.title ?? '').slice(0, 60)}`,
+          body: [
+            `第 ${task.origin.cycleNo ?? '?'} 轮做完了，按排班交给${cfgFor(reviewer)?.postTitle ?? reviewer}审。`,
+            '它审完这一轮才收账；一直没人审的话，下一轮到点会按「上一轮还没完」跳过。',
+          ].join('\n'),
+        });
+      } catch { /* 提醒是旁路，写不进去不影响收账 */ }
+    }
   }
 
   async function handleEvent(ev) {

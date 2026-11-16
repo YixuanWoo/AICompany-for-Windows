@@ -793,6 +793,9 @@
       '<div class="meta">每轮干什么：' + esc(String(tpl.instructions || '（未写）').slice(0, 500)) + '</div>' +
       '<div class="meta">每轮怎么算干完：<br>' + lines(tpl.acceptance) + '</div>' +
       '<div class="meta">谁干：' + esc(seatName(job.assignee)) + '</div>' +
+      '<div class="meta">每轮谁来审：' + esc(job.reviewBy
+        ? (job.reviewBy === 'human' ? '董事会亲审（每轮出一张待你拍板的单）' : seatName(job.reviewBy))
+        : '未指定（老排班，按默认路由）') + (job.reviewNote ? '　←　' + esc(job.reviewNote) : '') + '</div>' +
       '<div class="meta">归属项目：' + esc(job.project || '不归属任何项目（产物只留在公司）') + '</div>' +
       '<div class="meta">消耗：每轮最多 2 次唤醒；连续失败 3 轮自动暂停等你处理；不会自动恢复。</div>' +
       '<div class="meta">有效期：到 ' + esc(String((job.termination || {}).validUntil || '').slice(0, 10)) +
@@ -1130,6 +1133,9 @@
           '<div class="meta"><b>节奏：' + esc(rruleText(j.trigger && j.trigger.rrule)) + '</b>' +
             ' · 下次 ' + esc(fmtAt(j.nextFireAt)) + ' · 已跑 ' + esc(j.lastCycleNo ?? 0) + ' 轮</div>' +
           '<div class="meta">谁干：' + esc(who) + ' · 归属项目：' + esc(j.project || '不归属（产物只留公司）') + '</div>' +
+          '<div class="meta">谁审：' + esc(j.reviewBy
+            ? (j.reviewBy === 'human' ? '董事会亲审' : ((state.agents || []).find((x) => x.agentId === j.reviewBy)?.postTitle || j.reviewBy))
+            : '未指定') + '</div>' +
           '<div class="meta">每轮：' + esc(String(tpl.instructions || '').slice(0, 160)) + '</div></div>';
       }).join('')
       : '<div class="empty">还没有循环任务。长期要反复做的活（体检 / 巡检 / 清理），总经理会在拆活时提排班，你在审批区点通过才会开始。</div>';

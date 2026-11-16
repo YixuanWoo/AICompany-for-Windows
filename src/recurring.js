@@ -217,6 +217,11 @@ export function createRecurring({ db, notifier, now = nowIso }) {
       mode: 'delegate', addressedTo: null, cc: [],
       assignedBy: 'policy', threadId: null,
       assignee: job.assignee, reportsTo: job.reportsTo ?? null,
+      // 每轮的审查人写死在卡上（而不是让它按「发布者=政策」推成落盘）：
+      // 日常循环由工程岗审，方向性的才回到总经理 —— 这个判断在排班时就定了，不该每轮重猜。
+      // 不写 reviewBy 的老 job 保持原行为（assignedBy=policy → 董事会派 → 落盘），向后兼容。
+      reviewBy: job.reviewBy ?? null,
+      handoff: job.reviewBy ? 'review' : null,
       status: 'todo', priority: 'normal', difficulty: job.taskTemplate.difficulty ?? 'normal', createdAt: at, lease: null,
       budget: job.budgetPerCycle ?? { maxRuns: 2 },
       input: {
@@ -238,11 +243,13 @@ export function createRecurring({ db, notifier, now = nowIso }) {
     if (!checked.ok) throw new Error(`循环任务卡不合法：${checked.errors.join('; ')}`);
 
     db.prepare(`INSERT INTO tasks
-      (taskId, requestId, parentTaskId, title, project, role, assignee, status, mode, addressedTo,
-       assignedBy, revision, threadId, attempt, priority, difficulty, createdAt, updatedAt, originJson)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`).run(
+      (taskId, requestId, parentTaskId, title, project, role, assignee, reviewBy, handoff,
+       status, mode, addressedTo, assignedBy, revision, threadId, attempt, priority, difficulty,
+       createdAt, updatedAt, originJson)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`).run(
       card.taskId, card.requestId, card.parentTaskId, card.title, card.project, card.role,
-      card.assignee, card.status, card.mode, card.addressedTo, card.assignedBy,
+      card.assignee, card.reviewBy, card.handoff,
+      card.status, card.mode, card.addressedTo, card.assignedBy,
       card.revision, card.threadId, card.priority, card.difficulty,
       card.createdAt, card.createdAt, JSON.stringify(card.origin),
     );
