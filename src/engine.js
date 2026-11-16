@@ -2357,6 +2357,11 @@ export function createEngine({
       files: config.wake?.credsFiles ?? [],
       maxWaitMs: Number(config.wake?.maxWaitMs ?? 10 * 60 * 1000),
       pollMs: Number(config.wake?.pollMs ?? 2000),
+      // 投出去不算数：要观察到会话真的忙起来才算叫醒（哑火重投，见 wake.js 顶部说明）。
+      graceMs: Number(config.wake?.graceMs ?? 4000),
+      verifyMs: Number(config.wake?.verifyMs ?? 20000),
+      retryDelayMs: Number(config.wake?.retryDelayMs ?? 8000),
+      maxAttempts: Number(config.wake?.maxAttempts ?? 4),
       // 排队之后真正发出的那一次只能从回调里知道。
       onResult: (result) => mark(result.ok ? 'wake_sent' : 'wake_failed',
         result.ok ? (result.runId ?? 'ok') : result.error),

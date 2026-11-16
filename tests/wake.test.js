@@ -43,6 +43,7 @@ async function fakeGateway(t, { busy = false } = {}) {
       }
       if (req.url === '/api/v1/runs') {
         state.runs.push(JSON.parse(body || '{}'));
+        state.busy = true; // 投递成功 = 一轮对话被拉起，网关随即报忙（唤醒验证靠这个翻转）
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ data: { runId: `run-${state.runs.length}` } }));
         return;
@@ -91,7 +92,7 @@ test('K3 · 会话正忙：先排队，等它空闲再发（硬发会被网关�
 
   const results = [];
   const first = await wakeSession({
-    text: '忙时排队', key: 'T-2', files: [file], pollMs: 40, maxWaitMs: 5000,
+    text: '忙时排队', key: 'T-2', files: [file], pollMs: 40, maxWaitMs: 5000, graceMs: 80,
     onResult: (r) => results.push(r),
   });
   assert.equal(first.ok, true);
@@ -99,7 +100,7 @@ test('K3 · 会话正忙：先排队，等它空闲再发（硬发会被网关�
   assert.equal(gw.state.runs.length, 0, '忙时一条都不该发出去');
 
   gw.state.setBusy(false);
-  await new Promise((r) => setTimeout(r, 400)); // 等它轮询到空闲
+  await new Promise((r) => setTimeout(r, 600)); // 等它轮询到空闲并保持住 grace 窗口
   assert.equal(gw.state.runs.length, 1, '空闲后必须补发');
   assert.equal(gw.state.runs[0].text, '忙时排队');
   assert.equal(results.length, 1);

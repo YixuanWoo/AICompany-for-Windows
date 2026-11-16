@@ -172,6 +172,7 @@ async function fakeGateway(t) {
       }
       if (req.url === '/api/v1/runs') {
         state.runs.push(JSON.parse(body || '{}'));
+        state.busy = true; // 投递成功 = 一轮对话被拉起，网关随即报忙（唤醒验证靠这个翻转）
         res.writeHead(200, json());
         res.end(JSON.stringify({ data: { runId: `run-${state.runs.length}` } }));
         return;
@@ -193,10 +194,12 @@ test('W5 · 卡排进拉模式席位：控制面主动叫醒会话，不是只�
     port: String(gw.port), password: 'pw', updatedAt: new Date().toISOString(),
   }), 'utf8');
 
-  const { db, engine } = setup(t, { wake: { enabled: true, credsFiles: [credsFile] } });
+  const { db, engine } = setup(t, {
+    wake: { enabled: true, credsFiles: [credsFile], graceMs: 80, verifyMs: 300, retryDelayMs: 60, maxAttempts: 2 },
+  });
   await engine.submit({ text: '叫醒我', mode: 'direct', addressedTo: 'engineering' });
   await pumpAll(engine);
-  await new Promise((r) => setTimeout(r, 250)); // 唤醒是旁路，给它跑完
+  await new Promise((r) => setTimeout(r, 1200)); // 唤醒是旁路（含稳定+验证），给它跑完
 
   assert.equal(gw.state.runs.length, 1, '必须真的往会话投一条唤醒');
   assert.match(gw.state.runs[0].text, /自动叫醒/, '唤醒内容要能一眼看出是控制面在叫');
@@ -216,7 +219,7 @@ test('W6 · 叫不醒就排队重试，重试超时才认输并留痕', async (t
   fs.writeFileSync(credsFile, JSON.stringify({ port: '1', password: 'pw' }), 'utf8');
 
   const { db, engine } = setup(t, {
-    wake: { enabled: true, credsFiles: [credsFile], maxWaitMs: 400, pollMs: 100 },
+    wake: { enabled: true, credsFiles: [credsFile], maxWaitMs: 400, pollMs: 100, graceMs: 80, verifyMs: 200, retryDelayMs: 60, maxAttempts: 2 },
   });
   await engine.submit({ text: '叫不醒也得有记录', mode: 'direct', addressedTo: 'engineering' });
   await pumpAll(engine);
@@ -240,7 +243,7 @@ test('W7 · 心跳兜底：叫醒失败的卡，凭据刷新后由 reconcile 自
   // 第一幕：凭据是死端口（模拟 hook 还没刷新、旧会话已重启）→ 唤醒失败。
   fs.writeFileSync(credsFile, JSON.stringify({ port: '1', password: 'pw' }), 'utf8');
   const { db, engine } = setup(t, {
-    wake: { enabled: true, credsFiles: [credsFile], maxWaitMs: 300, pollMs: 80, cooldownMs: 300 },
+    wake: { enabled: true, credsFiles: [credsFile], maxWaitMs: 300, pollMs: 80, cooldownMs: 300, graceMs: 80, verifyMs: 200, retryDelayMs: 60, maxAttempts: 2 },
   });
   await engine.submit({ text: '心跳兜底验证', mode: 'direct', addressedTo: 'engineering' });
   await pumpAll(engine);
