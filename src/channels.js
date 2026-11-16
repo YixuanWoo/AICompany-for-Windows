@@ -3,7 +3,47 @@
 // 铁律：禁用全部非 web 通道后，最小闭环、机机唤醒、循环任务必须照常跑。
 // 依据：任务书 §6B.8 / §7.6 / §12 P4。
 
+import { spawn } from 'node:child_process';
+
 const registry = new Map();
+
+// 桌面气泡：看板关掉时也能收到「待你拍板」。只在 Windows 上真弹，其它平台静默跳过。
+// 参数走 -EncodedCommand（UTF-16LE base64）：命令行直接传中文会按控制台代码页解坏。
+function desktopChannel() {
+  const esc = (s) => String(s ?? '').replace(/'/g, "''").slice(0, 400);
+  const pop = (title, body) => {
+    if (process.platform !== 'win32') return;
+    const script = [
+      'Add-Type -AssemblyName System.Windows.Forms',
+      'Add-Type -AssemblyName System.Drawing',
+      '$n = New-Object System.Windows.Forms.NotifyIcon',
+      '$n.Icon = [System.Drawing.SystemIcons]::Information',
+      '$n.Visible = $true',
+      `$n.ShowBalloonTip(12000, '${esc(title)}', '${esc(body)}', [System.Windows.Forms.ToolTipIcon]::Info)`,
+      'Start-Sleep -Seconds 13',
+      '$n.Visible = $false',
+      '$n.Dispose()',
+    ].join('\n');
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
+      windowsHide: true, detached: true, stdio: 'ignore',
+    }).unref();
+  };
+  return {
+    name: 'desktop',
+    // 只弹「要人处理」的：拍板 / 项目 / 排班 / 卡住 / 额度。日常进展不打扰。
+    send(message) {
+      const scene = String(message?.scene ?? '');
+      if (!['decision', 'project', 'recurring', 'difficulty', 'quota', 'approval'].includes(scene)) return;
+      pop(message.title ?? 'AICompany', message.body ?? '');
+    },
+    requestApproval(request) {
+      pop(`待你拍板：${request?.title ?? request?.approvalId ?? ''}`, '打开看板点「通过 / 拒绝」；这条不点，相关任务会一直等着。');
+    },
+  };
+}
+
+registerChannel('desktop', desktopChannel);
 
 export function registerChannel(name, factory) {
   registry.set(name, factory);

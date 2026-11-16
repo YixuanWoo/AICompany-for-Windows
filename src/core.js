@@ -13,7 +13,7 @@ export const DDL = `
 CREATE TABLE IF NOT EXISTS agents (
   agentId TEXT PRIMARY KEY, displayName TEXT, isCEO INTEGER, reportsTo TEXT,
   capabilities TEXT, status TEXT, quotaDaily INTEGER, adapterType TEXT, escalationTo TEXT,
-  maxDifficulty TEXT
+  maxDifficulty TEXT, postTitle TEXT, holderName TEXT, holderKind TEXT, holderId TEXT
 );
 CREATE TABLE IF NOT EXISTS tasks (
   taskId TEXT PRIMARY KEY, requestId TEXT, parentTaskId TEXT, title TEXT, role TEXT,
@@ -124,7 +124,16 @@ export function migrate(db) {
   addColumn('tasks', 'difficulty', "difficulty TEXT DEFAULT 'normal'");
   // P7：任务归属项目。老库补列后旧卡为 NULL（= 不属于任何项目，行为与以前一致）。
   addColumn('tasks', 'project', 'project TEXT');
+  // 卡间依赖：存前置卡的 taskId 数组（JSON）。老库补列后为 NULL = 没有依赖，仍是并行。
+  // CEO 拆卡时可以在卡上写 after（同批序号），引擎落成真正的依赖关系；派活前会拦。
+  addColumn('tasks', 'dependsOn', 'dependsOn TEXT');
   addColumn('agents', 'maxDifficulty', 'maxDifficulty TEXT');
+  // 席位模型：岗位（postTitle）与担任者（holderName）分开记，老库补列后为空，下次启动由 seedAgents 回填。
+  addColumn('agents', 'postTitle', 'postTitle TEXT');
+  addColumn('agents', 'holderName', 'holderName TEXT');
+  addColumn('agents', 'holderKind', 'holderKind TEXT');
+  // 担任者 id：同一个 agent 可以兼任多个岗位，靠这一列能看出「这几个位子是同一个人在干」。
+  addColumn('agents', 'holderId', 'holderId TEXT');
   addColumn('task_payload', 'inputJson', "inputJson TEXT DEFAULT '{}'");
   // P4：审批单补请求内容与时间；审计补 taskId 以便按任务串时间线；配额补通知去重位。
   for (const [column, ddl] of [
@@ -153,8 +162,8 @@ export function seedAgents(db, config) {
   const period = periodKey(new Date());
   const insertAgent = db.prepare(`INSERT OR REPLACE INTO agents
     (agentId, displayName, isCEO, reportsTo, capabilities, status, quotaDaily, adapterType,
-     escalationTo, maxDifficulty)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+     escalationTo, maxDifficulty, postTitle, holderName, holderKind, holderId)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const insertQuota = db.prepare(`INSERT OR IGNORE INTO quotas
     (agentId, period, used, limitUnits, warnAt) VALUES (?, ?, 0, ?, ?)`);
   for (const agent of config.agents) {
@@ -163,9 +172,17 @@ export function seedAgents(db, config) {
       agent.reportsTo ?? null, JSON.stringify(agent.capabilities),
       agent.status, agent.quotaDaily ?? 20, agent.adapter.type, agent.escalationTo ?? null,
       ceilingOf(agent),
+      agent.postTitle ?? agent.displayName ?? agent.id, agent.holderName ?? null, agent.holderKind ?? null,
+      agent.holderId ?? null,
     );
     const limit = agent.quotaDaily ?? 20;
     insertQuota.run(agent.id, period, limit, Math.floor(limit * (config.quota?.warnRatio ?? 0.8)));
+  }
+  // 名册就是配置的投影：配置里删掉的席位要从库里清掉，否则看板会一直挂着已经不存在的人
+  //（例如从「研发工位」改回「执行岗由桌面应用担任」之后）。任务表里 assignee 是字符串，不受影响。
+  const keep = config.agents.map((a) => a.id);
+  if (keep.length) {
+    db.prepare(`DELETE FROM agents WHERE agentId NOT IN (${keep.map(() => '?').join(',')})`).run(...keep);
   }
 }
 

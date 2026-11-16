@@ -14,6 +14,10 @@
     "kind": { "enum": ["brief", "inspection", "cleanup", "maintenance"] },
     "owner": { "type": "string" },
     "assignee": { "type": "string" },
+    "project": {
+      "type": ["string", "null"],
+      "description": "这一系列循环卡归属的项目 id。写了就继承该项目的规范与交付落盘；空 = 不归属任何项目（产物只留在公司）。"
+    },
     "reportsTo": { "type": ["string", "null"] },
     "status": { "enum": ["active", "paused", "ended"] },
     "trigger": {

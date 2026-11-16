@@ -99,3 +99,53 @@ test('P0-2 · 受限 YAML 解析器覆盖嵌套 / 列表 / 行内数组 / null /
   assert.equal(parsed.agents[0].adapter.type, 'process');
   assert.deepEqual(parsed.clients, ['web']);
 });
+
+test('配置：两个岗位可以由同一个 agent 担任，各自用自己的 adapterConfig 参数', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aicompany-seats-'));
+  const file = path.join(dir, 'seats.yaml');
+  fs.writeFileSync(file, [
+    'version: 1',
+    `workRoot: ${dir.replaceAll(String.fromCharCode(92), '/')}`,
+    'holders:',
+    '  - id: multi-agent',
+    '    name: 全能 agent',
+    '    kind: external-agent',
+    '    adapter:',
+    '      type: process',
+    '      config:',
+    '        command: node -e "process.exit(0)"',
+    'posts:',
+    '  - id: ceo',
+    '    title: 总经理',
+    '    heldBy: multi-agent',
+    '    isCEO: true',
+    '    capabilities: [plan, review]',
+    '  - id: worker',
+    '    title: 执行',
+    '    heldBy: multi-agent',
+    '    adapterConfig:',
+    '      timeoutMs: 1234',
+    '    isCEO: false',
+    '    capabilities: [execute]',
+    '    reportsTo: ceo',
+    'clients: [web]',
+    'notifier: [noop]',
+  ].join('\n'), 'utf8');
+  const { config } = loadConfig(file, {}, { overridesPath: null });
+  try {
+    assert.equal(config.agents.length, 2, '两个岗位各算一个席位');
+    assert.deepEqual(config.agents.map((a) => a.postTitle), ['总经理', '执行']);
+    // 岗位名称是岗位，担任者是同一个 agent 的名字。
+    assert.deepEqual(config.agents.map((a) => a.holderName), ['全能 agent', '全能 agent']);
+    assert.deepEqual(config.agents.map((a) => a.holderId), ['multi-agent', 'multi-agent']);
+    // 调用的还是同一个 agent：adapter 类型与命令完全一样。
+    assert.equal(config.agents[0].adapter.type, 'process');
+    assert.equal(config.agents[1].adapter.type, config.agents[0].adapter.type);
+    assert.equal(config.agents[1].adapter.config.command, config.agents[0].adapter.config.command);
+    // 岗位级覆盖只作用于自己那一席，不污染同 agent 的另一个岗位。
+    assert.equal(config.agents[1].adapter.config.timeoutMs, 1234);
+    assert.equal(config.agents[0].adapter.config.timeoutMs, undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

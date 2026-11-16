@@ -12,7 +12,8 @@ import { createRecurring } from './recurring.js';
 import { createScheduler } from './scheduler.js';
 import { cleanupScan } from './cleanup.js';
 import { buildObservation, detectDirty, renderObservationMarkdown } from './observe.js';
-import { tune, tuneHistory, TUNABLE, TuneError } from './tune.js';
+import { tune, tuneHistory, TUNABLE, TuneError, readOverrides, writeOverrides } from './tune.js';
+import { createProject } from './projects.js';
 import { listOutputs, readOutput, OutputsError } from './outputs.js';
 import { readPauseFlag, writePauseFlag } from './gui-adapter.js';
 import { createSeatClaim, guiSeatAgents } from './gui-seat.js';
@@ -47,7 +48,10 @@ export function createServer({
   const guiAgents = (engine.config?.agents ?? []).filter((a) => a?.adapter?.type === 'gui-template');
   const guiSeats = guiAgents.map((a) => ({
     agentId: a.id,
-    displayName: a.displayName ?? a.id,
+    // 岗位 + 担任者一起给：只写「执行」看不出是谁，只写「豆包工作」又像席位名。
+    displayName: a.postTitle && a.holderName ? `${a.postTitle}岗（${a.holderName}）` : (a.displayName ?? a.id),
+    postTitle: a.postTitle ?? null,
+    holderName: a.holderName ?? null,
     gate: a.adapter?.config?.gate ?? {},
     lockPath: a.adapter?.config?.lockPath ?? null,
   }));
@@ -63,6 +67,52 @@ export function createServer({
   if (typeof engine.setApprovalHandler === 'function') {
     engine.setApprovalHandler('recurring_change', (payload, meta = {}) =>
       rec.applyRevision(payload.jobId, payload.patch ?? {}, { approvedBy: meta.decidedBy ?? 'human' }));
+  }
+
+  // 新建项目：CEO 只能「建议」，真建项目是董事会的动作（看板/API，或审批单点通过）。
+  // 条目落 runtime-overrides.json（不动机器人手写的 YAML 注释），引擎手里的 config 立刻生效。
+  const persistProject = (project) => {
+    if (!overridesPath) return null;
+    const ov = readOverrides(overridesPath);
+    ov.projects = {
+      ...(ov.projects ?? {}),
+      [project.id]: {
+        displayName: project.displayName,
+        ...(project.rootDir ? { rootDir: project.rootDir } : {}),
+        ...(project.deliverSubdir ? { deliverSubdir: project.deliverSubdir } : {}),
+        memoryLimit: project.memoryLimit,
+      },
+    };
+    return writeOverrides(overridesPath, ov);
+  };
+  const doCreateProject = (body = {}) => {
+    const out = createProject({
+      config: engine.config,
+      workRoot: engine.workDir ?? engine.config?.workRoot,
+      ...body,
+    });
+    persistProject(out.project);
+    writeAudit(engine.db, {
+      actor: body.actor ?? 'human', action: 'project_created', newValue: out.project.id,
+    });
+    return out;
+  };
+  if (typeof engine.setApprovalHandler === 'function') {
+    engine.setApprovalHandler('project_create', (payload, meta = {}) => {
+      const p = payload?.project ?? {};
+      const out = doCreateProject({ ...p, actor: meta.decidedBy ?? 'human' });
+      return { project: out.project, specPath: out.specPath };
+    });
+  }
+  // 循环任务：CEO 提建议 → 董事会点「通过」才真注册。
+  // 在此之前调度器完全不知道有这条 job，也就永远不会自己开跑——这是「长期任务必须人批」的闸。
+  if (typeof engine.setApprovalHandler === 'function') {
+    engine.setApprovalHandler('recurring_create', (payload) => {
+      const job = payload?.job;
+      if (!job?.jobId) throw new Error('循环任务审批单里没有 job（无法注册）');
+      const out = rec.registerJob(job);
+      return { jobId: out.jobId, title: out.title, nextFireAt: out.nextFireAt };
+    });
   }
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${host}:${port}`);
@@ -199,6 +249,13 @@ export function createServer({
           newValue: paused ? 'paused' : 'running',
         });
         json(res, 200, { ...state, seats: guiSeats.map((s) => s.agentId) });
+        return;
+      }
+      // ---- P7：新建项目（董事会才有的权限；CEO 只能建议，点审批单通过也算这里）----
+      if (method === 'POST' && pathname === '/api/projects') {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const out = doCreateProject({ ...body, actor: body.actor ?? 'board' });
+        json(res, 201, out);
         return;
       }
       // ---- P5：调参留痕（改完立刻生效，旧值新值都进 audit）----
@@ -338,6 +395,10 @@ export function createServer({
               defaultTarget: engine.config?.interaction?.defaultTarget ?? null,
               seats: (engine.config?.agents ?? []).map((a) => ({
                 agentId: a.id,
+                // 岗位 = 席位的名字；担任者 = 谁在干。看板分两行显示，避免把 agent 名字当成席位名。
+                postTitle: a.postTitle ?? a.displayName ?? a.id,
+                holderName: a.holderName ?? null,
+                holderKind: a.holderKind ?? null,
                 displayName: a.displayName ?? a.id,
                 isCEO: Boolean(a.isCEO),
                 capabilities: a.capabilities ?? [],
@@ -355,7 +416,10 @@ export function createServer({
           '/api/projects': () => engine.listProjects(),
           '/api/agents': () => engine.getAgentCandidates(),
           '/api/quotas': () => engine.getQuotas(),
-          '/api/tasks': () => engine.getTasks(),
+          '/api/tasks': () => {
+            const hints = engine.holdReasons?.() ?? {};
+            return engine.getTasks().map((t) => (hints[t.taskId] ? { ...t, holdReason: hints[t.taskId] } : t));
+          },
           '/api/runs': () => {
             const rows = engine.getRuns();
             return rows.filter((r) => (!q.get('taskId') || r.taskId === q.get('taskId'))
@@ -456,7 +520,16 @@ export function createServer({
       for (const client of sseClients) client.write(payload);
     }
   }, 400);
-  server.on('close', () => { clearInterval(timer); sched.stop(); });
+  // 定时器不该决定进程的生死：真身靠 listen 的 socket 保活，它只是顺手推事件。
+  // 少了这句，一个「没有 listen 就关掉」的实例（测试里 port:0 不 listen 就是这种）
+  // 会把这个 400ms 的定时器留在事件循环里，进程永远退不出去——实测挂过 5 小时。
+  if (typeof timer.unref === 'function') timer.unref();
+  const releaseTimers = () => { clearInterval(timer); sched.stop(); };
+  server.on('close', releaseTimers);
+  // close() 在没 listen 的 server 上不会触发 'close' 事件，清理就永远轮不到。
+  // 所以包一层：只要调了 close，定时器一定清，不依赖事件是否发生。
+  const rawClose = server.close.bind(server);
+  server.close = (cb) => { releaseTimers(); return rawClose(cb); };
   server.recurring = rec;
   server.scheduler = sched;
   return server;

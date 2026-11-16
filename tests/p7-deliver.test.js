@@ -232,3 +232,33 @@ test('P7-5 · 被占用时先不落：审计记 deferred、项目里没文件；
   assert.equal(fs.readFileSync(path.join(projectDir, '04-译稿', 'note.md'), 'utf8'), '译文内容');
   db.close();
 });
+
+test('P7-5 · 天生没产物的卡（只排班 / 只给建议）：记一次账结案，心跳不再刷失败', (t) => {
+  const root = tmpRoot(t);
+  writeSpec(root, 'benny');
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'benny-'));
+  t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+  const cfg = companyConfig(root, { rootDir: projectDir });
+  const db = openDb(':memory:');
+  const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
+
+  // 真实现场（T-a7d8471f 只排班不派卡）：卡 done，output 目录是空的。
+  const taskId = 'T-nofiles1';
+  db.prepare(`INSERT INTO tasks (taskId, requestId, title, assignee, status, mode, project, createdAt, updatedAt, revision, attempt)
+    VALUES (?, 'REQ-nofiles', '为项目定运行节奏（只排班）', 'worker-01', 'done', 'direct', 'benny',
+            '2026-11-16T10:00:00Z', '2026-11-16T10:00:00Z', 1, 0)`).run(taskId);
+
+  const first = engine.retryPendingDeliveries();
+  assert.equal(first, 1, '第一轮心跳要处理它一次');
+  // 记一条「跳过」，不是失败
+  assert.equal(engine.getAudit().filter((a) => a.action === 'deliver_skipped').length, 1);
+  assert.equal(engine.getAudit().filter((a) => a.action === 'deliver_failed').length, 0);
+  assert.equal(lastDeliveryOf(root, 'benny', taskId).code, 'NO_ARTIFACTS');
+
+  // 维护心跳（包括重启后的第一轮）不许再重试这张卡
+  assert.equal(engine.retryPendingDeliveries(), 0);
+  assert.equal(engine.retryPendingDeliveries(), 0);
+  assert.equal(engine.getAudit().filter((a) => a.action === 'deliver_failed').length, 0);
+  assert.equal(engine.getAudit().filter((a) => a.action === 'deliver_skipped').length, 1);
+  db.close();
+});

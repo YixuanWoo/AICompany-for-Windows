@@ -755,3 +755,20 @@ test('G-P2 · bridge token 401 由统一 API 拦下；本地 inline 演示仍与
   assert.equal(local.engine.getRuns().length >= 2, true);
   assert.equal(r.pending, 0);
 });
+
+test('P2-7 · 循环卡必须带项目归属：否则「替项目干活却不认这个项目」', () => {
+  const { db, rec } = makeRecurring();
+  // 带 project 的 job：卡上要能读到同一个项目，后续规范注入 / 经验 / 交付才有着落。
+  rec.registerJob(makeJob({ jobId: 'JOB-PROJ', project: 'yitai' }));
+  const fired = rec.fire({ jobId: 'JOB-PROJ', scheduledAt: FAR, now: FAR });
+  assert.equal(fired.created, true);
+  const row = db.prepare('SELECT project, title FROM tasks WHERE taskId = ?').get(fired.taskId);
+  assert.equal(row.project, 'yitai', '循环卡丢了项目归属 = 产物和经验都进不了项目');
+
+  // 不写 project 的老 job 仍然可以跑，只是不归属任何项目（向后兼容）。
+  rec.registerJob(makeJob({ jobId: 'JOB-NOPROJ' }));
+  const fired2 = rec.fire({ jobId: 'JOB-NOPROJ', scheduledAt: FAR, now: FAR });
+  assert.equal(fired2.created, true);
+  assert.equal(db.prepare('SELECT project FROM tasks WHERE taskId = ?').get(fired2.taskId).project, null);
+  db.close();
+});

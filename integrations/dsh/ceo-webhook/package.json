@@ -1,0 +1,31 @@
+{
+  "name": "dsh-ceo-webhook",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH Plugin (NOT part of AICompany core). HTTP webhook channel that turns an incoming POST into a real, tool-capable DSH agent and streams its result back. Lets a local orchestrator (AICompany) drive a CEO agent that can read files and execute tools — reusing the same agents/agentPresets services the Feishu (dsh-lark-channel) plugin uses.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0 || >=24.0.0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "webhook",
+    "http",
+    "aiceo",
+    "ceo"
+  ],
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

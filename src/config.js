@@ -144,6 +144,51 @@ export function applyConfigRules(config) {
   return errors;
 }
 
+// 两层席位模型（2026-11-16 定）：
+//   holders = 担任者，真的是一个 agent（或一个程序），必须有 name 和 adapter；
+//   posts   = 岗位，席位的名字，必须有 title，并写 heldBy 指向某个 holder。
+// 同一个 agent 可以担任多个岗位：为每个岗位复制一份 adapter 配置，
+// 岗位可用 adapterConfig 覆盖参数（例：同一个 agent 在「总经理」岗走 ceo 模式，在「执行」岗走普通模式）。
+// 老配置（只有 agents、没有 posts）原样放行：那种写法里岗位和担任者是一一对应的。
+export function expandPostsAndHolders(data) {
+  const posts = Array.isArray(data?.posts) ? data.posts : null;
+  if (!posts) return data;
+  const holders = Array.isArray(data.holders) ? data.holders : [];
+  const byId = new Map();
+  for (const h of holders) {
+    if (!h?.id) throw new ConfigError('holders 每一项都必须写 id', 'CONFIG_INVALID');
+    if (!h.name) throw new ConfigError(`holders.${h.id} 必须写 name（这个 agent 的名字，一看就知道谁干）`, 'CONFIG_INVALID');
+    if (!h.adapter?.type) throw new ConfigError(`holders.${h.id} 缺 adapter（这个 agent 怎么调用）`, 'CONFIG_INVALID');
+    byId.set(h.id, h);
+  }
+  const agents = posts.map((p) => {
+    if (!p?.id) throw new ConfigError('posts 每一项都必须写 id（岗位 id）', 'CONFIG_INVALID');
+    if (!p.title) throw new ConfigError(`posts.${p.id} 必须写 title（岗位名称，一看就知道干啥）`, 'CONFIG_INVALID');
+    const h = byId.get(p.heldBy);
+    if (!h) throw new ConfigError(`posts.${p.id}.heldBy=${String(p.heldBy)} 在 holders 里找不到`, 'CONFIG_INVALID');
+    return {
+      id: p.id,
+      post: p.title,
+      holder: h.name,
+      holderId: h.id,
+      holderKind: h.kind ?? null,
+      displayName: p.title,
+      isCEO: p.isCEO === true,
+      capabilities: p.capabilities ?? h.capabilities ?? ['execute'],
+      status: p.status ?? h.status ?? 'active',
+      quotaDaily: p.quotaDaily ?? h.quotaDaily ?? 20,
+      reportsTo: p.reportsTo ?? null,
+      escalationTo: p.escalationTo ?? null,
+      ...(p.maxDifficulty ? { maxDifficulty: p.maxDifficulty } : {}),
+      adapter: {
+        ...h.adapter,
+        config: { ...(h.adapter?.config ?? {}), ...(p.adapterConfig ?? {}) },
+      },
+    };
+  });
+  return { ...data, agents };
+}
+
 export function normalizeConfig(config) {
   const interaction = { ...(config.interaction || {}) };
   interaction.defaultMode = interaction.defaultMode ?? DEFAULTS.defaultMode;
@@ -173,10 +218,30 @@ export function normalizeConfig(config) {
     maxRunHours: config.runPolicy?.maxRunHours ?? DEFAULTS.maxRunHours,
     staleEventMinutes: config.runPolicy?.staleEventMinutes ?? DEFAULTS.staleEventMinutes,
   };
-  // G3：席位不写 maxDifficulty = 不设限；这里补默认值，避免下游每处都判 undefined。
-  const agents = (config.agents || []).map((agent) => ({
-    ...agent, maxDifficulty: ceilingOf(agent),
-  }));
+  // 席位与担任者是两件事，必须分开写清楚：
+  //   post   = 岗位名（总经理 / 执行），席位本身的名字，稳定不变
+  //   holder = 由谁担任这个岗位（桌面应用名 / 8080 上的 agent 名），换人只改这里
+  // 老配置没这两项时退回 displayName，行为与以前一致（不逼着一次性全改）。
+  const agents = (config.agents || []).map((agent) => {
+    const post = String(agent.post ?? '').trim() || null;
+    const holderRaw = agent.holder;
+    const holder = holderRaw == null
+      ? null
+      : (typeof holderRaw === 'string' ? { name: holderRaw } : holderRaw);
+    const holderName = String(holder?.name ?? '').trim() || null;
+    const holderKind = String(holder?.kind ?? agent.holderKind ?? '').trim() || null;
+    return {
+      ...agent,
+      // 只在有值时才落字段：老配置不写这两项，就不该在 config 里凭空多出 null（会过不了 schema）。
+      ...(post ? { post } : {}),
+      ...(holderName ? { holderName } : {}),
+      ...(holderKind ? { holderKind } : {}),
+      postTitle: post ?? agent.displayName ?? agent.id,
+      // 显示名默认 = 岗位名。担任者单独放 holderName，绝不把 agent 名当席位名。
+      displayName: agent.displayName ?? post ?? agent.id,
+      maxDifficulty: ceilingOf(agent),
+    };
+  });
   // P7：项目配置补默认值（显示名、记忆条数、落盘位置）。
   // rootDir 有值 = 验收通过后产物落到那里（填了就是授权）；没填 = 产物只在公司任务目录里，由人自己取。
   const projects = Object.fromEntries(Object.entries(config.projects ?? {}).map(([id, entry]) => [id, {
@@ -193,10 +258,18 @@ export function doctor(config) {
   const checks = [];
   const agents = config.agents || [];
   checks.push({
-    name: '唯一 CEO 席位',
+    name: '唯一总经理岗',
     ok: agents.filter((a) => a.isCEO === true).length === 1,
-    detail: agents.filter((a) => a.isCEO === true).map((a) => a.id).join(', ') || '无',
+    detail: agents.filter((a) => a.isCEO === true).map((a) => a.postTitle ?? a.id).join(', ') || '无',
   });
+  // 岗位 / 担任者分离：只要有一个席位写了 post，就要求全部写清，避免「有的写岗位有的写人名」这种半新半旧。
+  if (agents.some((a) => a.post != null)) {
+    checks.push({
+      name: '每个席位都写明岗位与担任者',
+      ok: agents.every((a) => a.post != null && a.holderName != null),
+      detail: agents.map((a) => `${a.id}: ${a.postTitle ?? '（缺岗位）'} / ${a.holderName ?? '（缺担任者）'}`).join('；'),
+    });
+  }
   for (const agent of agents) {
     checks.push({
       name: `${agent.id}.adapter.type 已注册`,
@@ -204,14 +277,31 @@ export function doctor(config) {
       detail: String(agent.adapter?.type),
     });
   }
+  // 同一 agent 兼任多岗是允许的（用户明确要求）：体检要把它说清楚，
+  // 否则看板上两个岗位、实际只有一个 agent，人会误以为买了两份。
+  const byHolder = new Map();
+  for (const a of agents) {
+    if (!a.holderId) continue;
+    byHolder.set(a.holderId, [...(byHolder.get(a.holderId) ?? []), a.postTitle ?? a.id]);
+  }
+  const shared = [...byHolder.entries()].filter(([, posts]) => posts.length > 1);
+  checks.push({
+    name: '担任者复用（一个 agent 可兼多岗）',
+    ok: true,
+    detail: shared.length
+      ? shared.map(([holder, posts]) => `${holder} 兼任 ${posts.join('、')}`).join('；')
+      : '每个岗位各由一名担任者，无兼任',
+  });
   checks.push({
     name: '汇报线不成环',
     ok: applyConfigRules(config).filter((e) => e.includes('成环') || e.includes('不存在')).length === 0,
     detail: agents.map((a) => `${a.id}→${a.reportsTo ?? '无'}`).join(', '),
   });
   checks.push({
-    name: '零外部凭据可跑（web + noop）',
-    ok: (config.clients || []).includes('web') && (config.notifier || []).includes('noop'),
+    name: '零外部凭据可跑（只用本地通道）',
+    // 本地通道：web（看板）/ noop / stdout / desktop（桌面气泡）。im 与 webhook 要外部地址，不算。
+    ok: (config.clients || []).includes('web')
+      && (config.notifier || []).every((n) => ['web', 'noop', 'stdout', 'desktop'].includes(n)),
     detail: `clients=${(config.clients || []).join('+')} notifier=${(config.notifier || []).join('+')}`,
   });
   // P7：配了项目就得有规范文件——没有规范的「项目」派活时会被拒，不如启动时就说清。
@@ -261,6 +351,9 @@ export function loadConfig(configPath = EXAMPLE_CONFIG_PATH, env = process.env, 
       };
     }
   }
+  // 两层模型：posts + holders 合成出引擎用的 agents（岗位 id 作 agentId，adapter 沿用担任者的）。
+  // 必须在 schema 校验之前做——新配置里可能只写 posts、不写 agents。老配置没有 posts，这一步是空操作。
+  data = expandPostsAndHolders(data);
   const structural = validateAgainstSchema(CONFIG_SCHEMA, data);
   const ruleErrors = applyConfigRules(data);
   const errors = [

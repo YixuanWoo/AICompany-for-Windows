@@ -1,0 +1,7 @@
+# dsh-ceo-webhook bundle patch
+# Mounts the plugin row into the web profile. Adding the package to
+# dsh.profile.bundles is enough — no hand edit of the profile's own
+# cordis.patch.yml is required.
+- insert:
+    - id: ceo-webhook
+      name: 'dsh-ceo-webhook'

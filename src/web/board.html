@@ -49,6 +49,21 @@
   .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px; min-width: 108px; }
   .stat b { display: block; font-size: 19px; line-height: 1.2; }
   .stat span { font-size: 11px; color: var(--muted); }
+  /* 「待我拍板」= 呼叫董事会的黄条：不管你在哪个标签页都看得见，点一下直达审批卡。 */
+  .pending-banner {
+    max-width: 1440px; margin: 0 auto 14px; padding: 11px 16px; border-radius: 10px;
+    background: #FFF6E5; border: 1px solid #D99A00; color: #6B3F00;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+  .pending-banner b { font-size: 14px; }
+  .pending-banner button { background: #B45309; border-color: #B45309; flex: none; }
+  .stat.action { cursor: pointer; border-color: #D99A00; background: #FFF6E5; }
+  .stat.action b { color: #B45309; }
+  .card.flash { animation: cardflash 1.8s ease-out 1; }
+  @keyframes cardflash {
+    0%, 35% { box-shadow: 0 0 0 3px rgba(180,83,9,.55); border-color: #D99A00; }
+    100% { box-shadow: none; }
+  }
   .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
   @media (max-width: 980px) { .layout, .grid2 { grid-template-columns: 1fr; } }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -95,55 +110,199 @@
   .gui-bar { display: flex; align-items: center; gap: 10px; justify-content: space-between; background: var(--accent-bg); border: 1px solid #A9C9E8; border-radius: 8px; padding: 7px 10px; font-size: 12px; margin-bottom: 10px; }
   .gui-bar.paused { background: #FDF6EA; border-color: #E4C79A; }
   .gui-bar button { padding: 3px 10px; font-size: 12px; flex: 0 0 auto; }
+
+  /* ===== 董事会指令台：全屏视觉中心 ===== */
+  .command-deck {
+    max-width: 1180px; margin: 0 auto 18px; padding: 22px 26px 20px;
+    border: 1px solid #A9C9E8; border-top: 4px solid var(--accent); border-radius: 14px;
+    background: #fff; box-shadow: 0 6px 22px rgba(24,95,165,.10);
+  }
+  .deck-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+  .deck-head h1 { margin: 0; font-size: 24px; letter-spacing: .5px; }
+  .deck-sub { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+  .deck-input {
+    min-height: 168px; font-size: 16px; line-height: 1.7; padding: 14px 16px;
+    border: 2px solid var(--line); border-radius: 10px; background: #FCFCFA; resize: vertical;
+  }
+  .deck-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(24,95,165,.12); }
+  .deck-actions { display: flex; gap: 10px; align-items: stretch; margin-top: 12px; }
+  .deck-actions input { flex: 1; font-size: 14px; }
+  .deck-actions button { flex: 0 0 auto; padding: 12px 30px; font-size: 16px; font-weight: 600; border-radius: 9px; }
+  .deck-advanced { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+  .deck-advanced summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+  .deck-advanced .grid2 { margin-top: 12px; }
+  .deck-advanced label { margin-top: 6px; }
+
+  /* ===== 标签页：把次要数据收进抽屉 ===== */
+  .tabs { max-width: 1180px; margin: 0 auto 12px; display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+  .tabs button {
+    background: transparent; color: var(--muted); border: 1px solid transparent;
+    border-bottom: none; border-radius: 8px 8px 0 0; padding: 9px 16px; font-size: 13.5px;
+  }
+  .tabs button:hover { color: var(--ink); background: #F5F4EF; }
+  .tabs button.active { background: #fff; color: var(--accent); border-color: var(--line); font-weight: 600; }
+  .tabpane { display: none; max-width: 1180px; margin: 0 auto; }
+  .tabpane.active { display: block; }
 </style>
 </head>
 <body>
 
 <header>
-  <div>
-    <h1>AICompany · Web Board</h1>
-    <div class="sub">统一 API 的默认客户端 · 提需求 / 看板 / 协作 / 验收 · 不依赖任何外部服务</div>
-  </div>
   <div class="conn">
     <span class="dot" id="sse-dot"></span><span id="sse-text">连接中…</span>
     <button class="ghost" id="refresh-btn" type="button">刷新</button>
   </div>
 </header>
 
+<!-- ===== 视觉中心：给总经理下指令 ===== -->
+<section class="command-deck">
+  <div class="deck-head">
+    <div>
+      <h1>给总经理下指令</h1>
+      <p class="deck-sub">你说一句话，总经理自己判断归属（新项目 / 老项目 / 一次性任务），带团队拆活、执行、验收。提交后手离开键鼠，几秒后它自己开工。</p>
+    </div>
+  </div>
+  <div class="gui-bar" id="gui-bar" style="display:none"></div>
+  <form id="request-form">
+    <label for="text" style="font-size:13px;margin-top:0">要总经理做什么</label>
+    <textarea id="text" class="deck-input" placeholder="例如：把小王子的第三章重译一遍，术语按项目规范来，完成后给我一份简报">写一份本周工作简报</textarea>
+    <div class="deck-actions">
+      <input id="title" placeholder="标题（可不填，默认取正文第一句）" autocomplete="off">
+      <button type="submit" id="submit-btn">下达指令 →</button>
+    </div>
+    <details class="deck-advanced">
+      <summary>高级选项（交互模式 / 难度 / 项目 / 交付给）—— 一般不填，交给总经理判断</summary>
+      <div class="grid2">
+        <div>
+          <label for="mode">交互模式</label>
+          <select id="mode">
+            <option value="delegate">delegate · 交给总经理统筹拆活（默认）</option>
+            <option value="direct">direct · 指名直投，跳过总经理决策</option>
+            <option value="cowork">cowork · 协作空间，不建任务卡</option>
+          </select>
+          <label for="difficulty">难度（按岗位上限分流）</label>
+          <select id="difficulty">
+            <option value="normal" selected>normal · 普通</option>
+            <option value="easy">easy · 简单（先给轻活席位）</option>
+            <option value="hard">hard · 困难（只派给接得住的席位）</option>
+          </select>
+        </div>
+        <div>
+          <label for="project">项目（可选 · 留空由总经理自己判断归属）</label>
+          <select id="project"><option value="">（不指定 · 由总经理判断）</option></select>
+          <label for="addressedTo">交付给 / 参与席位（direct 模式才必填）</label>
+          <select id="addressedTo"><option value="">（由总经理决定）</option></select>
+        </div>
+      </div>
+    </details>
+    <div class="msg" id="request-msg"></div>
+  </form>
+</section>
+
+<div class="pending-banner" id="pending-banner" hidden></div>
+
 <div class="stats" id="stats"></div>
 
-<div class="layout">
-  <div class="col">
-    <section class="card">
-      <h2>提一条需求</h2>
-      <p class="hint">提交后引擎自动连续推进：拆活 → 执行 → 回收 → 验收 → 简报，不需要第二条命令。</p>
-      <div class="gui-bar" id="gui-bar" style="display:none"></div>
-      <form id="request-form">
-        <label for="title">标题</label>
-        <input id="title" placeholder="例如：整理本周简报" autocomplete="off">
-        <label for="text">需求内容</label>
-        <textarea id="text" placeholder="一句话说清要什么">写一份本周工作简报</textarea>
-        <label for="project">项目（规范与经验跟着项目走，建卡必选）</label>
-        <select id="project"><option value="">（未配置项目）</option></select>
-        <label for="mode">交互模式（§6C）</label>
-        <select id="mode">
-          <option value="delegate">delegate · 交给 CEO 统筹拆活</option>
-          <option value="direct">direct · 指名直投，跳过 CEO 决策</option>
-          <option value="cowork">cowork · 协作空间，不建任务卡</option>
-        </select>
-        <label for="difficulty">难度（按岗位上限分流，不填＝normal）</label>
-        <select id="difficulty">
-          <option value="normal" selected>normal · 普通</option>
-          <option value="easy">easy · 简单（先给轻活席位）</option>
-          <option value="hard">hard · 困难（只派给接得住的席位）</option>
-        </select>
-        <label for="addressedTo">交付给 / 参与席位（direct 必填）</label>
-        <select id="addressedTo"><option value="">（由 CEO 决定）</option></select>
-        <div style="margin-top:14px"><button type="submit" id="submit-btn">提交需求</button></div>
-        <div class="msg" id="request-msg"></div>
-      </form>
-    </section>
+<!-- ===== 次要数据：收进标签页 ===== -->
+<div class="tabs" id="main-tabs">
+  <button type="button" class="active" data-tab="work">任务与汇报</button>
+  <button type="button" data-tab="projects">项目</button>
+  <button type="button" data-tab="agents">席位与配额</button>
+  <button type="button" data-tab="collab">协作 / 变更</button>
+  <button type="button" data-tab="ops">观测与运维</button>
+</div>
 
+<!-- 任务与汇报：董事会最常看的 -->
+<div class="tabpane active" data-pane="work">
+  <div class="grid2">
+    <section class="card">
+      <h2>任务卡 · Tasks</h2>
+      <p class="hint">每条任务右边「看结果」= 总经理交回来的汇报与产物。点开就能读它说了什么。</p>
+      <div class="list" id="tasks-list" style="max-height:none"></div>
+    </section>
+    <section class="card">
+      <h2>收件箱 · Inbox</h2>
+      <div class="list" id="inbox-list"></div>
+    </section>
+    <section class="card">
+      <h2>最近唤醒 · Runs</h2>
+      <div class="list" id="runs-list"></div>
+    </section>
+    <section class="card">
+      <h2>运行与审计 · Activity</h2>
+      <p class="hint">选一张卡，把它的状态流转 / Run / 变更 / 决策 / 审批 / 版本 / 现场快照按时间串起来看。</p>
+      <select id="activity-task"><option value="">（选一张卡）</option></select>
+      <div class="list" id="activity-list" style="margin-top:10px"></div>
+    </section>
+    <section class="card" id="decisions-card">
+      <h2>挂起待决策 · Decisions（§6D）</h2>
+      <p class="hint">卡在 <b>awaiting_decision</b> 的任务：挂起期间不烧额度、不被补偿扫描重跑。四种出口任选其一。</p>
+      <div class="list" id="decisions-list"></div>
+      <div class="inline" style="margin-top:8px">
+        <input id="derive-assignee" placeholder="derive 承接人（可空=原承接人）" autocomplete="off">
+      </div>
+      <div class="msg" id="decision-msg"></div>
+    </section>
+    <section class="card" id="approvals-card">
+      <h2>审批 · Approvals</h2>
+      <p class="hint">三道常规门禁（strategy / hiring_budget / review_reject）＋两类按需人审（replan / 循环改版）。
+        看完直接点：通过 / 要求重写 / 驳回。顶部黄条出现时，点它就能跳到这里。</p>
+      <div class="list" id="approvals-list"></div>
+      <div class="msg" id="approval-msg"></div>
+    </section>
+  </div>
+</div>
+
+<!-- 项目 -->
+<div class="tabpane" data-pane="projects">
+  <section class="card">
+    <h2>新建项目</h2>
+    <p class="hint">正常不用你填：总经理认为该单开项目时，会自己递一张「新建项目申请」到「席位与审批」页，
+      项目 id、名称、落盘位置、验收条件、固定规矩都由它填好，你只选通过 / 拒绝，有意见写在申请单下面。
+      下面这张表只是兜底（比如你想先建好项目再下单）。填了落盘目录 = 授权引擎把验收通过的产物复制过去。</p>
+    <details>
+      <summary style="cursor:pointer;font-size:13px;color:#5F5E5A">手工兜底：我指定项目信息（一般用不到）</summary>
+    <form id="project-form" style="margin-top:10px">
+      <label for="p-id">项目 id（会当目录名：小写字母/数字/_/-）</label>
+      <input id="p-id" placeholder="例如：benny-2" autocomplete="off">
+      <label for="p-name">显示名</label>
+      <input id="p-name" placeholder="例如：小王子翻译（第二版）" autocomplete="off">
+      <label for="p-root">落盘目录（绝对路径，可留空；必须是已经存在的文件夹）</label>
+      <input id="p-root" placeholder="例如：D:/Benny/20_项目/小王子翻译" autocomplete="off">
+      <label for="p-sub">交付子目录（相对项目文件夹，可留空）</label>
+      <input id="p-sub" placeholder="例如：04-译稿" autocomplete="off">
+      <div style="margin-top:12px"><button type="submit">创建项目</button></div>
+      <div class="msg" id="project-msg"></div>
+    </form>
+    </details>
+  </section>
+  <section class="card">
+    <h2>项目 · Projects（P7）</h2>
+    <p class="hint">项目是公司里的记忆单元，也是交付物的落点。规范与经验存在公司，产物验收通过后复制到项目自己的文件夹。
+      下单时可以不选项目 —— 总经理会自己判断归属，或复用这里的老项目。</p>
+    <div class="list" id="projects-list" style="max-height:none"></div>
+  </section>
+</div>
+
+<!-- 席位与审批 -->
+<div class="tabpane" data-pane="agents">
+  <div class="grid2">
+    <section class="card">
+      <h2>席位 · Agents</h2>
+      <div class="list" id="agents-list"></div>
+    </section>
+    <section class="card">
+      <h2>配额 · Quotas</h2>
+      <p class="hint">按周期记账：用到 80% 预警一次，到 100% 停派新活；换人 or 重置可恢复。</p>
+      <div class="list" id="quotas-list"></div>
+      <div class="msg" id="quota-msg"></div>
+    </section>
+  </div>
+</div>
+
+<!-- 协作 / 变更 -->
+<div class="tabpane" data-pane="collab">
+  <div class="grid2">
     <section class="card">
       <h2>协作空间 · WorkThread</h2>
       <p class="hint">cowork / meeting 的消息只留痕，<b>不建卡</b>。会议三档：readonly 零唤醒 / rollCall 点 2 位 / full 全员+汇总（要二次确认）。</p>
@@ -154,7 +313,7 @@
         <select id="thread-style">
           <option value="readonly">readonly · 公告，零唤醒</option>
           <option value="rollCall" selected>rollCall · 点名最多 2 位</option>
-          <option value="full">full · 全员议事 + CEO 汇总</option>
+          <option value="full">full · 全员议事 + 总经理汇总</option>
         </select>
         <div style="margin-top:10px"><button type="submit" class="ghost">新建协作空间</button></div>
       </form>
@@ -172,10 +331,9 @@
       <div class="msg" id="thread-msg"></div>
       <div class="list" id="thread-messages" style="margin-top:10px"></div>
     </section>
-
     <section class="card">
       <h2>中途变更 · ChangeRequest（§6D 最小档）</h2>
-      <p class="hint">对一张未完成的任务卡「刹车」：唤醒 CEO → 派生新卡 → 原卡 cancelled，历史仍可查。</p>
+      <p class="hint">对一张未完成的任务卡「刹车」：唤醒总经理→ 派生新卡 → 原卡 cancelled，历史仍可查。</p>
       <form id="change-form">
         <label for="cr-task">目标任务卡</label>
         <select id="cr-task"><option value="">（暂无可变更的卡）</option></select>
@@ -192,7 +350,6 @@
         <div class="msg" id="change-msg"></div>
       </form>
     </section>
-
     <section class="card">
       <h2>清理扫描 · Cleanup（只出报告）</h2>
       <p class="hint">宁可不删，也不误删：只扫描、只写报告，<b>deletedCount 恒为 0</b>。
@@ -205,99 +362,51 @@
       <div class="msg" id="cleanup-msg"></div>
     </section>
   </div>
+</div>
 
-  <div class="col">
+<!-- 观测与运维 -->
+<div class="tabpane" data-pane="ops">
+  <div class="grid2">
     <section class="card">
-      <h2>项目 · Projects（P7）</h2>
-      <p class="hint">项目是公司里的记忆单元，也是交付物的落点。规范与经验存在公司，产物验收通过后复制到项目自己的文件夹。</p>
-      <div class="list" id="projects-list"></div>
+      <h2>试运行观测 · Observe（P5）</h2>
+      <p class="hint">五项指标 + 四项结论 + 脏状态，全部从控制面自己的记录算出来。注意：<b>压缩跑不能代替真实 72 小时</b>，
+        门禁结论只认 <code>npm run soak:real</code> 出的报告。</p>
+      <div class="list" id="observe-metrics"></div>
+      <div class="list" id="observe-findings" style="margin-top:10px"></div>
+      <div class="list" id="observe-dirty" style="margin-top:10px"></div>
+      <div style="margin-top:10px">
+        <a href="/api/observe/report" target="_blank" rel="noopener">查看观察记录（Markdown，新窗口打开）</a>
+      </div>
+      <label for="tune-key" style="margin-top:16px">调参（改完立刻生效，旧值新值都进审计）</label>
+      <select id="tune-key"></select>
+      <p class="hint" id="tune-desc" style="margin:6px 0 0"></p>
+      <div class="inline" style="margin-top:8px">
+        <input id="tune-value" placeholder="新值（数字，或 true / false）" autocomplete="off">
+        <button type="button" id="tune-submit" style="flex:0 0 auto">提交</button>
+      </div>
+      <input id="tune-reason" placeholder="为什么调（会写进审计，别留空）" autocomplete="off" style="margin-top:8px">
+      <div class="msg" id="tune-msg"></div>
+      <div class="list" id="tune-history" style="margin-top:10px"></div>
     </section>
-    <div class="grid2">
-      <section class="card">
-        <h2>任务卡 · Tasks</h2>
-        <div class="list" id="tasks-list"></div>
-      </section>
-      <section class="card">
-        <h2>席位 · Agents</h2>
-        <div class="list" id="agents-list"></div>
-      </section>
-      <section class="card">
-        <h2>审批 · Approvals</h2>
-        <p class="hint">三道常规门禁（strategy / hiring_budget / review_reject）＋两类按需人审（replan / 循环改版）。
-          看完直接点：通过 / 要求重写 / 驳回。</p>
-        <div class="list" id="approvals-list"></div>
-        <div class="msg" id="approval-msg"></div>
-      </section>
-      <section class="card">
-        <h2>挂起待决策 · Decisions（§6D）</h2>
-        <p class="hint">卡在 <b>awaiting_decision</b> 的任务：挂起期间不烧额度、不被补偿扫描重跑。四种出口任选其一。</p>
-        <div class="list" id="decisions-list"></div>
-        <div class="inline" style="margin-top:8px">
-          <input id="derive-assignee" placeholder="derive 承接人（可空=原承接人）" autocomplete="off">
-        </div>
-        <div class="msg" id="decision-msg"></div>
-      </section>
-      <section class="card">
-        <h2>配额 · Quotas</h2>
-        <p class="hint">按周期记账：用到 80% 预警一次，到 100% 停派新活；换人 or 重置可恢复。</p>
-        <div class="list" id="quotas-list"></div>
-        <div class="msg" id="quota-msg"></div>
-      </section>
-      <section class="card">
-        <h2>运行与审计 · Activity</h2>
-        <p class="hint">选一张卡，把它的状态流转 / Run / 变更 / 决策 / 审批 / 版本 / 现场快照按时间串起来看。</p>
-        <select id="activity-task"><option value="">（选一张卡）</option></select>
-        <div class="list" id="activity-list" style="margin-top:10px"></div>
-      </section>
-      <section class="card">
-        <h2>试运行观测 · Observe（P5）</h2>
-        <p class="hint">五项指标 + 四项结论 + 脏状态，全部从控制面自己的记录算出来。注意：<b>压缩跑不能代替真实 72 小时</b>，
-          门禁结论只认 <code>npm run soak:real</code> 出的报告。</p>
-        <div class="list" id="observe-metrics"></div>
-        <div class="list" id="observe-findings" style="margin-top:10px"></div>
-        <div class="list" id="observe-dirty" style="margin-top:10px"></div>
-        <div style="margin-top:10px">
-          <a href="/api/observe/report" target="_blank" rel="noopener">查看观察记录（Markdown，新窗口打开）</a>
-        </div>
-        <label for="tune-key" style="margin-top:16px">调参（改完立刻生效，旧值新值都进审计）</label>
-        <select id="tune-key"></select>
-        <p class="hint" id="tune-desc" style="margin:6px 0 0"></p>
-        <div class="inline" style="margin-top:8px">
-          <input id="tune-value" placeholder="新值（数字，或 true / false）" autocomplete="off">
-          <button type="button" id="tune-submit" style="flex:0 0 auto">提交</button>
-        </div>
-        <input id="tune-reason" placeholder="为什么调（会写进审计，别留空）" autocomplete="off" style="margin-top:8px">
-        <div class="msg" id="tune-msg"></div>
-        <div class="list" id="tune-history" style="margin-top:10px"></div>
-      </section>
-      <section class="card">
-        <h2>收件箱 · Inbox</h2>
-        <div class="list" id="inbox-list"></div>
-      </section>
-      <section class="card">
-        <h2>最近唤醒 · Runs</h2>
-        <div class="list" id="runs-list"></div>
-      </section>
-      <section class="card">
-        <h2>审计 · Audit</h2>
-        <div class="list" id="audit-list"></div>
-      </section>
-      <section class="card">
-        <h2>Bridge · 拉模式（P2）</h2>
-        <p class="hint">默认 inline 单机直调；切到 bridge 后任务排队，等本机 bridge 来领。本地没服务器也能跑。</p>
-        <div class="list" id="bridge-list"></div>
-      </section>
-      <section class="card">
-        <h2>循环任务 · RecurringJobs（P2）</h2>
-        <div class="list" id="recurring-list"></div>
-        <div class="inline" style="margin-top:8px">
-          <input id="job-id" placeholder="jobId（留空用第一个）" autocomplete="off">
-          <button type="button" id="job-fire" style="flex:0 0 auto">触发一轮</button>
-        </div>
-        <div style="margin-top:8px"><button type="button" class="ghost" id="job-register">注册示例巡检任务</button></div>
-        <div class="msg" id="job-msg"></div>
-      </section>
-    </div>
+    <section class="card">
+      <h2>审计 · Audit</h2>
+      <div class="list" id="audit-list"></div>
+    </section>
+    <section class="card">
+      <h2>Bridge · 拉模式（P2）</h2>
+      <p class="hint">默认 inline 单机直调；切到 bridge 后任务排队，等本机 bridge 来领。本地没服务器也能跑。</p>
+      <div class="list" id="bridge-list"></div>
+    </section>
+    <section class="card">
+      <h2>循环任务 · RecurringJobs（P2）</h2>
+      <div class="list" id="recurring-list"></div>
+      <div class="inline" style="margin-top:8px">
+        <input id="job-id" placeholder="jobId（留空用第一个）" autocomplete="off">
+        <button type="button" id="job-fire" style="flex:0 0 auto">触发一轮</button>
+      </div>
+      <div style="margin-top:8px"><button type="button" class="ghost" id="job-register">注册示例巡检任务（演示用，会真实建卡）</button></div>
+      <div class="msg" id="job-msg"></div>
+    </section>
   </div>
 </div>
 
@@ -345,12 +454,39 @@
   };
   let selectedThread = '';
   let metaApplied = false;
+  let hashScrolled = false;
   let resultTaskId = '';
 
   function say(id, ok, text) {
     const el = $(id);
     el.className = 'msg ' + (ok ? 'ok' : 'err');
     el.textContent = text;
+  }
+  // 内部 rrule 董事会不会读，翻成人话；翻不出来就原样给，别假装看懂了。
+  function rruleText(rrule) {
+    if (!rrule) return '（未设节奏）';
+    const p = Object.fromEntries(String(rrule).split(';').map((kv) => kv.split('=')));
+    const hh = p.BYHOUR !== undefined ? String(p.BYHOUR).padStart(2, '0') : null;
+    const mm = p.BYMINUTE !== undefined ? String(p.BYMINUTE).padStart(2, '0') : '00';
+    const clock = hh ? ' ' + hh + ':' + mm : '';
+    const n = Number(p.INTERVAL || 1);
+    const DAY = { MO: '一', TU: '二', WE: '三', TH: '四', FR: '五', SA: '六', SU: '日' };
+    if (p.FREQ === 'HOURLY') return n > 1 ? '每 ' + n + ' 小时' : '每小时';
+    if (p.FREQ === 'DAILY') return '每天' + clock;
+    if (p.FREQ === 'WEEKLY') {
+      const d = String(p.BYDAY || '').split(',').filter(Boolean).map((x) => DAY[x] || x).join('、');
+      return (n > 1 ? '每 ' + n + ' 周' : '每周') + (d ? d : '') + clock;
+    }
+    if (p.FREQ === 'MONTHLY') return (n > 1 ? '每 ' + n + ' 个月' : '每月') + (p.BYMONTHDAY ? ' ' + p.BYMONTHDAY + ' 号' : '') + clock;
+    return String(rrule);
+  }
+  // ISO 时间对人不友好（还带 Z），只显示到分钟、按本机时区。
+  function fmtAt(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    const p = (x) => String(x).padStart(2, '0');
+    return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
   }
   function setSse(on) {
     $('sse-dot').className = 'dot ' + (on ? 'on' : 'off');
@@ -445,8 +581,7 @@
   function renderStats() {
     const d = state.dashboard;
     const t = d.tasks || {};
-    const pendingAp = state.approvals.filter((a) => a.status === 'pending').length;
-    const stuck = state.tasks.filter((x) => x.status === 'awaiting_decision').length;
+    const { approvals: pendingAp, decisions: stuck } = pendingBoardWork();
     const tight = (state.quotas || []).filter((q) => (q.quotaUsed || 0) >= (q.quotaLimit || 1)).length;
     const items = [
       ['任务卡', Object.values(t).reduce((a, b) => a + b, 0)],
@@ -454,14 +589,16 @@
       ['进行中', (t.in_progress || 0) + (t.in_review || 0)],
       ['阻塞', t.blocked || 0],
       ['已取消', t.cancelled || 0],
-      ['待我拍板', pendingAp],
-      ['挂起待决策', stuck],
+      ['待我拍板', pendingAp.length, 'approvals'],
+      ['挂起待决策', stuck.length, 'decisions'],
       ['配额触顶', tight],
       ['唤醒次数', d.runs || 0],
       ['协作空间', d.threads || 0],
     ];
-    $('stats').innerHTML = items.map(([k, v]) =>
-      '<div class="stat"><b>' + esc(v) + '</b><span>' + esc(k) + '</span></div>').join('');
+    $('stats').innerHTML = items.map(([k, v, jump]) =>
+      '<div class="stat' + (jump && v > 0 ? ' action' : '') + '"' +
+      (jump && v > 0 ? ' data-jump="' + jump + '" role="button" tabindex="0" title="点一下去处理"' : '') +
+      '><b>' + esc(v) + '</b><span>' + esc(k) + '</span></div>').join('');
   }
 
   function difficultyTag(d) {
@@ -470,17 +607,31 @@
     return '<span class="tag">' + label + '</span>';
   }
 
+  // 总经理拆解时留的一句话：直接挂在卡上，省得每次去审计里翻。
+  function ceoNoteOf(t) {
+    try {
+      const o = JSON.parse(t.originJson || 'null');
+      return o && o.ceoNote ? String(o.ceoNote) : '';
+    } catch { return ''; }
+  }
+
   function renderTasks() {
     const rows = [...state.tasks].reverse();
     $('tasks-list').innerHTML = rows.length ?
       '<table><thead><tr><th>卡号</th><th>标题</th><th>难度</th><th>状态</th><th>交付给</th><th>模式</th><th></th></tr></thead><tbody>' +
-      rows.map((t) => '<tr><td>' + esc(short(t.taskId)) + '</td><td>' + esc(t.title) +
-        '</td><td>' + difficultyTag(t.difficulty) + '</td><td>' + statusPill(t.status) + '</td><td>' + esc(t.assignee) +
+      rows.map((t) => {
+        const note = ceoNoteOf(t);
+        return '<tr><td>' + esc(short(t.taskId)) + '</td><td>' + esc(t.title) +
+        (note ? '<div class="meta" style="font-size:11px">总经理：' + esc(note) + '</div>' : '') +
+        '</td><td>' + difficultyTag(t.difficulty) + '</td><td>' + statusPill(t.status) +
+        (t.holdReason ? '<div class="meta" style="font-size:11px">' + esc(t.holdReason) + '</div>' : '') +
+        '</td><td>' + esc(t.assignee) +
         '</td><td><span class="tag">' + esc(t.mode) + '</span></td>' +
         '<td style="white-space:nowrap"><button type="button" class="ghost" data-result="' + esc(t.taskId) + '">看结果</button>' +
         ((t.status === 'done' || t.status === 'cancelled') ? ''
           : ' <button type="button" class="danger" data-cancel="' + esc(t.taskId) + '">取消</button>') +
-        '</td></tr>').join('') +
+        '</td></tr>';
+      }).join('') +
       '</tbody></table>' : '<div class="empty">还没有任务卡，左边提一条需求试试。</div>';
   }
 
@@ -542,18 +693,83 @@
     }
   }
 
+  // 席位 = 岗位；担任者 = 谁在干。两件事分行写，避免把 agent 的名字当成席位名。
+  const HOLDER_KIND_LABEL = {
+    'external-agent': '外部 agent', 'dsh-agent': '外部 agent',
+    'gui-app': '桌面应用', 'process': '本地脚本',
+  };
   function renderAgents() {
-    $('agents-list').innerHTML = state.agents.length ? state.agents.map((a) =>
-      '<div class="row"><b>' + esc(a.displayName) + '</b> <span class="tag">' + esc(a.agentId) + '</span> ' +
-      (a.isCEO ? '<span class="tag">CEO</span>' : '') +
-      '<div class="meta">' + esc(a.capabilities.join(' / ')) + ' · ' + esc(a.status) +
-      ' · 额度 ' + esc(a.quotaUsed) + '/' + esc(a.quotaLimit) +
-      ' · 最多接 ' + esc(a.maxDifficulty || 'hard') + '</div></div>').join('')
+    $('agents-list').innerHTML = state.agents.length ? state.agents.map((a) => {
+      const post = a.postTitle || a.displayName || a.agentId;
+      const holder = a.holderName || '（未登记担任者）';
+      const kind = a.holderKind ? '（' + (HOLDER_KIND_LABEL[a.holderKind] || a.holderKind) + '）' : '';
+      // 同一个 agent 兼任多岗时标出来——不然会以为多买了人。
+      const multi = a.holderPostCount > 1 ? ' <span class="tag">同一 agent 兼任 ' + a.holderPostCount + ' 岗</span>' : '';
+      return '<div class="row"><b>' + esc(post) + '</b> <span class="tag">岗位</span> ' +
+        (a.isCEO ? '<span class="tag">负责人</span>' : '') + multi +
+        '<div class="meta">担任：' + esc(holder) + esc(kind) + '</div>' +
+        '<div class="meta">' + esc(a.capabilities.join(' / ')) + ' · ' + esc(a.status) +
+        ' · 额度 ' + esc(a.quotaUsed) + '/' + esc(a.quotaLimit) +
+        ' · 最多接 ' + esc(a.maxDifficulty || 'hard') + ' · 席位 id ' + esc(a.agentId) + '</div></div>';
+    }).join('')
       : '<div class="empty">没有席位。</div>';
   }
 
   function renderSimple(id, items, emptyText) {
     $(id).innerHTML = items.length ? items.map((x) => x).join('') : '<div class="empty">' + esc(emptyText) + '</div>';
+  }
+
+  // 新建项目申请单：CEO 把项目信息与规范草案都填好，董事会只看 + 通过/拒绝 + 意见。
+  // 目的：人不用再去表单里填 id、路径、验收条件——那是 CEO 的活。
+  function projectApprovalRow(a, p) {
+    const where = p.rootDir ? (p.rootDir + (p.deliverSubdir ? '/' + p.deliverSubdir : '')) : '不落盘（产物只留在公司）';
+    const lines = (arr) => (Array.isArray(arr) && arr.length
+      ? arr.map((x) => '· ' + esc(x)).join('<br>') : '（未写）');
+    return '<div class="row"><b>新建项目申请：' + esc(p.displayName || p.id || a.approvalId) + '</b> ' +
+      '<span class="tag">总经理发起</span><span class="tag">待董事会批</span>' +
+      '<div class="meta">项目 id：' + esc(p.id || '（未写）') + '</div>' +
+      '<div class="meta">落盘位置：' + esc(where) + '</div>' +
+      '<div class="meta">为什么建：' + esc(p.reason || '（未写理由）') + '</div>' +
+      '<div class="meta">验收条件：<br>' + lines(p.acceptance) + '</div>' +
+      '<div class="meta">固定规矩：<br>' + lines(p.rules) + '</div>' +
+      '<textarea data-comment="' + esc(a.approvalId) + '" rows="2" ' +
+        'style="width:100%;margin-top:6px;padding:6px;border:1px solid #B4B2A9;border-radius:6px;font:inherit" ' +
+        'placeholder="意见（可留空；拒绝时写清原因）"></textarea>' +
+      '<div class="btnrow">' +
+      '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过并创建</button>' +
+      '<button type="button" class="danger" data-approve="rejected" data-id="' + esc(a.approvalId) + '">拒绝</button>' +
+      '</div></div>';
+  }
+
+  // 循环任务申请：董事会要一眼看清「多久一次、谁干、归哪儿、烧多少」，否则不敢批。
+  function recurringApprovalRow(a, p) {
+    const job = p.job || {};
+    const tpl = job.taskTemplate || {};
+    const lines = (arr) => (Array.isArray(arr) && arr.length
+      ? arr.map((x) => '· ' + esc(x)).join('<br>') : '（未写）');
+    const seatName = (id) => {
+      const s = (state.agents || []).find((x) => x.agentId === id);
+      return s ? (s.postTitle || id) + '（担任：' + (s.holderName || id) + '）' : (id || '（未写）');
+    };
+    return '<div class="row"><b>循环任务申请：' + esc(job.title || a.approvalId) + '</b> ' +
+      '<span class="tag">总经理发起</span><span class="tag">长期反复执行</span>' +
+      '<div class="meta"><b>节奏：' + esc(p.rruleText || job.trigger?.rrule || '（未写）') + '</b>' +
+        '　每次开始时间由系统按此时区算（' + esc(job.trigger?.timezone || 'Asia/Shanghai') + '）</div>' +
+      '<div class="meta">每轮干什么：' + esc(String(tpl.instructions || '（未写）').slice(0, 500)) + '</div>' +
+      '<div class="meta">每轮怎么算干完：<br>' + lines(tpl.acceptance) + '</div>' +
+      '<div class="meta">谁干：' + esc(seatName(job.assignee)) + '</div>' +
+      '<div class="meta">归属项目：' + esc(job.project || '不归属任何项目（产物只留在公司）') + '</div>' +
+      '<div class="meta">消耗：每轮最多 2 次唤醒；连续失败 3 轮自动暂停等你处理；不会自动恢复。</div>' +
+      '<div class="meta">有效期：到 ' + esc(String((job.termination || {}).validUntil || '').slice(0, 10)) +
+        ' 自动暂停' + ((job.termination || {}).maxCycles ? '；最多 ' + esc(job.termination.maxCycles) + ' 轮' : '') +
+        '，要续再点一次。</div>' +
+      '<textarea data-comment="' + esc(a.approvalId) + '" rows="2" ' +
+        'style="width:100%;margin-top:6px;padding:6px;border:1px solid #B4B2A9;border-radius:6px;font:inherit" ' +
+        'placeholder="意见（可留空；拒绝时写清原因）"></textarea>' +
+      '<div class="btnrow">' +
+      '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过并开始排班</button>' +
+      '<button type="button" class="danger" data-approve="rejected" data-id="' + esc(a.approvalId) + '">拒绝</button>' +
+      '</div></div>';
   }
 
   // P4：审批卡分「待办」和「已处理」两段：待办给按钮，已处理只留结论。
@@ -563,6 +779,8 @@
     const rows = [];
     for (const a of pend) {
       const p = (a.request && a.request.payload) || {};
+      if (a.kind === 'project_create') { rows.push(projectApprovalRow(a, p.project || {})); continue; }
+      if (a.kind === 'recurring_create') { rows.push(recurringApprovalRow(a, p)); continue; }
       rows.push('<div class="row"><b>' + esc(a.request?.title || a.approvalId) + '</b> ' +
         '<span class="tag">' + esc(a.kind) + '</span>' +
         '<div class="meta">' + esc(a.request?.body || '') + '</div>' +
@@ -699,7 +917,7 @@
         '<div class="meta">' + esc(node.conclusion) + '</div></div>';
     };
     $('observe-findings').innerHTML = [
-      card('直投是否绕开 CEO', f.directBypassesCeo),
+      card('直投是否绕开总经理', f.directBypassesCeo),
       card('cowork 是否误建卡', f.coworkCreatesTask),
       card('挂起是否被误重跑', f.awaitingRerun),
       card('决策超时率', f.decisionTimeout),
@@ -737,6 +955,7 @@
   }
 
   function render() {
+    renderPendingBanner();
     renderStats();
     renderProjects();
     renderTasks();
@@ -780,15 +999,23 @@
       ((b.bridges || []).length ? '' : '<div class="empty">还没有 bridge 上报心跳（inline 模式下正常）。</div>');
 
     $('recurring-list').innerHTML = state.recurring.length
-      ? state.recurring.map((j) => '<div class="row"><b>' + esc(j.jobId) + '</b> ' + statusPill(j.status) +
-        '<div class="meta">v' + esc(j.jobVersion) + ' · 第 ' + esc(j.lastCycleNo ?? 0) + ' 轮 · ' +
-        esc(j.misfirePolicy) + '/' + esc(j.overlapPolicy) + ' · 下次 ' + esc(j.nextFireAt || '—') + '</div></div>').join('')
-      : '<div class="empty">还没有循环任务，可点下方「注册示例巡检任务」。</div>';
+      ? state.recurring.map((j) => {
+        const tpl = j.taskTemplate || {};
+        const seat = (state.agents || []).find((x) => x.agentId === j.assignee);
+        const who = seat ? (seat.postTitle || j.assignee) + '（' + (seat.holderName || j.assignee) + '）' : (j.assignee || '（未写）');
+        return '<div class="row"><b>' + esc(j.title || j.jobId) + '</b> ' + statusPill(j.status) +
+          (j.status === 'paused' ? '<span class="tag">已自动暂停，需人工恢复</span>' : '') +
+          '<div class="meta"><b>节奏：' + esc(rruleText(j.trigger && j.trigger.rrule)) + '</b>' +
+            ' · 下次 ' + esc(fmtAt(j.nextFireAt)) + ' · 已跑 ' + esc(j.lastCycleNo ?? 0) + ' 轮</div>' +
+          '<div class="meta">谁干：' + esc(who) + ' · 归属项目：' + esc(j.project || '不归属（产物只留公司）') + '</div>' +
+          '<div class="meta">每轮：' + esc(String(tpl.instructions || '').slice(0, 160)) + '</div></div>';
+      }).join('')
+      : '<div class="empty">还没有循环任务。长期要反复做的活（体检 / 巡检 / 清理），总经理会在拆活时提排班，你在审批区点通过才会开始。</div>';
 
     // 候选席位与变更目标下拉（保留当前选中值）。
     setOptions('addressedTo', state.agents.map((a) =>
       '<option value="' + esc(a.agentId) + '">' + esc(a.displayName) + '（' + esc(a.agentId) + '）' +
-      (a.isCEO ? ' · CEO' : '') + '</option>').join(''), '（由 CEO 决定）');
+      (a.isCEO? ' · 总经理' : '') + '</option>').join(''), '（由总经理决定）');
     setOptions('cr-task', state.tasks.filter((t) => t.status !== 'cancelled').map((t) =>
       '<option value="' + esc(t.taskId) + '">' + esc(short(t.taskId)) + ' · ' + esc(t.title) +
       ' · ' + esc(t.status) + '</option>').join(''), '（暂无可变更的卡）');
@@ -809,6 +1036,59 @@
     return out;
   }
 
+  // 审批单申请内容：新接口给 requestJson 字符串，老数据可能已经是对象。两种都认。
+  function parseRequest(a) {
+    if (!a) return null;
+    if (a.request && typeof a.request === 'object') return a.request;
+    if (typeof a.requestJson === 'string' && a.requestJson) {
+      try { return JSON.parse(a.requestJson); } catch { return null; }
+    }
+    return null;
+  }
+
+  // 董事会待办：审批单 + 挂起待决策的卡，两类都必须人拍，不能自己往下走。
+  // 做成页面顶部黄条：不管当前在哪个标签页都看得见 —— 这就是「通知渠道」。
+  function pendingBoardWork() {
+    const approvals = state.approvals.filter((a) => a.status === 'pending');
+    const decisions = state.tasks.filter((t) => t.status === 'awaiting_decision');
+    return { approvals, decisions };
+  }
+
+  function renderPendingBanner() {
+    const el = $('pending-banner');
+    if (!el) return;
+    const { approvals, decisions } = pendingBoardWork();
+    const total = approvals.length + decisions.length;
+    // 待办数必须同时出现在三处，董事会才不可能错过：
+    // 页面顶部黄条（任何标签页都看得见）、「任务与汇报」标签角标、浏览器标签页标题。
+    const workTab = document.querySelector('#main-tabs button[data-tab="work"]');
+    if (workTab) workTab.textContent = total ? `任务与汇报 · ${total} 待办` : '任务与汇报';
+    document.title = (total ? `（${total} 项待你拍板）` : '') + 'AICompany · Web Board';
+    const parts = [];
+    if (approvals.length) parts.push(approvals.length + ' 项审批等你拍板');
+    if (decisions.length) parts.push(decisions.length + ' 张卡挂起等你决策');
+    if (!parts.length) { el.hidden = true; el.innerHTML = ''; return; }
+    el.hidden = false;
+    el.innerHTML = '<div><b>⏳ ' + esc(parts.join('，')) + '</b>' +
+      '　放着不处理，这单会一直停在这儿，不会自己往下走。</div>' +
+      '<button type="button" id="pending-jump">去拍板 →</button>';
+    $('pending-jump').addEventListener('click', () => jumpToPending());
+  }
+
+  // 跳到「能拍板的地方」：任务页的审批卡 + 待决策卡，滚过去并闪一下边框。
+  function jumpToPending() {
+    activateTab('work');
+    const { approvals } = pendingBoardWork();
+    const target = approvals.length ? $('approvals-card') : $('decisions-card');
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.remove('flash');
+    // 重新触发动画：同一张卡连点两次也要有反馈。
+    void target.offsetWidth;
+    target.classList.add('flash');
+    setTimeout(() => target.classList.remove('flash'), 2000);
+  }
+
   async function refresh() {
     const [agents, tasks, runs, threads, approvals, audit, inbox, dashboard, bridge, recurring, quotas, changeRequests, observe, tuning, meta, gui, projects] =
       await Promise.all([
@@ -822,7 +1102,11 @@
         api('/api/projects').catch(() => []),
       ]);
     state = {
-      agents, tasks, runs, threads, approvals, audit, dashboard, bridge, recurring,
+      agents, tasks, runs, threads,
+      // 审批单的申请内容在接口里是 requestJson 字符串；界面一律用 a.request。
+      // 不在这层拆开，审批卡会渲染成一张「只有按钮、没有内容」的空单子（董事会根本没法拍）。
+      approvals: (approvals || []).map((a) => ({ ...a, request: parseRequest(a) })),
+      audit, dashboard, bridge, recurring,
       quotas, changeRequests,
       observe, tuning, meta, gui, projects,
       projectMemory: await loadProjectMemory(projects),
@@ -830,6 +1114,11 @@
     };
     if (!metaApplied) applyMetaDefaults();
     render();
+    // 支持深链：#approvals-card 这类锚点要等数据渲染出来才存在，第一次渲染后再滚过去。
+    if (!hashScrolled && location.hash) {
+      const anchor = document.querySelector(location.hash);
+      if (anchor) { anchor.scrollIntoView({ block: 'start' }); hashScrolled = true; }
+    }
     await loadThreadMessages();
   }
 
@@ -840,15 +1129,17 @@
     metaApplied = true;
     const mode = meta.defaultMode || 'delegate';
     if ($('mode').querySelector('option[value="' + mode + '"]')) $('mode').value = mode;
-    const execSeats = (meta.seats || []).filter((s) => !s.isCEO && (s.capabilities || []).includes('execute'));
-    // P7：项目下拉。只有一个项目时直接选上，但字面留着——让人看得见这次归哪个项目。
+    const execSeats = (meta.seats || []).filter((s) => !s.isCEO&& (s.capabilities || []).includes('execute'));
+    // P7：项目下拉可选。第一项永远是「不指定」，由总经理自己判断归属；
+    // 只有一个项目时也**不**默认选，避免把「可选」又变成事实上的必选。
     const projects = meta.projects || [];
-    setOptions('project', projects.map((p) => '<option value="' + esc(p.id) + '">' +
-      esc(p.displayName) + '（' + esc(p.id) + '）' +
-      (p.memoryCount ? ' · 已记 ' + p.memoryCount + ' 条经验' : ' · 还没有经验') +
-      (p.specExists ? '' : ' · 缺规范') + '</option>').join(''),
-    projects.length ? '（必选一个项目）' : '（本公司未配置项目）');
-    if (projects.length === 1) $('project').value = projects[0].id;
+    setOptions('project',
+      '<option value="">（不指定 · 由总经理自己判断）</option>' +
+      projects.map((p) => '<option value="' + esc(p.id) + '">' +
+        esc(p.displayName) + '（' + esc(p.id) + '）' +
+        (p.memoryCount ? ' · 已记 ' + p.memoryCount + ' 条经验' : ' · 还没有经验') +
+        (p.specExists ? '' : ' · 缺规范') + '</option>').join(''),
+    projects.length ? '（可选 · 留空则总经理判断）' : '（本公司未配置项目）');
     if (mode === 'direct' && execSeats.length === 1) {
       const only = execSeats[0].agentId;
       if ($('addressedTo').querySelector('option[value="' + only + '"]')) $('addressedTo').value = only;
@@ -937,6 +1228,26 @@
   });
   $('thread-select').addEventListener('change', loadThreadMessages);
 
+  // 新建项目：董事会点一下就有渠道，不用再手改 YAML。
+  $('project-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const id = $('p-id').value.trim();
+      if (!id) throw new Error('项目 id 必填（会当目录名用）');
+      const r = await post('/api/projects', {
+        id,
+        displayName: $('p-name').value.trim() || id,
+        rootDir: $('p-root').value.trim() || null,
+        deliverSubdir: $('p-sub').value.trim() || null,
+        actor: 'board',
+      });
+      say('project-msg', true, '项目已建：' + r.project.id +
+        (r.specCreated ? '（写了一份起步规范，去项目文件夹里改它）' : '（规范原本就有，没覆盖）'));
+      e.target.reset();
+      await refresh();
+    } catch (err) { say('project-msg', false, err.message); }
+  });
+
   $('request-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = $('submit-btn'); btn.disabled = true;
@@ -944,12 +1255,9 @@
       const mode = $('mode').value;
       const body = { title: $('title').value.trim() || undefined, text: $('text').value.trim() || '新需求', mode };
       if (mode !== 'cowork') body.difficulty = $('difficulty').value;
-      // P7：建卡必选项目。人在这一屏就能看见产物会归到哪个项目，不靠引擎猜。
+      // P7：项目可选。留空就不传 project，由总经理自己判断是新项目 / 老项目 / 一次性任务。
       if (mode !== 'cowork') {
         const project = $('project') ? $('project').value : '';
-        if (!project && (state.meta?.projects || []).length) {
-          throw new Error('先在「项目」里选一个：产物归到项目，经验也记进这个项目。');
-        }
         if (project) body.project = project;
       }
       const target = $('addressedTo').value;
@@ -1065,7 +1373,7 @@
         kind, severity: kind === 'blocked' ? 'advisory' : 'needsDecision',
         reason, doneSoFar: { note: 'Web Board 手工上报' },
       });
-      say('change-msg', true, r.inserted ? '变更请求已上报，CEO 已唤醒并派生新卡。' : '重复的变更请求，未重复处理。');
+      say('change-msg', true, r.inserted ? '变更请求已上报，总经理已唤醒并派生新卡。' : '重复的变更请求，未重复处理。');
       $('cr-reason').value = '';
       await refresh();
     } catch (err) { say('change-msg', false, err.message); }
@@ -1116,12 +1424,16 @@
     btn.disabled = true;
     try {
       const decision = btn.dataset.approve;
+      // 意见就在审批卡里的输入框，不再弹窗逼人再填一次。
+      const box = document.querySelector('textarea[data-comment="' + btn.dataset.id + '"]');
+      const comment = box && box.value.trim() ? box.value.trim() : null;
       const r = await post('/api/approvals/' + encodeURIComponent(btn.dataset.id) + '/decision', {
         decision, decidedBy: 'board',
-        reason: decision === 'approved' ? null : (window.prompt('写一句理由（可留空）：') || null),
+        reason: comment,
       });
-      say('approval-msg', true, '审批已处理：' + decision +
-        (r.applied === false ? '（未改动任务，仅记录结论）' : '') +
+      say('approval-msg', !r.error, '审批已处理：' + decision +
+        (r.error ? ' · ' + r.error : '') +
+        (!r.error && r.applied === false ? '（未改动任务，仅记录结论）' : '') +
         (r.action ? ' · ' + r.action : ''));
       await refresh();
     } catch (err) { say('approval-msg', false, err.message); }
@@ -1188,8 +1500,37 @@
     es.onmessage = () => { refresh().catch(() => {}); };
   }
 
+  // 标签页切换：只切显示，不动数据；数据由 refresh() 统一刷新，藏在后台的 pane 也会更新。
+  function activateTab(name) {
+    const tabs = document.querySelectorAll('#main-tabs button[data-tab]');
+    const panes = document.querySelectorAll('.tabpane[data-pane]');
+    for (const b of tabs) b.classList.toggle('active', b.getAttribute('data-tab') === name);
+    for (const p of panes) p.classList.toggle('active', p.getAttribute('data-pane') === name);
+  }
+
+  (function initTabs() {
+    const tabs = document.querySelectorAll('#main-tabs button[data-tab]');
+    for (const btn of tabs) {
+      btn.addEventListener('click', () => activateTab(btn.getAttribute('data-tab')));
+    }
+  })();
+
+  // 统计砖上的「待我拍板 / 挂起待决策」是入口，不是摆设：点一下直接跳到能拍的地方。
+  $('stats').addEventListener('click', (e) => {
+    const el = e.target.closest('[data-jump]');
+    if (el) jumpToPending();
+  });
+  $('stats').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const el = e.target.closest('[data-jump]');
+    if (!el) return;
+    e.preventDefault();
+    jumpToPending();
+  });
+
   refresh().catch((e) => say('request-msg', false, '初始化失败：' + e.message));
-  connectSse();
+  // 长连接会让无头浏览器 / 截图工具以为页面永远没加载完；?no-sse 只跳过推送，刷新照旧。
+  if (!new URLSearchParams(location.search).has('no-sse')) connectSse();
   setInterval(() => refresh().catch(() => {}), 10000);
 })();
 </script>

@@ -19,6 +19,8 @@ export const SCHEMA_IDS = {
 export const INTERACTION_MODES = ['delegate', 'direct', 'cowork', 'meeting'];
 export const DECISION_OUTCOMES = ['resume', 'redo', 'derive', 'cancel'];
 export const CEO_OUTPUT_KINDS = ['task-create', 'review', 'escalation', 'decision'];
+// 循环任务的类别（协议写死的四个）：简报 / 巡检 / 清理 / 维护。
+export const RECURRING_KINDS = ['brief', 'inspection', 'cleanup', 'maintenance'];
 
 export const TASK_STATUSES = [
   'backlog', 'todo', 'in_progress', 'awaiting_decision',
@@ -27,10 +29,12 @@ export const TASK_STATUSES = [
 export const COMPENSATION_SCAN_WHITELIST = ['todo', 'in_progress'];
 export const COMPLETION_STATUSES = ['success', 'failed', 'blocked'];
 
-export const ADAPTER_TYPES = ['process', 'http', 'cli-acp', 'gui-template', 'polling'];
+// webhook-exec：可选的外部执行 adapter，通过 HTTP 把任务递给一个带工具的远程 agent。
+// 只是注册一个可用的类型名，不配就不会启用，对核心零影响。
+export const ADAPTER_TYPES = ['process', 'http', 'cli-acp', 'gui-template', 'polling', 'webhook-exec'];
 export const CAPABILITIES = ['plan', 'delegate', 'review', 'execute', 'escalate', 'readOnly'];
 export const CLIENT_TYPES = ['web', 'im', 'cli', 'noop'];
-export const NOTIFIER_TYPES = ['web', 'im', 'webhook', 'stdout', 'noop'];
+export const NOTIFIER_TYPES = ['web', 'im', 'webhook', 'stdout', 'noop', 'desktop'];
 
 export const CHANGE_KINDS = ['direction', 'clarify', 'scope', 'blocked'];
 export const CHANGE_SEVERITIES = ['needsDecision', 'advisory'];
@@ -39,7 +43,7 @@ export const THREAD_STATES = ['active', 'archived'];
 export const THREAD_STYLES = ['readonly', 'rollCall', 'full'];
 
 // P4：三道常规人审门禁 + 两类按需事件型人审（replan / 循环模板改版）。
-export const APPROVAL_KINDS = ['strategy', 'hiring_budget', 'review_reject', 'replan', 'recurring_change'];
+export const APPROVAL_KINDS = ['strategy', 'hiring_budget', 'review_reject', 'replan', 'recurring_change', 'recurring_create', 'project_create'];
 export const APPROVAL_STATUSES = ['pending', 'approved', 'rewrite', 'rejected', 'expired'];
 export const APPROVAL_DECISIONS = ['approved', 'rewrite', 'rejected'];
 

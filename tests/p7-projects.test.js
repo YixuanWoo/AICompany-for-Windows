@@ -1,6 +1,6 @@
 // P7 自主验收（第一步：P7-1 ~ P7-4）：项目层与项目记忆。
 //   ① 项目注册表（id 安全、rootDir 绝对路径、deliverSubdir 不出项目、memoryLimit 范围）
-//   ② 建卡必选项目（缺 / 未知 / 缺规范 三种都拒，且报出可用列表与路径）
+//   ② 项目可选（未指定放行交 agent 判断；显式指定时未知 / 缺规范仍拒，报出可用列表与路径）
 //   ③ 规范注入 brief（在硬性要求之前）
 //   ④ 记忆写入：卡到 done 才落，元数据由引擎补，员工只能影响「这一条」
 //   ⑤ 记忆读取：第二单 brief 里能看到第一单的教训；memoryLimit 生效
@@ -14,9 +14,10 @@ import path from 'node:path';
 
 import { openDb } from '../src/core.js';
 import { createEngine, createNotifier } from '../src/engine.js';
+import { createRecurring } from '../src/recurring.js';
 import { loadConfig, ConfigError } from '../src/config.js';
 import {
-  assertProject, buildProjectContext, readRecentMemory, memoryPath, ProjectError,
+  assertProject, buildProjectContext, readRecentMemory, memoryPath, ProjectError, createProject,
 } from '../src/projects.js';
 import { buildTaskPaths, sha256File } from '../src/gui-report.js';
 
@@ -81,16 +82,17 @@ test('P7-1 · 项目配置：id 必须是安全目录名；rootDir 必须绝对�
 
 // ---------------------------------------------------------------- ② 必选与拒绝
 
-test('P7-1 · 下单校验：缺项目 / 未知项目 / 缺规范 三种拒绝各有可读原因', (t) => {
+test('P7-1 · 项目可选：未指定放行交 agent 判断；显式指定时未知 / 缺规范仍拒', (t) => {
   const root = tmpRoot(t);
   const config = { projects: { demo: { displayName: '演示' }, other: { displayName: '另一个' } } };
 
-  assert.throws(
-    () => assertProject({ config, workRoot: root, requested: null }),
-    (error) => error instanceof ProjectError
-      && error.code === 'PROJECT_REQUIRED'
-      && /demo, other/.test(error.message),
-  );
+  // 没指定项目 → 放行，auto=true + 可用清单交给 agent 自主判断（新项目/老项目/一次性）。
+  const auto = assertProject({ config, workRoot: root, requested: null });
+  assert.equal(auto.project, null);
+  assert.equal(auto.auto, true);
+  assert.deepEqual(auto.available, ['demo', 'other']);
+  // 空字符串同样视为没指定。
+  assert.equal(assertProject({ config, workRoot: root, requested: '  ' }).auto, true);
   assert.throws(
     () => assertProject({ config, workRoot: root, requested: 'nope' }),
     (error) => error.code === 'PROJECT_UNKNOWN' && /可用：demo, other/.test(error.message),
@@ -320,5 +322,235 @@ test('P7-1 · 子卡继承父卡的项目：CEO 拆活不会把活拆出项目�
   assert.equal(rows[1].project, 'demo', '子卡必须跟着项目走');
   assert.equal(rows[1].assignee, 'worker-01');
   assert.equal(r.project, 'demo');
+  db.close();
+});
+
+// ---------------------------------------------------------------- ⑥ 新建项目渠道
+
+test('P7-8 · 新建项目：建目录 + 起步规范 + 立刻可用；重复/坏 id/坏路径都拒', (t) => {
+  const root = tmpRoot(t);
+  const config = { projects: {} };
+  const out = createProject({ config, workRoot: root, id: 'demo-new', displayName: '新项目' });
+
+  assert.equal(out.ok, true);
+  assert.equal(fs.existsSync(out.specPath), true, '要写一份起步规范');
+  assert.equal(fs.existsSync(path.join(root, 'projects', 'demo-new', 'knowledge')), true);
+  assert.deepEqual(Object.keys(config.projects), ['demo-new'], '配置里立刻可见');
+  // 建完就能下单：显式指定它不再报「未知项目 / 缺规范」。
+  assert.equal(assertProject({ config, workRoot: root, requested: 'demo-new' }).project, 'demo-new');
+
+  assert.throws(() => createProject({ config, workRoot: root, id: 'demo-new' }),
+    (e) => e instanceof ProjectError && e.code === 'PROJECT_EXISTS');
+  assert.throws(() => createProject({ config, workRoot: root, id: 'Bad ID' }),
+    (e) => e.code === 'PROJECT_ID_INVALID');
+  assert.throws(() => createProject({ config, workRoot: root, id: 'x2', rootDir: path.join(root, 'nope') }),
+    (e) => e.code === 'PROJECT_ROOT_MISSING', '落盘目录必须先存在，不替你到处建野目录');
+  assert.throws(() => createProject({ config, workRoot: root, id: 'x3', deliverSubdir: '../外面' }),
+    (e) => e.code === 'PROJECT_SUBDIR_INVALID');
+
+  // 已有规范绝不覆盖（规范是人定的）。
+  const spec = writeSpec(root, 'keep', '老规范：不许改我');
+  createProject({ config, workRoot: root, id: 'keep' });
+  assert.equal(fs.readFileSync(spec, 'utf8'), '老规范：不许改我');
+});
+
+test('P7-9 · CEO 一次拆多张卡、改判项目、建议新项目都落进系统', async (t) => {
+  const root = tmpRoot(t);
+  writeSpec(root, 'demo');
+  writeSpec(root, 'other');
+  const cfg = company(root, { projects: { demo: { displayName: '演示' }, other: { displayName: '另一个' } } });
+  cfg.interaction.defaultMode = 'delegate';
+  // CEO 的「脑子」：一次拆两张卡、都改判到 demo，同时建议单开一个新项目。
+  cfg.agents[0].adapter.config.result = (ctx) => (ctx.wakeReason === 'review_requested'
+    ? { type: 'review', verdict: 'pass', reason: '通过' }
+    : {
+      type: 'task-create',
+      summary: '归 demo，拆两张；另外建议单开 new-proj',
+      projectSuggestion: { id: 'new-proj', displayName: '新项目', reason: '值得单开' },
+      tasks: [
+        { title: '第一张', assignee: 'worker-01', project: 'demo', instructions: '做 A', acceptance: ['产物非空'] },
+        { title: '第二张', assignee: 'worker-01', instructions: '做 B', acceptance: ['产物非空'] },
+      ],
+    });
+
+  const db = openDb(':memory:');
+  const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
+  const r = await engine.submit({ text: '做个东西', mode: 'delegate' });
+
+  const rows = db.prepare('SELECT taskId, parentTaskId, project, assignee, originJson FROM tasks ORDER BY rowid').all();
+  assert.equal(rows.length, 3, '父卡 + 两张子卡');
+  assert.equal(rows[0].project, null, '董事会没指定项目');
+  assert.equal(rows[1].project, 'demo', 'CEO 改判的项目必须落到子卡上');
+  assert.equal(rows[2].project, 'demo');
+  assert.equal(rows[1].assignee, 'worker-01');
+  assert.match(rows[1].originJson ?? '', /归 demo/, 'CEO 的说明挂在卡上，看板能直接看到');
+
+  const ap = db.prepare("SELECT status, requestJson FROM approvals WHERE kind = 'project_create'").all();
+  assert.equal(ap.length, 1, '建议建项目要出审批单，不能自己建');
+  assert.equal(JSON.parse(ap[0].requestJson).payload.project.id, 'new-proj');
+  assert.equal(Object.keys(cfg.projects).includes('new-proj'), false, '没点通过之前不许真建');
+  assert.equal(r.project ?? null, null);
+  db.close();
+});
+
+test('P7-10 · 总经理在输出里点名自己也不许自干：强制改派执行席位', async (t) => {
+  const root = tmpRoot(t);
+  const cfg = company(root);
+  // 最坏情况：CEO 无视提示词，把卡派给自己。
+  cfg.agents[0].adapter.config.result = (ctx) => (ctx.wakeReason === 'review_requested'
+    ? { type: 'review', verdict: 'pass', reason: '通过' }
+    : {
+      type: 'task-create', summary: '我想自己干',
+      tasks: [{ title: '我自己来', assignee: 'ceo', instructions: '写个文件', acceptance: ['产物非空'] }],
+    });
+
+  const db = openDb(':memory:');
+  const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
+  await engine.submit({ text: '做点东西', mode: 'delegate' });
+
+  const child = db.prepare('SELECT assignee, assignedBy FROM tasks WHERE parentTaskId IS NOT NULL').get();
+  assert.ok(child, '子卡必须建出来');
+  assert.equal(child.assignee, 'worker-01', '总经理岗不接执行卡，必须改派给执行席位');
+  db.close();
+});
+
+test('P7-11 · 建项目用 CEO 拟好的规范：董事会只审不填，通过就照草案写', (t) => {
+  const root = tmpRoot(t);
+  const config = {};
+  const out = createProject({
+    config, workRoot: root, id: 'demo2', displayName: '演示二',
+    deliverSubdir: '04-译稿',
+    acceptance: ['44 章全部译完', '术语表前后一致'],
+    rules: ['文件名用 04-译稿/第NN章.md', '不许改动原文目录'],
+  });
+  const spec = fs.readFileSync(out.specPath, 'utf8');
+  assert.match(spec, /44 章全部译完/, '验收条件要原样写进规范');
+  assert.match(spec, /术语表前后一致/);
+  assert.match(spec, /04-译稿\/第NN章\.md/, '固定规矩要原样写进规范');
+  assert.doesNotMatch(spec, /产物落在约定目录，且内容非空/, 'CEO 给了验收条件就不该用空白模板');
+  assert.match(spec, /displayName: 演示二/);
+  assert.match(spec, /deliverSubdir: 04-译稿/);
+  assert.equal(config.projects.demo2.deliverSubdir, '04-译稿');
+});
+
+test('P7-12 · 卡上写了还不存在的项目：父卡挂起等审批，一张子卡都不许建（白批事故回归）', async (t) => {
+  const root = tmpRoot(t);
+  writeSpec(root, 'demo');
+  const cfg = company(root, { projects: { demo: { displayName: '演示' } } });
+  cfg.interaction.defaultMode = 'delegate';
+  // CEO 判断这活归一个还不存在的项目，并顺手递上建项目申请——正是真机上「批完才发现活早跑完了」的场景。
+  cfg.agents[0].adapter.config.result = (ctx) => (ctx.wakeReason === 'review_requested'
+    ? { type: 'review', verdict: 'pass', reason: '通过' }
+    : {
+      type: 'task-create', summary: '归 yitai',
+      projectSuggestion: { id: 'yitai', displayName: '译台', reason: '长期项目' },
+      tasks: [{
+        title: '接管仓库', assignee: 'worker-01', project: 'yitai',
+        instructions: '读仓库并出基线', acceptance: ['产物非空'],
+      }],
+    });
+
+  const db = openDb(':memory:');
+  const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
+  engine.setApprovalHandler('project_create', (payload) => {
+    const out = createProject({ config: cfg, workRoot: root, ...payload.project });
+    return { project: out.project };
+  });
+  await engine.submit({ text: '接管译台', mode: 'delegate' });
+
+  const parent = db.prepare('SELECT taskId, status FROM tasks WHERE parentTaskId IS NULL').get();
+  assert.equal(parent.status, 'awaiting_decision', '项目没批，父卡必须挂起等董事会');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parentTaskId IS NOT NULL').get().n, 0,
+    '项目没批，一张子卡都不许建（否则就是先跑完再批，产物和经验全落不到项目里）');
+  const ap = db.prepare("SELECT approvalId FROM approvals WHERE kind = 'project_create' AND status = 'pending'").get();
+  assert.ok(ap, '要出建项目审批单');
+
+  // 董事会通过 → 真建项目，并把父卡放出来重拆（不批就永远停着）。
+  const decided = engine.decideApproval(ap.approvalId, { decision: 'approved', decidedBy: 'board' });
+  assert.equal(decided.applied, true, decided.error ?? '');
+  assert.ok(cfg.projects.yitai, '通过之后项目才存在');
+  assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(parent.taskId).status, 'in_progress',
+    '父卡要被放出来，否则批了也接不上');
+  const wake = db.prepare("SELECT payloadJson FROM events WHERE taskId = ? AND type = 'issue_assigned' ORDER BY rowid DESC LIMIT 1").get(parent.taskId);
+  assert.match(String(wake?.payloadJson ?? ''), /"wakeReason":"decision"/, '唤醒理由必须是 decision（挂起态只认这个出口）');
+  db.close();
+});
+
+test('P7-13 · 项目被拒：父卡放出来按一次性任务跑，不会永远挂起', async (t) => {
+  const root = tmpRoot(t);
+  writeSpec(root, 'demo');
+  const cfg = company(root, { projects: { demo: { displayName: '演示' } } });
+  cfg.interaction.defaultMode = 'delegate';
+  cfg.agents[0].adapter.config.result = (ctx) => (ctx.wakeReason === 'review_requested'
+    ? { type: 'review', verdict: 'pass', reason: '通过' }
+    : {
+      type: 'task-create', summary: '归 someday',
+      projectSuggestion: { id: 'someday', displayName: '以后再说', reason: '先占位' },
+      tasks: [{ title: '先干着', assignee: 'worker-01', project: 'someday', instructions: '做', acceptance: ['非空'] }],
+    });
+
+  const db = openDb(':memory:');
+  const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
+  await engine.submit({ text: '做点事', mode: 'delegate' });
+  const parent = db.prepare('SELECT taskId, status FROM tasks WHERE parentTaskId IS NULL').get();
+  assert.equal(parent.status, 'awaiting_decision');
+
+  const ap = db.prepare("SELECT approvalId FROM approvals WHERE kind = 'project_create'").get();
+  engine.decideApproval(ap.approvalId, { decision: 'rejected', decidedBy: 'board', reason: '不建' });
+  assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(parent.taskId).status, 'in_progress',
+    '被拒也要放出来，不能因为项目没批就把活永远停住');
+  assert.equal(Object.keys(cfg.projects).includes('someday'), false, '拒了就不建');
+  db.close();
+});
+
+test('P7-14 · 只排班不派卡：tasks 空数组不建空壳卡，批了才进调度器', async (t) => {
+  const root = tmpRoot(t);
+  writeSpec(root, 'yitai');
+  const cfg = company(root, { projects: { yitai: { displayName: '译台' } } });
+  cfg.interaction.defaultMode = 'delegate';
+  cfg.agents[0].adapter.config.result = (ctx) => (ctx.wakeReason === 'review_requested'
+    ? { type: 'review', verdict: 'pass', reason: '通过' }
+    : {
+      type: 'task-create', summary: '为 yitai 排运行节奏',
+      recurringSuggestion: {
+        title: '译台每周体检', project: 'yitai',
+        rrule: 'FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=0',
+        assignee: 'worker-01', kind: 'inspection',
+        instructions: '按 MAINTENANCE-PLAN 1.2 做每周体检',
+        acceptance: ['build.ps1 退出码 0 且 0 警告'],
+        reason: '每周都必须重跑一次门禁',
+      },
+      tasks: [],
+    });
+
+  const db = openDb(':memory:');
+  const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
+  await engine.submit({ text: '给 yitai 排节奏', mode: 'delegate' });
+
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parentTaskId IS NOT NULL').get().n, 0,
+    '只排班不该建出干活的卡（tasks:[] 不能被当成「把整个结果当一张卡」）');
+  assert.equal(db.prepare('SELECT status FROM tasks').get().status, 'done', '排班提完，这单本身就是完的');
+
+  const ap = db.prepare("SELECT approvalId, requestJson FROM approvals WHERE kind = 'recurring_create'").get();
+  assert.ok(ap, '要出循环任务审批单');
+  const payload = JSON.parse(ap.requestJson).payload;
+  assert.equal(payload.job.project, 'yitai', '排班必须带回项目归属');
+  assert.equal(payload.job.assignee, 'worker-01');
+  assert.equal(payload.job.trigger.rrule, 'FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=0');
+  assert.equal(payload.rruleText, '每周一 20:00', '董事会要看人话，不是 rrule');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM recurring_jobs').get().n, 0, '没点通过之前不许进调度器');
+
+  // 通过之后才真注册，且注册出来的 job 带项目归属。
+  engine.setApprovalHandler('recurring_create', (p) => {
+    const rec = createRecurring({ db, notifier: createNotifier('noop') });
+    const out = rec.registerJob(p.job);
+    return { jobId: out.jobId, nextFireAt: out.nextFireAt };
+  });
+  const decided = engine.decideApproval(ap.approvalId, { decision: 'approved', decidedBy: 'board' });
+  assert.equal(decided.applied, true, decided.error ?? '');
+  const jobs = db.prepare('SELECT jobId, status, jobJson FROM recurring_jobs').all();
+  assert.equal(jobs.length, 1, '批了才真排班');
+  assert.equal(JSON.parse(jobs[0].jobJson).project, 'yitai');
+  assert.equal(jobs[0].status, 'active');
   db.close();
 });

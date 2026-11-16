@@ -64,18 +64,18 @@ export function readProjectSpec(workRoot, id) {
 }
 
 /**
- * 下单时的项目校验。**配置了项目就必选**，不留「猜一个」的余地：
- * 猜错项目的代价比让人多选一次大得多（产物会落到别人的工地上）。
+ * 下单时的项目校验。项目**可选**：
+ *   - 人没指定 → 放行，project=null + auto=true，交给执行 agent 自己判断归属
+ *     （新项目 / 已有项目 / 一次性任务），提示词里会附上可用项目清单。
+ *   - 人显式指定 → 仍然严格校验（未知 / 缺规范照旧拒绝）：既然点名了，就别让它落到别处。
  */
 export function assertProject({ config = {}, workRoot, requested = null } = {}) {
   const ids = configuredProjectIds(config);
   if (ids.length === 0) return { ok: true, project: null, legacy: true };
   const id = requested === null || requested === undefined ? '' : String(requested).trim();
   if (!id) {
-    throw new ProjectError(
-      `下单必须指定项目（projects.${ids.join(' / projects.')}）；可用：${ids.join(', ')}`,
-      'PROJECT_REQUIRED', { available: ids },
-    );
+    // 项目改为可选：没指定就不再拒绝，交由 agent 自主判定。
+    return { ok: true, project: null, auto: true, available: ids };
   }
   if (!PROJECT_ID_RE.test(id) || !ids.includes(id)) {
     throw new ProjectError(`未知项目：${id}；可用：${ids.join(', ')}`, 'PROJECT_UNKNOWN', { available: ids });
@@ -88,8 +88,91 @@ export function assertProject({ config = {}, workRoot, requested = null } = {}) 
   return { ok: true, project: id, spec };
 }
 
-export function listProjects({ config = {}, workRoot } = {}) {
-  return configuredProjectIds(config).map((id) => {
+/**
+ * 新建项目（董事会点头后才走这里；CEO 只能「建议」，不能自己建）。
+ * 做三件事：建项目目录（规范 + 记忆目录）、写一份起步 project.yaml、把条目记进配置。
+ *
+ * 两条安全边界：
+ *   1. 规范是人定的 —— 已存在就**不覆盖**，只补目录；
+ *   2. rootDir 必须是**已经存在的**目录（人先建好）。否则宁可不落盘，也不替你到处建野目录。
+ */
+export function createProject({
+  config = {}, workRoot, id, displayName = null, rootDir = null,
+  deliverSubdir = null, memoryLimit = DEFAULT_MEMORY_LIMIT,
+  // CEO 在申请单里拟好的验收条件与固定规矩：董事会只审不填，通过就按这个写规范。
+  acceptance = null, rules = null,
+} = {}) {
+  const pid = String(id ?? '').trim().toLowerCase();
+  if (!PROJECT_ID_RE.test(pid)) {
+    throw new ProjectError(
+      `项目 id 只能用 1~32 位小写字母/数字/_/-，且不能以 . 或 - 打头（会当目录名用）：${pid || '(空)'}`,
+      'PROJECT_ID_INVALID',
+    );
+  }
+  if (projectEntry(config, pid)) {
+    throw new ProjectError(`项目 ${pid} 已存在，不用新建（要改落盘位置请改配置）`, 'PROJECT_EXISTS');
+  }
+  const name = String(displayName ?? pid).trim() || pid;
+
+  let root = null;
+  if (rootDir !== null && rootDir !== undefined && String(rootDir).trim() !== '') {
+    root = String(rootDir).trim();
+    if (!path.isAbsolute(root)) {
+      throw new ProjectError(`落盘目录必须是绝对路径：${root}`, 'PROJECT_ROOT_INVALID');
+    }
+    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+      throw new ProjectError(
+        `落盘目录不存在：${root}。先在资源管理器里把它建好再填；或者留空 = 产物只留在公司、你自己取。`,
+        'PROJECT_ROOT_MISSING',
+      );
+    }
+  }
+  let sub = null;
+  if (deliverSubdir !== null && deliverSubdir !== undefined && String(deliverSubdir).trim() !== '') {
+    sub = String(deliverSubdir).trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    if (path.isAbsolute(sub) || sub.split('/').includes('..')) {
+      throw new ProjectError(`交付子目录必须是项目文件夹内的相对路径：${deliverSubdir}`, 'PROJECT_SUBDIR_INVALID');
+    }
+  }
+
+  const dir = projectDir(workRoot, pid);
+  fs.mkdirSync(path.join(dir, 'knowledge'), { recursive: true });
+  const spec = projectSpecPath(workRoot, pid);
+  let specCreated = false;
+  if (!fs.existsSync(spec)) {
+    // 规范优先用 CEO 在申请单里拟好的（董事会点通过前已经看过）；没给才用空白模板。
+    const acc = (Array.isArray(acceptance) ? acceptance : [])
+      .map((a) => String(a ?? '').trim()).filter(Boolean);
+    const rls = (Array.isArray(rules) ? rules : [])
+      .map((r) => String(r ?? '').trim()).filter(Boolean);
+    const acceptanceLines = acc.length ? acc : ['产物落在约定目录，且内容非空'];
+    const yamlStr = (s) => JSON.stringify(String(s).replace(/\s+/g, ' ').trim()); // YAML 双引号串，冒号/引号都安全
+    fs.writeFileSync(spec, `# 项目规范（CEO 起草、董事会批准）：派活时原样带进任务说明，员工必须遵守。
+# 改这里 = 改这个项目所有后续任务的硬约束；下次派活即生效，不用重启。
+displayName: ${name}
+${sub ? `# 产物落点（相对本项目文件夹）。留空/删掉 = 交付物只留在公司。\ndeliverSubdir: ${sub}\n` : '# deliverSubdir: 交付物在项目文件夹里的落点（相对路径），需要就填\n'}# 硬验收条件：每一条都要能判死（有没有、对不对），别写「做得好」这种没法验的。
+acceptance:
+${acceptanceLines.map((a) => `  - ${yamlStr(a)}`).join('\n')}
+# 固定规矩：命名、格式、绝对不能碰的东西。写得越具体，员工越不会跑偏。
+rules:${rls.length ? '\n' + rls.map((r) => `  - ${yamlStr(r)}`).join('\n') : ' []'}
+`, 'utf8');
+    specCreated = true;
+  }
+  const limit = Number(memoryLimit);
+  const entry = {
+    displayName: name,
+    ...(root ? { rootDir: root } : {}),
+    ...(sub ? { deliverSubdir: sub } : {}),
+    memoryLimit: Number.isFinite(limit) && limit >= 0 ? Math.floor(limit) : DEFAULT_MEMORY_LIMIT,
+  };
+  // 立刻生效：引擎持有的是同一个 config 引用，派下一张卡就会读到。
+  config.projects = { ...(config.projects ?? {}), [pid]: entry };
+  return {
+    ok: true, project: { id: pid, ...entry }, specPath: spec, specCreated, projectDir: dir,
+  };
+}
+
+export function listProjects({ config = {}, workRoot } = {}) {  return configuredProjectIds(config).map((id) => {
     const entry = projectEntry(config, id) ?? {};
     const spec = readProjectSpec(workRoot, id);
     const memory = readRecentMemory(workRoot, id, { limit: 0, countOnly: true });

@@ -16,6 +16,59 @@
       "type": "integer",
       "minimum": 1
     },
+    "holders": {
+      "description": "担任者池：每一个都是一个真实的 agent / 程序。name 必须是 agent 的名字（一看就知道谁干）。",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "adapter"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "name": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string" },
+          "quotaDaily": { "type": "integer", "minimum": 0 },
+          "adapter": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "enum": ["process", "http", "cli-acp", "gui-template", "polling", "webhook-exec"]
+              },
+              "config": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "posts": {
+      "description": "岗位（席位）：title 是岗位名称，heldBy 指向 holders 里的 id。同一个 holder 可担任多个岗位。",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "heldBy", "isCEO"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "title": { "type": "string", "minLength": 1 },
+          "heldBy": { "type": "string" },
+          "adapterConfig": {
+            "description": "覆盖担任者的 adapter 参数（例：同一 agent 在总经理岗用 mode=ceo）。",
+            "type": "object"
+          },
+          "isCEO": { "type": "boolean" },
+          "capabilities": {
+            "type": "array",
+            "items": { "enum": ["plan", "delegate", "review", "execute", "escalate", "readOnly"] }
+          },
+          "status": { "enum": ["active", "setup", "paused", "pending_approval", "error"] },
+          "quotaDaily": { "type": "integer", "minimum": 0 },
+          "maxDifficulty": { "enum": ["easy", "normal", "hard"] },
+          "reportsTo": { "type": ["string", "null"] },
+          "escalationTo": { "type": ["string", "null"] }
+        }
+      }
+    },
     "workRoot": {
       "type": "string"
     },
@@ -184,6 +237,28 @@
           "displayName": {
             "type": "string"
           },
+          "post": {
+            "description": "岗位名（席位的名字，如「总经理」「执行」）。与 holder 分开：岗位不随换人改变。",
+            "type": "string"
+          },
+          "holder": {
+            "description": "由谁担任这个岗位。写字符串即人名/agent 名；也可写 {name, kind}。",
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "kind": { "type": "string" }
+                },
+                "required": ["name"]
+              }
+            ]
+          },
+          "holderKind": {
+            "description": "担任者类型：external-agent（8080 上的 agent）/ gui-app（桌面应用）/ process（本地脚本）。",
+            "type": "string"
+          },
           "isCEO": {
             "type": "boolean"
           },
@@ -245,7 +320,8 @@
                   "http",
                   "cli-acp",
                   "gui-template",
-                  "polling"
+                  "polling",
+                  "webhook-exec"
                 ]
               },
               "config": {
@@ -275,7 +351,8 @@
           "im",
           "webhook",
           "stdout",
-          "noop"
+          "noop",
+          "desktop"
         ]
       }
     },

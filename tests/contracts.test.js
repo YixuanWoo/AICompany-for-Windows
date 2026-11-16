@@ -91,7 +91,9 @@ test('P0-3 · adapter / Channel / Notifier 三份契约可判定', () => {
 });
 
 test('P0-5 · 所有封闭枚举都不含第五类出口', () => {
-  assert.deepEqual(ADAPTER_TYPES, ['process', 'http', 'cli-acp', 'gui-template', 'polling']);
+  // 前五个是封闭枚举；webhook-exec 是可选外部集成（末尾追加，不进「五通用型」语义）。
+  assert.deepEqual(ADAPTER_TYPES.slice(0, 5), ['process', 'http', 'cli-acp', 'gui-template', 'polling']);
+  assert.ok(ADAPTER_TYPES.includes('webhook-exec'));
   assert.equal(INTERACTION_MODES.length, 4);
   assert.equal(DECISION_OUTCOMES.length, 4);
   assert.equal(CEO_OUTPUT_KINDS.length, 4);

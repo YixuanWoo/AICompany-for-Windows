@@ -39,7 +39,12 @@ interaction:
 # 把它配成席位反而会被当成可用工位派活，所以示例 profile 刻意不配；它想要的那份简报，
 # 由控制面自己的 /api/dashboard + /api/audit 定时拉取即可。
 agents:
+  # 席位（岗位）与担任者（谁在干）分开写：post = 岗位名，holder = 由谁担任。
+  # post 是席位的名字，不随换人改变；holder 换人只改这一行。id 只作内部标识与历史对接。
   - id: ceo
+    post: 总经理
+    holder: 外部 agent
+    holderKind: external-agent
     displayName: 总经理
     isCEO: true
     capabilities: [plan, delegate, review, escalate]
@@ -51,6 +56,9 @@ agents:
       config:
         command: ${AICOMPANY_CEO_CMD}
   - id: worker-01
+    post: 执行
+    holder: 本地脚本
+    holderKind: process
     displayName: 执行席位
     isCEO: false
     capabilities: [execute]

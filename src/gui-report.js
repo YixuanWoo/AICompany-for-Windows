@@ -40,12 +40,19 @@ export function sha256File(filePath) {
 }
 
 // output/ 里至少有一个非空文件（空文件不算产物，防止「碰一下文件就算完成」）。
+// 必须递归：员工常把产物按 output/docs/reports/ 这类子目录组织，只看顶层会把
+// 「顶层只有文件夹」误判成「没有产物」，草稿模式就会白等满 maxMinutes 才超时。
 export function hasNonEmptyFile(outputDir) {
-  let entries = [];
-  try { entries = fs.readdirSync(outputDir, { withFileTypes: true }); } catch { return false; }
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    try { if (fs.statSync(path.join(outputDir, entry.name)).size > 0) return true; } catch { /* 跳过读不到的 */ }
+  let stack = [outputDir];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (entry.isDirectory()) { stack.push(path.join(dir, entry.name)); continue; }
+      if (!entry.isFile()) continue;
+      try { if (fs.statSync(path.join(dir, entry.name)).size > 0) return true; } catch { /* 跳过读不到的 */ }
+    }
   }
   return false;
 }
@@ -140,15 +147,26 @@ export function writeChangeRequest(paths, crId, data) {
 //   3. output/ 里没有非空文件，一律不算成功（空文件也不算）。
 export const DRAFT_REPORT_NAME = 'report.draft.json';
 
+// 草稿的位置：正位是任务目录；员工偶尔会误写进 output/（T-3ff55213 事故）。
+// 兜底读 output/ 里那份，保证「人没丢、单没丢」——但提示词仍然要求写正位。
+export function draftFileCandidates(paths) {
+  return [
+    path.join(paths.taskDir, DRAFT_REPORT_NAME),
+    path.join(paths.outputDir, DRAFT_REPORT_NAME),
+  ];
+}
+
 export function readDraft(paths) {
-  const file = path.join(paths.taskDir, DRAFT_REPORT_NAME);
-  if (!fs.existsSync(file)) return null;
-  try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return data && typeof data === 'object' ? data : null;
-  } catch {
-    return null;
+  for (const file of draftFileCandidates(paths)) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (data && typeof data === 'object') return data;
+    } catch {
+      return null;
+    }
   }
+  return null;
 }
 
 export function scanOutputFiles(paths) {
@@ -261,9 +279,10 @@ export async function pollForReport({
     if (fs.existsSync(paths.progressPath)) progressSeen = true;
     // ④ 草稿模式（聊天窗口型助手）：draft 就是它的终态信号，别傻等满 maxMinutes。
     //    但 draft 说成功、output/ 里却还没有非空文件时不算数，继续等（agent 可能还在写）。
+    //    草稿被误写进 output/ 也能兜住（draftFileCandidates 有两个候选位）。
     if (config.reportMode === 'draft') {
-      const draftFile = path.join(paths.taskDir, DRAFT_REPORT_NAME);
-      if (fs.existsSync(draftFile)) {
+      const draftFile = draftFileCandidates(paths).find((f) => fs.existsSync(f));
+      if (draftFile) {
         let draft;
         try { draft = JSON.parse(fs.readFileSync(draftFile, 'utf8')); } catch (error) {
           return { kind: 'invalid_report', error: String(error.message ?? error), polls: i, at: now() };

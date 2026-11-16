@@ -6,10 +6,15 @@
 #   或命令行：npm run task -- "写一份本周工作简报"
 #
 # 三条约定：
-# 1. defaultMode 是 direct：一句话直投执行席位，不经过 CEO 拆解，最快闭环。
-#    delegate 也能用，此时 CEO 由 scripts/router-ceo.js 当「确定性派单器」代班（不调模型、不烧额度）。
+# 1. defaultMode 是 direct：一句话直投执行席位。
+#    交付给 ceo-agent = 真·带工具的 agent（dsh webhook，能读盘能执行，2026-11-16 接上）；
+#    交付给 doubao = GUI 抢键鼠操作豆包窗口（旧路径，保留）。
+#    delegate 模式下 CEO 由 scripts/router-ceo.js 派单，优先派给第一个执行席位（现为 ceo-agent）。
 # 2. 窗口标题只写「豆包工作」这个稳定片段（完整标题前面还挂着会话名，会变）。
 # 3. GUI 席位全局只能有一份：本配置带 GUI 席位，第二个带 GUI 席位的实例会被启动时拒绝。
+#
+# ceo-agent 前置条件：dsh web 8080 正在跑、且装了 dsh-ceo-webhook 插件（见 integrations/dsh/ceo-webhook/）。
+# 没装 dsh 的机器请把 ceo-agent 这一段从 agents 里删掉，其余配置照常可用。
 version: 1
 company:
   name: aicompany-prod
@@ -35,7 +40,9 @@ projects:
     memoryLimit: 20
     # 不填 rootDir：改源码的活由人集成，引擎不自动往仓库里写文件。
 interaction:
-  defaultMode: direct
+  # delegate = 董事会 → CEO → 员工。CEO 是真 agent：定项目归属、拆活派活、验收。
+  # direct 仍然可用（指名直投某个员工，不经 CEO），但不是默认路径。
+  defaultMode: delegate
   defaultTarget: ceo
   allowDirectTo: [execute]
   autoAssign: false
@@ -63,31 +70,31 @@ quota:
   stopRatio: 1
   periodHours: 24
 runPolicy:
-  # GUI 席位天然串行（一把键鼠），并发给 2 是为了 CEO 和工位不互相堵。
+  # 执行岗是桌面应用，天然串行（一把键鼠）；并发给 2 是为了「总经理在拆活/验收」和
+  # 「执行岗在干活」不互相排队（两者用的是完全不同的资源：一个是 8080 的 agent，一个是本机窗口）。
   maxConcurrent: 2
   cooldownSec: 0
   maxRunHours: 2
-agents:
-  - id: ceo
-    displayName: 总经理
-    isCEO: true
-    capabilities: [plan, delegate, review, escalate]
-    status: active
-    quotaDaily: 20
-    reportsTo: null
+# ── 两层席位模型（2026-11-16 定） ─────────────────────────────────
+# holders = 担任者：真的是一个 agent / 一个程序，name 就是它的名字（一看就知道谁干）。
+# posts   = 岗位：席位的名字（一看就知道干啥），heldBy 指向由谁担任。
+# 一个 agent 可以担任多个岗位：adapter 配置写在 holder 上，岗位用 adapterConfig 覆盖参数；
+# 引擎按「岗位」建卡、计额，但调用的是同一个 agent。
+holders:
+  # 担任者 1：8080 上的规划 agent。按量计费、贵，只用来做规划和验收。
+  - id: dsh-planner
+    name: dsh 规划 agent
+    kind: external-agent
     adapter:
-      type: process
+      type: webhook-exec
       config:
-        # 确定性派单器：继承指令、派给第一个执行席位。接上真模型后只改这一行。
-        command: node scripts/router-ceo.js
-  - id: doubao
-    displayName: 豆包工作
-    isCEO: false
-    capabilities: [execute]
-    status: active
-    quotaDaily: 20
-    # 不写 maxDifficulty = 什么难度都能接（G3 的上限语义）。
-    reportsTo: ceo
+        baseUrl: http://127.0.0.1:8080
+        timeoutMs: 900000
+        pollMs: 2000
+  # 担任者 2：桌面上的豆包工作。抢键鼠、一次一件，适合写文档 / 翻译 / 点界面的活。
+  - id: doubao-work
+    name: 豆包工作
+    kind: gui-app
     adapter:
       type: gui-template
       config:
@@ -137,5 +144,30 @@ agents:
           screenshot: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action shot -OutputFile "{{outputFile}}"'
         pollIntervalMs: 5000
         maxMinutes: 20
+# ── 岗位（席位） ────────────────────────────────────────────────
+posts:
+  # 岗位 1：总经理 —— 只做三件事：定方向、拆活派活、验收；严禁自己干活。
+  # 它每个 token 都该花在「派给谁」上。adapterConfig.mode=ceo 让这个岗位按 CEO 契约输出。
+  - id: ceo
+    title: 总经理
+    heldBy: dsh-planner
+    adapterConfig:
+      mode: ceo
+    isCEO: true
+    capabilities: [plan, delegate, review, escalate]
+    status: active
+    quotaDaily: 40
+    reportsTo: null
+  # 岗位 2：执行 —— 所有实际干活、产出交付物都走这个岗位。
+  # 不写 maxDifficulty = 什么难度都能接（G3 的上限语义）。
+  - id: doubao
+    title: 执行
+    heldBy: doubao-work
+    isCEO: false
+    capabilities: [execute]
+    status: active
+    quotaDaily: 20
+    reportsTo: ceo
 clients: [web]
-notifier: [noop]
+# web：看板 inbox 用；desktop：看板关着时也弹气泡提醒「待你拍板」。
+notifier: [web, desktop]

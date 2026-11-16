@@ -210,6 +210,9 @@ export function createRecurring({ db, notifier, now = nowIso }) {
       requestId: `REQ-CYCLE-${jobId}-${cycleNo}`,
       parentTaskId: null,
       title: `${job.title} · 第 ${cycleNo} 轮`,
+      // 循环卡必须带项目归属：否则派下去既不继承项目规范、也不会落到项目交付目录，
+      // 等于「替这个项目干活却不认这个项目」。
+      project: job.project ?? null,
       role: job.taskTemplate.role, revision: 1,
       mode: 'delegate', addressedTo: null, cc: [],
       assignedBy: 'policy', threadId: null,
@@ -235,10 +238,10 @@ export function createRecurring({ db, notifier, now = nowIso }) {
     if (!checked.ok) throw new Error(`循环任务卡不合法：${checked.errors.join('; ')}`);
 
     db.prepare(`INSERT INTO tasks
-      (taskId, requestId, parentTaskId, title, role, assignee, status, mode, addressedTo,
+      (taskId, requestId, parentTaskId, title, project, role, assignee, status, mode, addressedTo,
        assignedBy, revision, threadId, attempt, priority, difficulty, createdAt, updatedAt, originJson)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`).run(
-      card.taskId, card.requestId, card.parentTaskId, card.title, card.role,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`).run(
+      card.taskId, card.requestId, card.parentTaskId, card.title, card.project, card.role,
       card.assignee, card.status, card.mode, card.addressedTo, card.assignedBy,
       card.revision, card.threadId, card.priority, card.difficulty,
       card.createdAt, card.createdAt, JSON.stringify(card.origin),

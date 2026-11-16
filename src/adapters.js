@@ -103,6 +103,11 @@ export const cliAcpAdapter = registerAdapter('cli-acp', {
 import { guiTemplateAdapter } from './gui-adapter.js';
 export const guiAdapter = registerAdapter('gui-template', guiTemplateAdapter);
 
+// webhook-exec：通用外部执行服务客户端，把任务 POST 给一个带工具的远程 agent。
+// 实现独立在 adapter-webhook-exec.js，零第三方依赖；配置里不启用就不生效。
+import { webhookExecAdapter } from './adapter-webhook-exec.js';
+export const webhookExec = registerAdapter('webhook-exec', webhookExecAdapter);
+
 export const mockAdapter = registerAdapter('mock', {
   type: 'mock',
   testEnvironment() {

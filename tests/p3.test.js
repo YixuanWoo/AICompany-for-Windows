@@ -19,8 +19,9 @@ import {
 } from '../src/gui-prompt.js';
 import {
   buildTaskPaths, writeTaskBundle, writeChangeRequest, sha256File,
-  verifyReport, pollForReport, isInsideOutput,
+  verifyReport, pollForReport, isInsideOutput, buildCompletionFromDraft,
 } from '../src/gui-report.js';
+import { atomicWriteJson } from '../src/ids.js';
 import {
   createGuiDriver, createSimulationDriver, createCommandDriver,
   assertForeground, captureScreenshot, GuiError,
@@ -605,3 +606,45 @@ test('G-P3 · 截图留证只新增文件、不删除任何文件', async (t) =>
   assert.ok(fs.statSync(path.join(paths.screenshotsDir, 'T-KEEP-R-1.png')).size > 0);
 });
 
+
+test('P3-4 · 产物在 output/ 子目录里也要算数：草稿模式不能白等满超时（T-af72158d 事故回归）', async (t) => {
+  const root = tmpRoot(t);
+  const paths = buildTaskPaths(root, 'T-NESTED', { reportMode: 'draft' });
+  writeTaskBundle(paths, { task: {}, prompt: 'x' });
+  // 复刻事故现场：产物全部嵌在 output/docs/reports/ 子目录，顶层只有文件夹。
+  const nested = path.join(paths.outputDir, 'docs', 'reports');
+  fs.mkdirSync(nested, { recursive: true });
+  fs.writeFileSync(path.join(nested, 'baseline.md'), '# 基线报告\n内容非空\n', 'utf8');
+  atomicWriteJson(path.join(paths.taskDir, 'report.draft.json'), { status: 'success', summary: '完成' });
+
+  const polled = await pollForReport({
+    paths, config: { reportMode: 'draft' }, taskId: 'T-NESTED', runId: 'R-NESTED',
+    maxPolls: 3, wait: noWait,
+  });
+  assert.equal(polled.kind, 'draft', '子目录里有非空产物 + 草稿说成功，就该立刻收单');
+  assert.equal(polled.data.status, 'success');
+
+  // 控制面补全链路要能对同一批嵌套产物算出正式报告。
+  const built = buildCompletionFromDraft({
+    paths, taskId: 'T-NESTED', runId: 'R-NESTED', agent: 'doubao',
+  });
+  assert.equal(built.ok, true, built.reason ?? '');
+  assert.deepEqual(built.files.map((f) => f.artifact), ['output/docs/reports/baseline.md']);
+});
+
+test('P3-4 · 草稿被误写进 output/ 也能兜底收单（T-3ff55213 事故回归）', async (t) => {
+  const root = tmpRoot(t);
+  const paths = buildTaskPaths(root, 'T-DRAFTMISFILE', { reportMode: 'draft' });
+  writeTaskBundle(paths, { task: {}, prompt: 'x' });
+  // 员工把草稿写进了 output/ 而不是任务目录。
+  atomicWriteJson(path.join(paths.outputDir, 'report.draft.json'), { status: 'success', summary: '完成' });
+
+  const polled = await pollForReport({
+    paths, config: { reportMode: 'draft' }, taskId: 'T-DRAFTMISFILE', runId: 'R-DM',
+    maxPolls: 3, wait: noWait,
+  });
+  assert.equal(polled.kind, 'draft', 'output/ 里的草稿要能被兜底读到');
+  const built = buildCompletionFromDraft({ paths, taskId: 'T-DRAFTMISFILE', runId: 'R-DM', agent: 'doubao' });
+  assert.equal(built.ok, true, built.reason ?? '');
+  assert.ok(built.files.some((f) => f.artifact === 'output/report.draft.json'), '误写的草稿本身算一份产物留痕');
+});

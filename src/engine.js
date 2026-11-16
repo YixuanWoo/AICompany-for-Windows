@@ -12,7 +12,7 @@ import {
 } from './core.js';
 import { getAdapter, availableAdapterTypes } from './adapters.js';
 import { isBridgeOnline } from './lease.js';
-import { DEFAULTS, CAPABILITIES, CEO_OUTPUT_KINDS } from './enums.js';
+import { DEFAULTS, CAPABILITIES, CEO_OUTPUT_KINDS, RECURRING_KINDS } from './enums.js';
 import { createChannels } from './channels.js';
 import { ensureAllQuotas, checkQuota, consumeQuota, quotaState, resetQuota } from './quota.js';
 import { assertMayAssign, resolveDecisionMaker, rankCandidates, ceoOf, isInSubtree } from './org.js';
@@ -26,7 +26,10 @@ import {
   assertProject, buildProjectContext, buildMemoryRecord, appendMemory,
   listProjects as listProjectEntries, memoryLimitOf, readRecentMemory,
 } from './projects.js';
-import { deliverTask, runningProcesses, lastDeliveryOf } from './deliver.js';
+import {
+  deliverTask, runningProcesses, lastDeliveryOf, appendDeliveryLog, DELIVERY_SCHEMA,
+} from './deliver.js';
+import { nextFireAt } from './rrule.js';
 
 export function createNotifier(kind = 'web') {
   // P4-6：可传单个通道名或数组；web / noop / stdout 内置，im / webhook 需显式地址。
@@ -73,6 +76,24 @@ export function createEngine({
     return emit(db, options);
   }
 
+  // 卡间依赖：库里存 JSON 数组，读出来统一成字符串数组；坏数据（NULL / 非法 JSON）一律当「没依赖」，
+  // 绝不能因为一行脏数据把整条链堵死。
+  function dependsOnOf(row) {
+    if (!row?.dependsOn) return [];
+    try {
+      const parsed = JSON.parse(row.dependsOn);
+      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string' && x) : [];
+    } catch { return []; }
+  }
+
+  // 前置卡的真实状态：done 才算满足；不存在（被删）也算满足，否则永远放不出来。
+  function unmetDependencies(row) {
+    return dependsOnOf(row).filter((id) => {
+      const up = db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(id);
+      return up ? up.status !== 'done' : false;
+    });
+  }
+
   function taskById(taskId) {
     const row = db.prepare('SELECT * FROM tasks WHERE taskId = ?').get(taskId);
     if (!row) return null;
@@ -95,6 +116,7 @@ export function createEngine({
     acceptance = ['completion.json 通过 schema 校验且 status = success'],
     parentTaskId = null, taskId = `T-${shortId()}`, status = 'todo',
     threadId = null, assignerId = null, difficulty = DEFAULT_DIFFICULTY, project = null,
+    origin = null, dependsOn = [],
   }) {
     // P4-3：agent 之间派活只能派进自己的汇报子树；人是董事会，不受此限（§7.4）。
     if (assignerId && assignerId !== assignee) {
@@ -113,21 +135,24 @@ export function createEngine({
       budget: { maxRuns: 3, maxMinutes: 30, quotaUnits: 1 },
       input: { files: [] }, instructions, acceptance,
       completionReportPath: 'output/completion.json',
-      retry: { attempt: 0, max: 2, backoffSec: 0 }, tags: [], origin: null,
+      retry: { attempt: 0, max: 2, backoffSec: 0 }, tags: [], origin,
+      // 卡间依赖：前置卡的 taskId。空数组 = 没依赖（默认并行）。
+      dependsOn: Array.isArray(dependsOn) ? dependsOn.filter((x) => typeof x === 'string' && x) : [],
     };
   }
 
-  function insertCard(card, wakeTarget) {
+  function insertCard(card, wakeTarget, { dispatch = true } = {}) {
     const checked = validate('task', card);
     if (!checked.ok) throw new Error(`任务卡不合法：${checked.errors.join('; ')}`);
     db.prepare(`INSERT INTO tasks
       (taskId, requestId, parentTaskId, title, role, assignee, status, mode, addressedTo,
-       assignedBy, revision, threadId, attempt, priority, difficulty, project, createdAt, updatedAt, originJson)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`).run(
+       assignedBy, revision, threadId, attempt, priority, difficulty, project, createdAt, updatedAt, originJson, dependsOn)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`).run(
       card.taskId, card.requestId, card.parentTaskId, card.title, card.role,
       card.assignee, card.status, card.mode, card.addressedTo, card.assignedBy,
       card.revision, card.threadId, card.priority, normalizeDifficulty(card.difficulty),
       card.project ?? null, card.createdAt, card.createdAt, JSON.stringify(card.origin ?? null),
+      card.dependsOn?.length ? JSON.stringify(card.dependsOn) : null,
     );
     db.prepare(`INSERT INTO task_payload
       (taskId, revision, instructions, acceptanceJson, completionReportPath, inputJson)
@@ -136,6 +161,8 @@ export function createEngine({
       card.completionReportPath, JSON.stringify(card.input ?? { files: [] }),
     );
     writeAudit(db, { actor: card.assignedBy, action: 'create_task', newValue: card.taskId, taskId: card.taskId });
+    // 有前置卡的先建不派：等上游 done 由 releaseDependents 放行，避免「还没接管就先定计划」。
+    if (dispatch === false) return card;
     emitEvent({
       type: 'issue_assigned', taskId: card.taskId, agentId: wakeTarget,
       payload: { wakeReason: 'issue_assigned', mode: card.mode },
@@ -199,8 +226,15 @@ export function createEngine({
   }
 
   function getAgentCandidates() {
-    return db.prepare(`SELECT a.agentId, a.displayName, a.isCEO, a.capabilities, a.status,
-      a.reportsTo, a.escalationTo, a.maxDifficulty FROM agents a ORDER BY a.isCEO DESC, a.agentId`).all()
+    const rows = db.prepare(`SELECT a.agentId, a.displayName, a.isCEO, a.capabilities, a.status,
+      a.reportsTo, a.escalationTo, a.maxDifficulty, a.postTitle, a.holderName, a.holderKind, a.holderId
+      FROM agents a ORDER BY a.isCEO DESC, a.agentId`).all();
+    // 同一个 agent 可以兼任多个岗位：这里数一下每个担任者挂了几席，看板据此标「兼任」。
+    const postsPerHolder = new Map();
+    for (const r of rows) {
+      if (r.holderId) postsPerHolder.set(r.holderId, (postsPerHolder.get(r.holderId) ?? 0) + 1);
+    }
+    return rows
       .map((row) => {
         const state = quotaState(db, row.agentId, { now: clock(), periodHours: config.quota?.periodHours }) ?? {
           used: 0, limit: 0, warnAt: 0,
@@ -208,6 +242,12 @@ export function createEngine({
         const busy = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE agentId = ? AND status = 'running'").get(row.agentId).n > 0;
         return {
           agentId: row.agentId, displayName: row.displayName, isCEO: Boolean(row.isCEO),
+          // 岗位（席位名）与担任者（谁在干）分开返回，看板据此分两行显示，不再混成一个名字。
+          postTitle: row.postTitle ?? row.displayName ?? row.agentId,
+          holderName: row.holderName ?? null,
+          holderKind: row.holderKind ?? null,
+          holderId: row.holderId ?? null,
+          holderPostCount: row.holderId ? (postsPerHolder.get(row.holderId) ?? 1) : 1,
           capabilities: JSON.parse(row.capabilities ?? '[]'), status: row.status,
           reportsTo: row.reportsTo, escalationTo: row.escalationTo,
           // G3：老库里这一列可能是 NULL（迁移前建的库 / 迁移后没重启过），统一按「不设限」解释。
@@ -482,10 +522,12 @@ export function createEngine({
 
     // G3：难度是任务卡的属性；人给的原始需求默认 normal，非法值直接报错（不静默当 normal）。
     const difficulty = normalizeDifficulty(req.difficulty, { field: 'difficulty' });
-    // P7：配了项目就必选，而且规范文件必须在。**不靠 CEO 猜项目** ——
-    // 猜错的代价是产物落进别人工地，比让人多选一次贵得多。
+    // P7：项目可选。人没指定就放行（project=null + auto），由执行 agent 自己判断归属：
+    // 新项目 / 已有项目 / 一次性任务；提示词会把可用项目清单给它。人显式指定的仍严格校验
+    // （未知 / 缺规范拒绝）——既然点名了就别让它落到别的工地上。
     const picked = assertProject({ config, workRoot: workDir, requested: req.project ?? null });
     const project = picked.project;
+    const projectAuto = picked.auto === true;
 
     let target;
     let assignedBy = 'human';
@@ -624,8 +666,13 @@ export function createEngine({
   }
 
   // Run Policy（任务书 §7.3）：每次唤醒前依次检查。返回带 code，便于试运行统计误唤醒。
-  // code 取值：missing / agent_inactive / terminal / suspended / quota / concurrent / cooldown / bridge_offline
+  // code 取值：missing / agent_inactive / terminal / suspended / dependency / quota / concurrent / cooldown / bridge_offline
   const COOLDOWN_EXEMPT = new Set(['decision', 'review_requested', 'escalation', 'replan']);
+  // 「派卡」类唤醒：受卡间依赖与 bridge 在线约束；治理类唤醒不受（否则半路的卡永远走不完）。
+  const BRIDGE_GATED_REASONS = new Set([
+    'issue_assigned', 'compensation', 'rework', 'checkout', 'bridge_checkout',
+    'manual', 'cycle',
+  ]);
   function runPolicy(agentId, taskId, wakeReason) {
     const agent = db.prepare('SELECT * FROM agents WHERE agentId = ?').get(agentId);
     if (!agent) return { ok: false, code: 'missing', reason: `席位不存在 ${agentId}` };
@@ -637,6 +684,17 @@ export function createEngine({
     }
     if (task?.status === 'awaiting_decision' && wakeReason !== 'decision') {
       return { ok: false, code: 'suspended', reason: '任务挂起等决策，除决策出口外一律拒绝唤醒' };
+    }
+    // 卡间依赖：前置卡没 done 就不许开跑。防的是「CEO 拆了 4 张，接管还没做完，发布脚本已经发布」。
+    // 只挡派卡类唤醒（review / 决策 / 返工是同一张卡自己的流程，与前置无关）。
+    if (task && BRIDGE_GATED_REASONS.has(wakeReason)) {
+      const unmet = unmetDependencies(task);
+      if (unmet.length) {
+        return {
+          ok: false, code: 'dependency',
+          reason: `还有 ${unmet.length} 张前置卡没完成（${unmet.join(', ')}），先排队`,
+        };
+      }
     }
     // P4-1：配额判定与通知统一走 quota.js（80% 预警一次、100% 停派并通知）。
     const cfg = cfgFor(agentId);
@@ -651,10 +709,6 @@ export function createEngine({
     // §7.3 第 5 项：只有「派卡」类唤醒受 bridge 在线约束（事件泵在 bridge 模式下已把卡留在 todo）。
     // review / escalation 是控制面内部决策，走控制面自己的 adapter，不要求本机 bridge 在线；
     // 否则 delegate 模式完成报告回写后会永远卡在 in_review，链路跑不通。
-    const BRIDGE_GATED_REASONS = new Set([
-      'issue_assigned', 'compensation', 'rework', 'checkout', 'bridge_checkout',
-      'manual', 'cycle',
-    ]);
     if (dispatchMode === 'bridge' && BRIDGE_GATED_REASONS.has(wakeReason)
       && !isBridgeOnline(db, agentId)) {
       return { ok: false, code: 'bridge_offline', reason: 'bridge 离线，任务留 todo 等待补投' };
@@ -789,7 +843,9 @@ export function createEngine({
     if (mod.strictEnvironment && typeof mod.testEnvironment === 'function') {
       // workRoot 必须和真正派活时（adapterConfig）用同一个值。
       // 只传 cfg.adapter.config 的话，配置写在文档级 workRoot 上的公司永远过不了环境检查。
-      const env = mod.testEnvironment(envConfig);
+      // await：testEnvironment 允许是异步的（webhook/HC 型 adapter 要发一次网络探针）。
+      // 同步 adapter 的返回值被 await 也照常工作，向后兼容。
+      const env = await mod.testEnvironment(envConfig);
       if (!env.ok) {
         // 事件泵已经把卡推进到 in_progress；「根本没派活」要补偿回 todo，否则会卡在半截状态（§8.6）。
         requeueIfIdle(taskId);
@@ -867,7 +923,25 @@ export function createEngine({
         id: agentId, isCEO: Boolean(agentRow?.isCEO),
         capabilities: JSON.parse(agentRow?.capabilities ?? '[]'),
       },
-      company: { agents: config.agents.map((a) => ({ id: a.id, isCEO: a.isCEO })) },
+      // 名册要完整：CEO 要据此决定「这活派给谁」。岗位名与担任者分开给，别把 agent 名当岗位。
+      company: {
+        agents: config.agents.map((a) => ({
+          id: a.id, postTitle: a.postTitle ?? a.displayName ?? a.id,
+          holderName: a.holderName ?? null, holderKind: a.holderKind ?? null,
+          displayName: a.displayName ?? a.id, isCEO: a.isCEO === true,
+          capabilities: a.capabilities ?? [], status: a.status ?? 'active',
+          reportsTo: a.reportsTo ?? null, maxDifficulty: a.maxDifficulty ?? null,
+          adapter: a.adapter?.type ?? null,
+        })),
+      },
+      workRoot: workDir,
+      // P7：项目可选。没指定项目时把「可用项目清单」交给 agent，由它自己判断归属
+      // （新项目 / 复用已有 / 一次性任务），而不是逼人在下单时先选。
+      projectAuto: task?.project == null && (config.projects ? Object.keys(config.projects).length > 0 : false),
+      availableProjects: listProjectEntries({ config, workRoot: workDir }).map((p) => ({
+        id: p.id, displayName: p.displayName, specExists: p.specExists,
+        rootDir: p.rootDir, deliverSubdir: p.deliverSubdir,
+      })),
       adapterConfig: { ...(cfg.adapter?.config ?? {}), workRoot: cfg.adapter?.config?.workRoot ?? workDir },
       extra,
     };
@@ -908,7 +982,9 @@ export function createEngine({
   function resolveChildSeat({ preferred, difficulty, managerId }) {
     const wanted = preferred ?? firstWorker();
     const seat = cfgFor(wanted);
-    if (seat && canTake({ agentId: wanted, maxDifficulty: ceilingOf(seat) }, difficulty)) {
+    // 总经理岗永不接执行卡：哪怕它在输出里点了自己的名字（想自己干），也强制改派给执行席位。
+    // 这是「严禁 CEO 自己干活」的第二道闸——第一道是提示词，第三道是契约校验。
+    if (seat && seat.isCEO !== true && canTake({ agentId: wanted, maxDifficulty: ceilingOf(seat) }, difficulty)) {
       return { assignee: wanted, reassignedFrom: null };
     }
     const pool = rankCandidates(getAgentCandidates(), { needCapability: 'execute', difficulty })
@@ -953,13 +1029,19 @@ export function createEngine({
         oldValue: seat.reassignedFrom, newValue: seat.assignee, taskId: task.taskId,
       });
     }
+    let derivedProject = task.project ?? null;
+    if (typeof result.project === 'string' && result.project.trim()) {
+      try {
+        derivedProject = assertProject({ config, workRoot: workDir, requested: result.project }).project;
+      } catch { /* 写错项目名不改判，沿用父卡归属，审计里另有记录 */ }
+    }
     const child = buildCard({
       requestId: `REQ-DERIVED-${shortId()}`, title: result.title ?? '派生任务',
       role: result.role ?? 'general', assignee: seat.assignee,
       mode: 'delegate', assignedBy: 'ceo',
       instructions: result.instructions ?? undefined,
       acceptance: result.acceptance ?? undefined, parentTaskId: task.taskId,
-      difficulty, project: task.project ?? null,
+      difficulty, project: derivedProject,
     });
     insertCard(child, child.assignee);
     if (task.status === 'in_progress' || task.status === 'todo') {
@@ -979,6 +1061,148 @@ export function createEngine({
       approvalId: approval.approvalId, kind, taskId, title, body,
     });
     return approval;
+  }
+
+  // 把 CEO 的「排班建议」组装成循环协议要求的完整 job。
+  // CEO 只填人能看懂的那几样（多久一次、干什么、怎么算干完、派给谁、归哪个项目），
+  // 协议要求的其余字段由控制面补齐——不让它去背 schema，也不给它机会写坏字段。
+  function buildRecurringJob(sug = {}, { task, requestedBy = null } = {}) {
+    const title = String(sug.title ?? '').trim().slice(0, 120);
+    if (!title) return { error: '缺 title（这条循环任务叫什么）' };
+    const rrule = String(sug.rrule ?? '').trim();
+    if (!rrule) return { error: '缺 rrule（多久跑一次）' };
+    const timezone = String(sug.timezone ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai';
+    try { nextFireAt(rrule, nowIso(), timezone); } catch (error) {
+      return { error: `rrule 不合法：${error.message}` };
+    }
+    const instructions = String(sug.instructions ?? '').trim();
+    if (!instructions) return { error: '缺 instructions（每轮具体要干什么）' };
+    const acceptance = (Array.isArray(sug.acceptance) ? sug.acceptance : [])
+      .map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 8);
+    if (!acceptance.length) return { error: '缺 acceptance（怎么算这一轮干完了）' };
+    // 承接人：必须是真能干的执行席位；CEO 在输出里点自己也会被改派（严禁自干）。
+    const difficulty = normalizeDifficulty(sug.difficulty ?? 'normal', { field: 'difficulty' });
+    const picked = resolveChildSeat({ preferred: sug.assignee ?? firstWorker(), difficulty, managerId: requestedBy });
+    if (!picked.assignee) return { error: '没有能接这活的执行席位' };
+    // 归属项目：只认已有且配了规范的；写了不存在的就拒，别让循环卡落到野地里。
+    let project = null;
+    if (sug.project) {
+      try { project = assertProject({ config, workRoot: workDir, requested: sug.project }).project; }
+      catch (error) { return { error: `项目不可用：${error.message}` }; }
+    }
+    const kind = RECURRING_KINDS.includes(sug.kind) ? sug.kind : 'maintenance';
+    // 协议不允许「永不停」的循环：终止条件必须至少有一个。
+    // 默认给一年有效期——长期任务也该有个到期复核点，到期自动暂停，董事会续期才继续跑。
+    const validUntil = typeof sug.validUntil === 'string' && sug.validUntil
+      ? sug.validUntil
+      : new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
+    // 任务号：优先用 CEO 给的名字，转成可读的短 slug；撞号就加序号，绝不覆盖已有任务。
+    const base = String(sug.id ?? title).toLowerCase()
+      .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'job';
+    let jobId = `JOB-${base}`;
+    for (let n = 2; db.prepare('SELECT 1 FROM recurring_jobs WHERE jobId = ?').get(jobId); n += 1) {
+      jobId = `JOB-${base}-${n}`;
+    }
+    return {
+      job: {
+        schema: 'aicompany.recurring/v1',
+        jobId, jobVersion: 1, title, kind,
+        owner: ceoId() ?? 'ceo', assignee: picked.assignee, reportsTo: ceoId() ?? null,
+        project, status: 'active',
+        trigger: { type: 'cron', rrule, timezone },
+        misfirePolicy: sug.misfirePolicy ?? 'run_once', misfireGraceMin: 720,
+        overlapPolicy: 'skip',
+        termination: {
+          validUntil,
+          maxCycles: Number.isInteger(sug.maxCycles) ? sug.maxCycles : null,
+          pauseOnConsecutiveFailures: 3,
+        },
+        requiresHumanEachCycle: sug.requiresHumanEachCycle === true,
+        taskTemplate: {
+          role: String(sug.role ?? 'execute'),
+          instructions, acceptance,
+          completionReportPath: 'output/completion.json',
+        },
+        budgetPerCycle: { maxRuns: 2 },
+        dedupeWindowMin: 60,
+      },
+      reassignedFrom: picked.reassignedFrom ?? null,
+    };
+  }
+
+  // 董事会不会读 rrule：把常见频率翻成人话，翻不出来就原样给 rrule 让它自己判断。
+  function describeRRule(rrule) {
+    const parts = Object.fromEntries(String(rrule).split(';').map((kv) => kv.split('=')));
+    const hh = parts.BYHOUR !== undefined ? String(parts.BYHOUR).padStart(2, '0') : null;
+    const mm = parts.BYMINUTE !== undefined ? String(parts.BYMINUTE).padStart(2, '0') : '00';
+    const clock = hh ? `${hh}:${mm}` : null;
+    const n = Number(parts.INTERVAL ?? 1);
+    const DAY = { MO: '一', TU: '二', WE: '三', TH: '四', FR: '五', SA: '六', SU: '日' };
+    switch (parts.FREQ) {
+      case 'HOURLY': return n > 1 ? `每 ${n} 小时` : '每小时';
+      case 'DAILY': return clock ? `每天 ${clock}` : '每天';
+      case 'WEEKLY': {
+        const days = String(parts.BYDAY ?? '').split(',').filter(Boolean).map((d) => DAY[d] ?? d).join('、');
+        return `${n > 1 ? `每 ${n} 周` : '每周'}${days ? days : ''}${clock ? ` ${clock}` : ''}`;
+      }
+      case 'MONTHLY': {
+        const dom = parts.BYMONTHDAY ? `${parts.BYMONTHDAY} 号` : '';
+        return `${n > 1 ? `每 ${n} 个月` : '每月'}${dom ? ` ${dom}` : ''}${clock ? ` ${clock}` : ''}`;
+      }
+      default: return String(rrule);
+    }
+  }
+
+  // 审批单正文：董事会要能一眼判断「该不该让它长期跑」——频率、干什么、谁干、归哪儿、烧多少。
+  function describeRecurringJob(job, reason) {
+    const seat = cfgFor(job.assignee);
+    const lines = [
+      reason ? `为什么建：${String(reason).slice(0, 600)}` : '为什么建：CEO 判断这活是长期重复的，值得排班。',
+      `多久一次：${describeRRule(job.trigger.rrule)}（时区 ${job.trigger.timezone}）`,
+      `每轮干什么：${job.taskTemplate.instructions.slice(0, 400)}`,
+      `谁干：${seat?.postTitle ?? job.assignee}（担任：${seat?.holderName ?? job.assignee}）`,
+      `归属项目：${job.project ?? '不归属任何项目（产物只留在公司）'}`,
+      `每轮怎么算干完：${job.taskTemplate.acceptance.join('；')}`,
+      `消耗：每轮最多 2 次唤醒；连续失败 3 轮会自动暂停等你处理。`,
+      `有效期：到 ${String(job.termination?.validUntil ?? '').slice(0, 10)} 自动暂停${job.termination?.maxCycles ? `；最多 ${job.termination.maxCycles} 轮` : ''}，要续再点一次。`,
+      '通过就按这个节奏自动跑；拒绝或改完再提交都行，有意见写在下面。',
+    ];
+    return lines.join('\n');
+  }
+
+  // CEO 提的排班建议 → 逐条出审批单。真正的注册发生在董事会点「通过」之后（server 的 handler）。
+  // 一轮最多 3 条；同一条已在等审批时不重复出单；不合协议的记审计后丢掉，绝不静默吞掉。
+  function requestRecurringApprovals(result, task, agentId) {
+    const list = [
+      ...(Array.isArray(result?.recurringSuggestions) ? result.recurringSuggestions : []),
+      ...(result?.recurringSuggestion ? [result.recurringSuggestion] : []),
+    ].filter((x) => x && typeof x === 'object').slice(0, 3);
+    for (const sug of list) {
+      const built = buildRecurringJob(sug, { task, requestedBy: agentId });
+      if (built.error) {
+        writeAudit(db, {
+          actor: agentId, action: 'recurring_suggestion_rejected',
+          newValue: `${String(sug.title ?? '(无标题)').slice(0, 60)}|${built.error}`.slice(0, 300),
+          taskId: task.taskId,
+        });
+        continue;
+      }
+      const dup = db.prepare(`SELECT approvalId FROM approvals
+        WHERE kind = 'recurring_create' AND status = 'pending' AND requestJson LIKE ?`)
+        .get(`%"jobId":"${built.job.jobId}"%`);
+      if (dup) continue;
+      const approval = requestApproval({
+        kind: 'recurring_create', taskId: task.taskId,
+        title: `循环任务申请：${built.job.title}`,
+        body: describeRecurringJob(built.job, sug.reason),
+        payload: { job: built.job, rruleText: describeRRule(built.job.trigger.rrule) },
+        requestedBy: agentId,
+      });
+      writeAudit(db, {
+        actor: agentId, action: 'recurring_suggested',
+        newValue: `${built.job.jobId}|${approval.approvalId}`, taskId: task.taskId,
+      });
+    }
   }
 
   // 阻塞 / 返工耗尽的统一上报：生成 escalation 事件，沿汇报线找决策者（§7.4）。
@@ -1224,6 +1448,100 @@ export function createEngine({
       return { approvalId, decision, applied: true, ...handler(payload, { decidedBy }) };
     }
 
+    // 循环任务：CEO 提建议，董事会通过后才真注册进调度器。
+    // 不批 = 调度器完全不知道有这条，绝不会自己开跑（长期烧额度的事必须人点头）。
+    if (approval.kind === 'recurring_create') {
+      if (decision !== 'approved') {
+        writeAudit(db, {
+          actor: decidedBy, action: 'recurring_create_rejected',
+          newValue: `${approvalId}:${decision}`, taskId: approval.taskId,
+        });
+        notifier.send({
+          title: `循环任务未通过：${approval.request?.title ?? approvalId}`,
+          body: `董事会结论「${decision}」，这条排班不建；需要的话让总经理重新提。`,
+          scene: 'recurring', taskId: approval.taskId,
+        });
+        return { approvalId, decision, applied: false, status: 'rejected' };
+      }
+      const handler = approvalHandlers.recurring_create;
+      if (!handler) throw new Error('没有注册循环任务处理器（approvalHandlers.recurring_create）');
+      try {
+        const out = handler(payload, { decidedBy, approval });
+        writeAudit(db, {
+          actor: decidedBy, action: 'recurring_created',
+          newValue: `${out?.jobId ?? payload?.job?.jobId ?? ''}`, taskId: approval.taskId,
+        });
+        return { approvalId, decision, applied: true, ...out };
+      } catch (error) {
+        // 注册不成（协议不合法 / 席位已删）不能留在「已通过」：退回待办并说清原因。
+        db.prepare("UPDATE approvals SET status = 'pending', decidedAt = NULL WHERE approvalId = ?").run(approvalId);
+        writeAudit(db, {
+          actor: decidedBy, action: 'recurring_create_failed',
+          newValue: `${approvalId}:${String(error.message).slice(0, 300)}`, taskId: approval.taskId,
+        });
+        return {
+          approvalId, decision, applied: false, status: 'pending',
+          error: `没建成，审批单已退回待办：${error.message}`,
+        };
+      }
+    }
+
+    if (approval.kind === 'project_create') {
+      // 被项目闸拦下、正在等这张单的父卡：批或拒都要把它放出来，不能永远停在挂起态。
+      const releaseGatedTask = (note) => {
+        if (!task) return false;
+        const cur = db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(task.taskId)?.status;
+        if (cur !== 'awaiting_decision') return false;
+        transition(db, task.taskId, 'in_progress', decidedBy);
+        emitEvent({
+          type: 'issue_assigned', taskId: task.taskId, agentId: task.assignee,
+          payload: { wakeReason: 'decision', note },
+          dedupeKey: `project-decided:${task.taskId}:${approvalId}`,
+        });
+        writeAudit(db, { actor: decidedBy, action: 'project_gate_released', newValue: note, taskId: task.taskId });
+        return true;
+      };
+      // CEO 建议建项目 → 董事会点头才真建。通过 = 建目录 + 写起步规范 + 记进配置。
+      if (decision !== 'approved') {
+        writeAudit(db, {
+          actor: decidedBy, action: 'project_create_rejected',
+          newValue: `${approvalId}:${decision}`, taskId: approval.taskId,
+        });
+        notifier.send({
+          title: `建项目未通过：${approval.request?.title ?? approvalId}`,
+          body: `董事会结论「${decision}」，这个项目不建；相关任务按一次性任务或已有项目处理。`,
+          scene: 'project', taskId: approval.taskId,
+        });
+        // 这一轮按一次性任务继续：项目不批不等于活不做。
+        releaseGatedTask('项目未通过，按一次性任务继续（产物只留在公司）');
+        return { approvalId, decision, applied: false, status: 'rejected' };
+      }
+      const handler = approvalHandlers.project_create;
+      if (!handler) throw new Error('没有注册建项目处理器（approvalHandlers.project_create）');
+      try {
+        const out = handler(payload, { decidedBy, approval });
+        writeAudit(db, {
+          actor: decidedBy, action: 'project_created',
+          newValue: String(out?.project?.id ?? payload?.project?.id ?? ''), taskId: approval.taskId,
+        });
+        // 项目建好了：把当初等它的父卡放出来重拆，这轮才会带上项目归属（产物/经验/交付才有着落）。
+        releaseGatedTask(`项目 ${out?.project?.id ?? ''} 已批准，重新拆解`);
+        return { approvalId, decision, applied: true, ...out };
+      } catch (error) {
+        // 建不成（例：CEO 填的落盘目录不存在）不能把审批单留在「已通过」——
+        // 回滚成待办，把原因原样给董事会，项目一点都没建。
+        db.prepare("UPDATE approvals SET status = 'pending', decidedAt = NULL WHERE approvalId = ?").run(approvalId);
+        writeAudit(db, {
+          actor: decidedBy, action: 'project_create_failed',
+          newValue: `${approvalId}:${String(error.message).slice(0, 300)}`, taskId: approval.taskId,
+        });
+        return {
+          approvalId, decision, applied: false, status: 'pending',
+          error: `没建成，审批单已退回待办：${error.message}`,
+        };
+      }
+    }
+
     if (approval.kind === 'replan') {
       if (decision !== 'approved') {
         writeAudit(db, {
@@ -1433,6 +1751,28 @@ export function createEngine({
         newValue: `${task.project}|${out.copied.length} 个文件 → ${out.targetDir}`.slice(0, 300),
         runId, taskId: task.taskId,
       });
+    } else if (out.code === 'NO_ARTIFACTS') {
+      // 「这卡天生没有产物」（只排班 / 只给建议 / 只做验收）不是失败：
+      // 记一条账就算结案，否则维护心跳每重启一次就再刷 5 条 deliver_failed，
+      // 把真正的落盘失败埋进噪音里。
+      try {
+        appendDeliveryLog(workDir, task.project, {
+          schema: DELIVERY_SCHEMA,
+          taskId: task.taskId,
+          project: task.project,
+          at: clockIso(),
+          targetDir: out.targetDir ?? null,
+          copied: [],
+          failed: [],
+          code: 'NO_ARTIFACTS',
+          note: '本卡没有产物，无物可落（不是失败）',
+        });
+      } catch { /* 账写不进去也不该改卡状态 */ }
+      writeAudit(db, {
+        actor: 'control-plane', action: 'deliver_skipped',
+        newValue: `${task.project}|本卡无产物，记一次账不再重试`.slice(0, 300),
+        runId, taskId: task.taskId,
+      });
     } else {
       const why = out.error ?? (out.failed ?? []).map((f) => f.reason).join('; ') ?? '';
       writeAudit(db, {
@@ -1453,7 +1793,10 @@ export function createEngine({
       const entry = config?.projects?.[row.project] ?? {};
       if (!entry.rootDir) continue;
       const last = lastDeliveryOf(workDir, row.project, row.taskId);
-      if (last && Array.isArray(last.failed) && last.failed.length === 0 && last.copied?.length) continue;
+      // 已记过账就结案：要么真落成了（copied 有文件），要么是「天生没产物」（NO_ARTIFACTS）。
+      // 后者以前会被当成失败反复重试，重启一次刷一轮，纯噪音。
+      if (last && (last.code === 'NO_ARTIFACTS'
+        || (Array.isArray(last.failed) && last.failed.length === 0 && last.copied?.length))) continue;
       const attempts = deliverAttempts.get(row.taskId) ?? 0;
       if (attempts >= 5) continue;
       if (runningProcesses(entry.deliverBlockers ?? []).length) continue;
@@ -1467,9 +1810,69 @@ export function createEngine({
 
   // G2：状态机是全国的统一出口，终态通知挂在这里，任何路径进 done/blocked/cancelled 都不会漏。
   // 循环引擎自己收账走的是直接 UPDATE（completeCycle），不经过这里，不会自激。
+  // 上游 done → 放行下游：只放「所有前置都已 done」的，已经在排队的不重复投。
+  // 除了 done 时立刻调，维护心跳也会扫一遍兜底（事件丢了 / 重启后卡住都能自己恢复）。
+  function releaseReadyDependencies() {
+    const rows = db.prepare("SELECT * FROM tasks WHERE status = 'todo' AND dependsOn IS NOT NULL").all();
+    let released = 0;
+    for (const row of rows) {
+      const deps = dependsOnOf(row);
+      if (!deps.length) continue;
+      if (unmetDependencies(row).length) continue;
+      const pending = db.prepare(`SELECT 1 FROM events WHERE taskId = ? AND processed = 0
+        AND type = 'issue_assigned' LIMIT 1`).get(row.taskId);
+      if (pending) continue;
+      emitEvent({
+        type: 'issue_assigned', taskId: row.taskId, agentId: row.assignee,
+        payload: { wakeReason: 'issue_assigned', after: deps.join(',') },
+        // 每次都不同：被闸门拦下后还要能重投，靠上面那条 pending 检查防重复。
+        dedupeKey: `dep-release:${row.taskId}:${nowIso()}`,
+      });
+      writeAudit(db, {
+        actor: 'control-plane', action: 'dependency_released',
+        newValue: `${row.taskId} 的前置已全部完成（${deps.join(',')}）`, taskId: row.taskId,
+      });
+      released += 1;
+    }
+    return released;
+  }
+
+  // 看板要一句话说清「这张卡为什么停着」。只看最近一条相关记录，不扫全历史。
+  // 返回 { taskId: '原因' }；没停着的卡不出现（前端据此决定要不要显示那一行小字）。
+  const HOLD_LABEL = {
+    difficulty_blocked: '没人接得住这个难度',
+    gate_blocked: '闸门拦着',
+    wake_rejected: '派不出去',
+    blocked_escalated: '员工报卡住了',
+    review_rejected: '被打回返工',
+    deliver_deferred: '等对方程序关掉再落盘',
+  };
+  function holdReasons() {
+    const rows = db.prepare(`SELECT taskId, status, dependsOn FROM tasks
+      WHERE status IN ('todo','in_progress','in_review','blocked','paused','awaiting_decision')`).all();
+    const out = {};
+    for (const row of rows) {
+      if (row.status === 'awaiting_decision') { out[row.taskId] = '等你拍板'; continue; }
+      const unmet = unmetDependencies(row);
+      if (unmet.length) {
+        out[row.taskId] = `等前置卡 ${unmet.map((x) => String(x).replace(/^T-/, '')).join('、')} 做完`;
+        continue;
+      }
+      const last = db.prepare(`SELECT action, newValue FROM audit WHERE taskId = ?
+        AND action IN ('difficulty_blocked','gate_blocked','wake_rejected','blocked_escalated','review_rejected')
+        ORDER BY rowid DESC LIMIT 1`).get(row.taskId);
+      if (!last) continue;
+      const label = HOLD_LABEL[last.action] ?? last.action;
+      const detail = String(last.newValue ?? '').slice(0, 80);
+      out[row.taskId] = detail ? `${label}：${detail}` : label;
+    }
+    return out;
+  }
+
   function transition(dbHandle, taskId, to, actor = 'control-plane', runId = null) {
     const out = rawTransition(dbHandle, taskId, to, actor, runId);
     if (to === 'done' || to === 'blocked' || to === 'cancelled') noteTaskTerminal(taskId, to, runId);
+    if (to === 'done') releaseReadyDependencies();
     return out;
   }
 
@@ -1534,34 +1937,173 @@ export function createEngine({
     if (agentId === ceoId()) {
       assertCeoOutput(result);
       if (result.type === 'task-create') {
-        // G3：CEO 可以给子任务标难度；没标就继承父卡（拆出来的活不会比原活更简单）。
-        const childDifficulty = normalizeDifficulty(result.difficulty ?? task.difficulty, { field: 'difficulty' });
-        const seat = resolveChildSeat({
-          preferred: result.assignee, difficulty: childDifficulty, managerId: ceoId(),
-        });
-        if (!seat.assignee) {
-          parkForDifficulty(task, { wanted: result.assignee ?? firstWorker(), difficulty: childDifficulty });
-          return;
+        // CEO 可以一次拆多张卡（result.tasks）；只给一张时也用顶层字段，兼容老的派单器脚本。
+        // 「只排班不派卡」是合法产出：显式给空 tasks + 带了排班建议时，不该硬凑一张空壳卡出来。
+        const recList = [
+          ...(Array.isArray(result.recurringSuggestions) ? result.recurringSuggestions : []),
+          ...(result.recurringSuggestion ? [result.recurringSuggestion] : []),
+        ].filter((x) => x && typeof x === 'object');
+        const explicitTasks = Array.isArray(result.tasks) ? result.tasks : null;
+        const requested = (explicitTasks ?? [result])
+          .filter((c) => c && typeof c === 'object')
+          .slice(0, 8);
+        if (!requested.length && !recList.length) {
+          throw new Error('CEO 既没派卡、也没提排班，这一轮等于没产出（tasks 空且无 recurringSuggestion）');
         }
-        if (seat.reassignedFrom && seat.reassignedFrom !== seat.assignee) {
+        // 项目归属：人没指定时由 CEO 改判（这是「不逼人选项目」的另一半）。
+        // 但它只能指向「已有且配了规范」的项目；写了不存在的项目照样拒，绝不让产物落到野地里。
+        let childProject = task.project ?? null;
+        const wantedProject = requested.find((c) => typeof c.project === 'string' && c.project.trim())?.project
+          ?? (typeof result.project === 'string' && result.project.trim() ? result.project : null);
+        if (wantedProject) {
+          try {
+            childProject = assertProject({ config, workRoot: workDir, requested: wantedProject }).project;
+          } catch (error) {
+            writeAudit(db, {
+              actor: 'ceo', action: 'project_rejected',
+              newValue: `${wantedProject}|${error.message}`.slice(0, 300), taskId: task.taskId,
+            });
+          }
+        }
+        // 建议新建项目 → 只出一张审批单。CEO 不许自己改公司配置，董事会点头才真建。
+        const suggestion = result.projectSuggestion
+          ?? requested.find((c) => c.projectSuggestion)?.projectSuggestion;
+        if (suggestion && typeof suggestion === 'object' && suggestion.id
+          && !pendingApprovalFor(task.taskId, 'project_create')) {
+          const s = {
+            id: String(suggestion.id).trim().toLowerCase(),
+            displayName: String(suggestion.displayName ?? suggestion.id).trim(),
+            rootDir: suggestion.rootDir ? String(suggestion.rootDir).trim() : null,
+            deliverSubdir: suggestion.deliverSubdir ? String(suggestion.deliverSubdir).trim() : null,
+            reason: String(suggestion.reason ?? '').slice(0, 600),
+            // CEO 连规范一起拟好：董事会只做「通过 / 拒绝 + 写意见」，不用自己填任何数据。
+            acceptance: (Array.isArray(suggestion.acceptance) ? suggestion.acceptance : [])
+              .map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 8),
+            rules: (Array.isArray(suggestion.rules) ? suggestion.rules : [])
+              .map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 8),
+          };
+          const approval = requestApproval({
+            kind: 'project_create', taskId: task.taskId,
+            title: `新建项目申请：${s.displayName}（${s.id}）`,
+            body: `${s.reason || 'CEO 认为这活值得单开一个项目。'}\n`
+              + '项目信息与规范草案已由 CEO 填好，董事会只需选「通过」或「拒绝」，有意见写在下面。',
+            payload: { project: s }, requestedBy: 'ceo',
+          });
           writeAudit(db, {
-            actor: 'ceo', action: 'difficulty_reassigned',
-            oldValue: seat.reassignedFrom, newValue: seat.assignee, taskId: task.taskId,
+            actor: 'ceo', action: 'project_suggested',
+            newValue: `${s.id}|${approval.approvalId}`, taskId: task.taskId,
           });
         }
-        const childSpec = {
-          title: result.title ?? '子任务', role: result.role ?? 'general',
-          assignee: seat.assignee, difficulty: childDifficulty,
-          instructions: result.instructions ?? undefined,
-          acceptance: result.acceptance ?? undefined,
-        };
+        // ★ 项目闸：卡片显式写了「归某个还不存在的项目」时，不许先跑。
+        // 先跑完再批 = 产物不归这个项目、经验不进项目记忆、交付不落盘，等于白批（真机踩过这个坑）。
+        // 只拦「显式指了不存在的项目」的卡；顺带建议建新项目（没写具体归属）不阻塞当前工作。
+        const projectExists = (id) => Boolean(id && config.projects?.[String(id).trim().toLowerCase()]);
+        const waitingFor = [];
+        for (const c of requested) {
+          if (typeof c.project !== 'string' || !c.project.trim()) continue;
+          const pid = c.project.trim().toLowerCase();
+          if (!projectExists(pid) && !waitingFor.includes(pid)) waitingFor.push(pid);
+        }
+        if (wantedProject && !projectExists(wantedProject)) {
+          const pid = String(wantedProject).trim().toLowerCase();
+          if (!waitingFor.includes(pid)) waitingFor.push(pid);
+        }
+        // 董事会已经拒过 / 要求重写的项目不再拦：按一次性任务跑，别把链路堵死。
+        const blockedOn = waitingFor.find((id) => !db.prepare(`SELECT 1 FROM approvals
+          WHERE kind = 'project_create' AND status IN ('rejected', 'rewrite') AND requestJson LIKE ?`)
+          .get(`%"id":"${id}"%`));
+        if (blockedOn) {
+          const pendingAp = db.prepare(`SELECT approvalId FROM approvals
+            WHERE kind = 'project_create' AND status = 'pending' AND requestJson LIKE ?`)
+            .get(`%"id":"${blockedOn}"%`);
+          writeAudit(db, {
+            actor: 'control-plane', action: 'project_gate_blocked',
+            newValue: `${blockedOn}|${pendingAp?.approvalId ?? '无待批单'}`, taskId: task.taskId,
+          });
+          const cur = db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(task.taskId)?.status;
+          if (cur === 'todo') transition(db, task.taskId, 'in_progress', 'control-plane');
+          if (cur === 'todo' || cur === 'in_progress') {
+            transition(db, task.taskId, 'awaiting_decision', 'control-plane');
+          }
+          notifier.send({
+            title: `这单在等项目审批：${blockedOn}`,
+            body: 'CEO 判断这活要归这个项目，但它还没批。批了会自动接着拆；不批则按一次性任务跑。',
+            scene: 'project', taskId: task.taskId,
+          });
+          return { gated: 'project_pending', project: blockedOn, approvalId: pendingAp?.approvalId ?? null };
+        }
+        // 建议「这活是长期的，得按节奏反复做」→ 组装成完整循环任务，出审批单。
+        // 循环任务会长期反复消耗额度（GUI 席位还抢键鼠），所以必须董事会点头才真注册；
+        // CEO 只能提，不能自己排班。一次最多提 3 条，多的截掉不静默堆积。
+        for (const sug of recList.slice(0, 3)) {
+          const built = buildRecurringJob(sug, { task, requestedBy: agentId });
+          if (built.error) {
+            writeAudit(db, {
+              actor: 'ceo', action: 'recurring_suggestion_rejected',
+              newValue: `${String(sug.title ?? '(无标题)').slice(0, 60)}|${built.error}`.slice(0, 300),
+              taskId: task.taskId,
+            });
+            continue;
+          }
+          // 同一条循环任务已经在等董事会时不出第二张单（CEO 一轮可能重复提同一条）。
+          const dup = db.prepare(`SELECT approvalId FROM approvals
+            WHERE kind = 'recurring_create' AND status = 'pending' AND requestJson LIKE ?`)
+            .get(`%"jobId":"${built.job.jobId}"%`);
+          if (dup) continue;
+          const approval = requestApproval({
+            kind: 'recurring_create', taskId: task.taskId,
+            title: `循环任务申请：${built.job.title}`,
+            body: describeRecurringJob(built.job, sug.reason),
+            payload: { job: built.job, rruleText: describeRRule(built.job.trigger.rrule) },
+            requestedBy: 'ceo',
+          });
+          writeAudit(db, {
+            actor: 'ceo', action: 'recurring_suggested',
+            newValue: `${built.job.jobId}|${approval.approvalId}`, taskId: task.taskId,
+          });
+        }
+        // 拆解说明：看板「运行与审计」里能查到 CEO 当时是怎么想的，不是黑盒。
+        if (result.summary) {
+          writeAudit(db, {
+            actor: 'ceo', action: 'ceo_plan',
+            newValue: String(result.summary).slice(0, 1200), taskId: task.taskId,
+          });
+        }
+
+        // 先把每张卡的承接人都定好：有一张派不出去就整单挂起，不做「半单」。
+        const specs = [];
+        for (const c of requested) {
+          // G3：CEO 可以给子任务标难度；没标就继承父卡（拆出来的活不会比原活更简单）。
+          const childDifficulty = normalizeDifficulty(c.difficulty ?? task.difficulty, { field: 'difficulty' });
+          const seat = resolveChildSeat({
+            preferred: c.assignee, difficulty: childDifficulty, managerId: ceoId(),
+          });
+          if (!seat.assignee) {
+            parkForDifficulty(task, { wanted: c.assignee ?? firstWorker(), difficulty: childDifficulty });
+            return;
+          }
+          if (seat.reassignedFrom && seat.reassignedFrom !== seat.assignee) {
+            writeAudit(db, {
+              actor: 'ceo', action: 'difficulty_reassigned',
+              oldValue: seat.reassignedFrom, newValue: seat.assignee, taskId: task.taskId,
+            });
+          }
+          specs.push({
+            title: c.title ?? '子任务', role: c.role ?? 'general',
+            assignee: seat.assignee, difficulty: childDifficulty,
+            instructions: c.instructions ?? undefined,
+            acceptance: c.acceptance ?? undefined,
+            // 卡间依赖：CEO 写 after（同批序号，1 基；也可以写同批卡的标题）。没写 = 并行。
+            after: Array.isArray(c.after) ? c.after : (c.after === undefined || c.after === null ? [] : [c.after]),
+          });
+        }
         // P4-2 战略门禁：开着就必须人点头才派活；任务停在 in_progress 等审批，不额外烧额度。
         if (config.gates?.strategy === true) {
           const approval = requestApproval({
             kind: 'strategy', taskId: task.taskId,
             title: `战略门禁：${task.title}`,
-            body: `CEO 提交本轮目标拆解（派给 ${childSpec.assignee}），等你通过 / 要求重写 / 驳回。`,
-            payload: { child: childSpec }, requestedBy: 'ceo',
+            body: `CEO 提交本轮目标拆解（${specs.length} 张卡，首张派给 ${specs[0]?.assignee}），等你通过 / 要求重写 / 驳回。`,
+            payload: { child: specs[0], children: specs }, requestedBy: 'ceo',
           });
           writeAudit(db, {
             actor: 'ceo', action: 'strategy_gate_waiting',
@@ -1569,12 +2111,58 @@ export function createEngine({
           });
           return;
         }
-        const child = buildCard({
-          requestId: task.requestId, ...childSpec,
-          mode: 'delegate', assignedBy: 'ceo', parentTaskId: task.taskId, assignerId: ceoId(),
-          project: task.project ?? null,
+        const created = [];
+        for (const spec of specs) {
+          const child = buildCard({
+            requestId: task.requestId, ...spec,
+            // 依赖留到所有卡都建完、拿到真实 taskId 再回填。
+            dependsOn: [],
+            mode: 'delegate', assignedBy: 'ceo', parentTaskId: task.taskId, assignerId: ceoId(),
+            project: childProject,
+            origin: { ceoNote: result.summary ? String(result.summary).slice(0, 600) : null },
+          });
+          // 先建不派：有前置卡的等上游 done 再放行，避免「接管还没做完，发布脚本已经发布了」。
+          insertCard(child, child.assignee, { dispatch: false });
+          created.push(child);
+        }
+        // 回填依赖：序号是 1 基（对 CEO 来说「第 1 张」最自然），也接受同批卡的标题。
+        const wired = [];
+        created.forEach((child, i) => {
+          const deps = [];
+          for (const ref of specs[i].after ?? []) {
+            const byIndex = /^\d+$/.test(String(ref)) ? created[Number(ref) - 1] : null;
+            const target = byIndex ?? created.find((c) => c.title === String(ref));
+            if (target && target.taskId !== child.taskId) deps.push(target.taskId);
+          }
+          const unique = [...new Set(deps)];
+          if (!unique.length) return;
+          db.prepare('UPDATE tasks SET dependsOn = ?, updatedAt = ? WHERE taskId = ?')
+            .run(JSON.stringify(unique), nowIso(), child.taskId);
+          wired.push(`${child.taskId}←${unique.join('+')}`);
         });
-        insertCard(child, child.assignee);
+        // 只派「没有前置」的；有前置的由 releaseReadyDependencies 在上游 done 时放行。
+        let dispatched = 0;
+        for (const child of created) {
+          if (dependsOnOf({ dependsOn: db.prepare('SELECT dependsOn FROM tasks WHERE taskId = ?').get(child.taskId)?.dependsOn }).length) continue;
+          emitEvent({
+            type: 'issue_assigned', taskId: child.taskId, agentId: child.assignee,
+            payload: { wakeReason: 'issue_assigned', mode: child.mode },
+            dedupeKey: `assign:${child.taskId}:1`,
+          });
+          dispatched += 1;
+        }
+        if (wired.length) {
+          writeAudit(db, {
+            actor: 'ceo', action: 'dependencies_wired',
+            newValue: `${wired.length} 张有前置：${wired.join(' | ')}`.slice(0, 400),
+            taskId: task.taskId,
+          });
+        }
+        writeAudit(db, {
+          actor: 'ceo', action: 'tasks_created',
+          newValue: `${created.length} 张（先派 ${dispatched} 张）：${created.map((c) => c.taskId).join(', ')}｜项目 ${childProject ?? '(一次性)'}`.slice(0, 400),
+          taskId: task.taskId,
+        });
         transition(db, task.taskId, 'in_review', 'ceo', outcome.runId);
         transition(db, task.taskId, 'done', 'ceo', outcome.runId);
       } else if (result.type === 'review') {
@@ -1806,7 +2394,17 @@ export function createEngine({
       if (!ev) break;
       markProcessed(db, ev.eventId);
       steps += 1;
-      await handleEvent(ev);
+      try {
+        await handleEvent(ev);
+      } catch (error) {
+        // 一个坏事件不能拖死整条队列： pump() 的调用方很多是 .catch(() => {})（后台触发），
+        // 异常一旦从 pumpOnce 逃出去，泵就没人再拉，后面的事件永远排队（T-af72158d 事故）。
+        // 这里记审计后继续消化队列，让「哪一步坏了」留痕可查。
+        writeAudit(db, {
+          actor: 'control-plane', action: 'pump_step_failed',
+          newValue: `${ev.type}|${ev.taskId ?? '-'}|${String(error.message ?? error).slice(0, 300)}`,
+        });
+      }
     }
     const brief = maybeBrief();
     return { steps, pending: pendingEvents(db), brief };
@@ -1838,7 +2436,10 @@ export function createEngine({
   // 但退回 todo 之后没有任何事件再叫它 —— 没人扫就永远停在那儿（看着像卡死）。
   // 这里只补「既没有待处理事件、又确实躺了一会儿」的卡，避免每轮都往审计里灌垃圾。
   async function reconcile({ olderThanMs = 60_000, limit = 20 } = {}) {
-    const rows = db.prepare(`SELECT taskId, status, updatedAt, assignee FROM tasks
+    // 先把「上游已完成、下游该放行」的补投掉：同一轮心跳里的 pump 就能直接推进，
+    // 不用拖到下一分钟。重启后卡在依赖上的链，靠这一步自己活过来。
+    const releasedDeps = releaseReadyDependencies();
+    const rows = db.prepare(`SELECT taskId, status, updatedAt, assignee, dependsOn FROM tasks
       WHERE status IN ('todo', 'in_progress') ORDER BY updatedAt`).all();
     const cutoff = clock().getTime() - olderThanMs;
     let requeued = 0;
@@ -1849,6 +2450,8 @@ export function createEngine({
       const active = db.prepare("SELECT 1 AS n FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1")
         .get(row.taskId);
       if (active) { waiting += 1; continue; }
+      // 依赖没满足的卡也不是「躺着」：它在等上游。重投只会被 runPolicy 拦下来白记一条。
+      if (unmetDependencies(row).length) { waiting += 1; continue; }
       const pending = db.prepare(`SELECT 1 AS n FROM events
         WHERE taskId = ? AND processed = 0 AND type = 'issue_assigned' LIMIT 1`).get(row.taskId);
       if (pending) { waiting += 1; continue; }
@@ -1860,13 +2463,21 @@ export function createEngine({
       requeued += 1;
       if (requeued >= limit) break;
     }
-    const pumped = requeued ? await pump() : { steps: 0, pending: pendingEvents(db), brief: null };
+    // 泵可能已经死了（上一次 drain 抛异常被后台调用方吞掉）：
+    // 只看 requeued 的话，「todo 卡有待处理投递事件」会让心跳永远不 pump，
+    // 而死泵又永远不消费这些事件 —— 互相死锁。所以只要队列里有事件就先泵一次。
+    let pumped = { steps: 0, pending: pendingEvents(db), brief: null };
+    if (requeued > 0 || pumped.pending > 0) {
+      try { pumped = await pump(); } catch (error) {
+        writeAudit(db, { actor: 'scheduler', action: 'pump_failed', newValue: String(error.message ?? error) });
+      }
+    }
     if (requeued) {
       writeAudit(db, { actor: 'scheduler', action: 'reconcile_requeue', newValue: String(requeued) });
     }
     // P7-5：顺手补落盘 —— 被译台挡住、或上次落盘失败的卡，在这里重试。
     const deliveries = retryPendingDeliveries();
-    return { scanned: rows.length, requeued, waiting, deliveries, ...pumped };
+    return { scanned: rows.length, requeued, waiting, deliveries, releasedDeps, ...pumped };
   }
 
   async function onProgressReport() {
@@ -1905,7 +2516,11 @@ export function createEngine({
     deliverAccepted: (task, runId = null) => deliverAccepted(task, runId),
     retryPendingDeliveries: (opts) => retryPendingDeliveries(opts),
     compensationScan: (opts) => compensationScan(db, opts),
+    // 公司工作目录：新建项目 / 落盘补偿等外部动作要按它定位，别再各自猜一遍。
+    workDir,
     getTasks: () => db.prepare('SELECT * FROM tasks ORDER BY rowid').all(),
+    // P8：每张「停着的」卡一句话原因，看板直接用（不用前端自己去啃审计）。
+    holdReasons: () => holdReasons(),
     getRuns: () => db.prepare('SELECT * FROM runs ORDER BY rowid').all(),
     getAudit: () => db.prepare('SELECT * FROM audit ORDER BY rowid').all(),
     getBriefs: () => db.prepare('SELECT * FROM briefs ORDER BY rowid').all(),

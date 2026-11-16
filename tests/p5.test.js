@@ -51,6 +51,11 @@ async function soakRun(t, { hours = 24, stepMinutes = 60, workRoot = null, confi
   });
   t.after(() => { try { runner.close(); } catch { /* 已关 */ } });
   const result = await runner.drive({ hours });
+  // 压缩跑出异常 = 那一步的样本缺失，指标和四项结论会跟着失真。
+  // 以前这里不看 errors，负载高时只会表现成「某个指标不对」，看着像指标算错，
+  // 其实根因是某步炸了。直接把异常点出来，省得下次再猜。
+  assert.deepEqual(result.errors, [],
+    `压缩跑出现 ${result.errors.length} 个异常：${JSON.stringify(result.errors.slice(0, 3))}`);
   const observation = runner.observation({ mode: 'compressed', hours });
   return { runner, result, observation, root };
 }

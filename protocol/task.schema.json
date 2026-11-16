@@ -46,6 +46,14 @@
       ],
       "description": "P7 项目 id；规范与记忆在 <workRoot>/projects/<id>/ 下。老卡为 null。"
     },
+    "dependsOn": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "卡间依赖：前置卡的 taskId。非空时前置没 done 就不派活。空数组 / 不写 = 并行（老行为）。"
+    },
     "role": {
       "type": "string",
       "minLength": 1
