@@ -626,7 +626,11 @@
         '</td><td>' + difficultyTag(t.difficulty) + '</td><td>' + statusPill(t.status) +
         (t.holdReason ? '<div class="meta" style="font-size:11px">' + esc(t.holdReason) + '</div>' : '') +
         '</td><td>' + esc(t.assignee) +
-        '</td><td><span class="tag">' + esc(t.mode) + '</span></td>' +
+        '</td><td><span class="tag">' + esc(t.mode) + '</span>' +
+        (t.repo ? '<span class="tag">仓库 ' + esc(t.repo) + '</span>' : '') +
+        (t.status === 'in_review' && t.reviewBy && t.reviewBy !== 'ceo'
+          ? '<span class="tag">等 ' + esc(t.reviewBy) + ' 审</span>' : '') +
+        '</td>' +
         '<td style="white-space:nowrap"><button type="button" class="ghost" data-result="' + esc(t.taskId) + '">看结果</button>' +
         ((t.status === 'done' || t.status === 'cancelled') ? ''
           : ' <button type="button" class="danger" data-cancel="' + esc(t.taskId) + '">取消</button>') +

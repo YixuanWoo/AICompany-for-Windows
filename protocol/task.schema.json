@@ -54,6 +54,20 @@
       },
       "description": "卡间依赖：前置卡的 taskId。非空时前置没 done 就不派活。空数组 / 不写 = 并行（老行为）。"
     },
+    "repo": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "代码仓库 id（company.yaml 的 repos 段）。与 project 解耦：一张卡可以只有仓库没有项目。"
+    },
+    "reviewBy": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "这张卡由谁验收（岗位 id）。不写 = 总经理验收；代码类活通常写工程岗。"
+    },
     "role": {
       "type": "string",
       "minLength": 1
@@ -86,7 +100,9 @@
       "enum": [
         "human",
         "policy",
-        "ceo"
+        "ceo",
+        "seat",
+        "control-plane"
       ]
     },
     "threadId": {

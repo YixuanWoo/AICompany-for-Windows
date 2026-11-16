@@ -126,9 +126,39 @@ export function createSeat({
     return listOutputFiles(workRoot, taskId).map((f) => `output/${f.name}`);
   }
 
+  /** 等我审的卡（拉模式审查：控制面不会叫醒我，得自己来查）。 */
+  async function reviews() {
+    return call('GET', `/api/bridge/reviews?agentId=${encodeURIComponent(agentId)}`);
+  }
+
+  /**
+   * 交审查结论。审查人不是执行人，手里没有租约，所以不带 lease。
+   * commit 只是留痕（本地提交 sha / 远端地址），引擎不解析它。
+   */
+  async function verdict({ taskId, pass, reason = '', summary = '', commit = null } = {}) {
+    if (!taskId) return { ok: false, reason: '必须给 taskId' };
+    if (!pass && !String(reason ?? '').trim()) {
+      return { ok: false, reason: '打回必须写 reason：要改什么，执行人只看这一句' };
+    }
+    return call('POST', '/api/bridge/review', {
+      taskId, agentId, verdict: pass ? 'pass' : 'reject', reason, summary, commit,
+    });
+  }
+
+  /** 子派活：把手里这张卡的一部分派给汇报子树里的人（引擎校验越级）。 */
+  async function spawn({ parentTaskId, title, instructions, acceptance = [], assignee, ...rest } = {}) {
+    const held = holding();
+    const parent = parentTaskId ?? held?.taskId;
+    if (!parent) return { ok: false, reason: '没有在手任务，也没有给 parentTaskId' };
+    return call('POST', '/api/bridge/spawn', {
+      parentTaskId: parent, agentId, title, instructions, acceptance, assignee, ...rest,
+    });
+  }
+
   async function complete({
     taskId, leaseToken, runId, status = 'success', summary,
     artifacts = null, acceptanceResults = [], usage = {}, reason,
+    artifactKind = null, handoff = null, reviewNote = null,
   } = {}) {
     const held = holding();
     const id = taskId ?? held?.taskId;
@@ -151,6 +181,10 @@ export function createSeat({
       acceptanceResults,
       usage,
       ...(reason ? { reason: String(reason).slice(0, 1000) } : {}),
+      // 产物分类与交付路由：执行岗自己判，控制面按它决定「落盘 / 送审 / 上报」。
+      ...(artifactKind ? { artifactKind } : {}),
+      ...(handoff ? { handoff } : {}),
+      ...(reviewNote ? { reviewNote: String(reviewNote).slice(0, 1000) } : {}),
       finishedAt: new Date().toISOString(),
     };
     const out = await call('POST', '/api/bridge/complete', {
@@ -171,5 +205,8 @@ export function createSeat({
     });
   }
 
-  return { agentId, heartbeat, status, inbox, claim, holding, renew, complete, progress, artifactsOf, request: call };
+  return {
+    agentId, heartbeat, status, inbox, claim, holding, renew, complete, progress, artifactsOf,
+    reviews, verdict, spawn, request: call,
+  };
 }

@@ -17,6 +17,7 @@ import { createProject } from './projects.js';
 import { listOutputs, readOutput, OutputsError } from './outputs.js';
 import { readPauseFlag, writePauseFlag } from './gui-adapter.js';
 import { createSeatClaim, guiSeatAgents } from './gui-seat.js';
+import { allRepos, gitStatus } from './repos.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BOARD_HTML = path.join(ROOT, 'src', 'web', 'board.html');
@@ -461,6 +462,18 @@ export function createServer({
           // 总经理会话：共用会话能命中缓存省钱，但得让人看得见「现在这个有多长了」。
           '/api/ceo-session': () => engine.getCeoSession(),
           '/api/dashboard': () => engine.getDashboard(),
+          // 仓库台账：看板/CLI 用同一份口径（登记了哪些仓库、脏不脏、领先几条）。
+          // 只做只读体检：这里永远不会提交或推送。
+          '/api/repos': () => ({
+            repos: allRepos(engine.config).map((repo) => ({
+              id: repo.id, displayName: repo.displayName, path: repo.path,
+              remote: repo.remote, branch: repo.branch, reviewer: repo.reviewer,
+              allowPush: repo.allowPush, project: repo.project,
+              status: gitStatus(repo),
+            })),
+          }),
+          // 等我审的卡：谁该审、卡在哪一步，一眼能看见（不叫醒任何人，纯读）。
+          '/api/reviews': () => ({ tasks: engine.pendingReviews() }),
           // P5-1 / P5-3：试运行观察（五项指标 + 四项结论 + 脏状态）。
           '/api/observe': () => buildObservation({
             db: engine.db, config: engine.config, workRoot: engine.workRoot, now: now(),

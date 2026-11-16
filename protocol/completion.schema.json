@@ -19,6 +19,18 @@
     "acceptanceResults": { "type": "array", "items": { "type": "object" } },
     "usage": { "type": "object" },
     "reason": { "type": "string" },
+    "artifactKind": {
+      "enum": ["managed-code", "scratch-code", "document", "data", "media"],
+      "description": "产物分类。受管代码要进仓库并走审查；一次性脚本只归档当资料。不写 = 由引擎按卡内容推断。"
+    },
+    "handoff": {
+      "enum": ["land", "review", "escalate"],
+      "description": "交付路由。land=直接落盘；review=交人审；escalate=上报（方向不对 / 超权限），此时 status 应为 blocked。"
+    },
+    "reviewNote": {
+      "type": "string",
+      "description": "给审查人的话：重点看哪里、哪里还没底。"
+    },
     "finishedAt": { "type": "string", "minLength": 1 }
   }
 }

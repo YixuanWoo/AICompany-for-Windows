@@ -159,6 +159,24 @@
               "pull"
             ],
             "description": "派活方式：push=控制面直调 adapter（默认）；pull=卡留队列，由席位自己来领（人叫才醒的交互式 agent 用这个）"
+          },
+          "duties": {
+            "type": "string",
+            "description": "岗位职责一句话，写进提示词"
+          },
+          "boundaries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "这个岗位不许做什么"
+          },
+          "mayDelegateTo": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可以往下派的岗位（说明用；真正的闸是汇报子树）"
           }
         }
       }
@@ -514,6 +532,79 @@
         "staleEventMinutes": {
           "type": "integer",
           "minimum": 1
+        }
+      }
+    },
+    "repos": {
+      "type": "object",
+      "description": "仓库台账：代码在哪、往哪推、谁审。与项目解耦，两边都可以缺省。",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": "string"
+          },
+          "reviewer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "allowPush": {
+            "type": "boolean"
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "defaultReviewer": {
+          "type": "string"
+        },
+        "defaultHandoff": {
+          "enum": [
+            "ceo",
+            "review",
+            "land"
+          ]
+        },
+        "requireRepoForManagedCode": {
+          "type": "boolean"
+        },
+        "codeExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     }

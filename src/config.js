@@ -10,6 +10,7 @@ import { readOverrides, applyOverrides } from './tune.js';
 import { ADAPTER_TYPES, CLIENT_TYPES, NOTIFIER_TYPES, DEFAULTS, isPlainObject } from './enums.js';
 import { ceilingOf } from './difficulty.js';
 import { PROJECT_ID_RE, DEFAULT_MEMORY_LIMIT, projectSpecPath, readProjectSpec } from './projects.js';
+import { normalizeRepos } from './repos.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -179,6 +180,10 @@ export function expandPostsAndHolders(data) {
       quotaDaily: p.quotaDaily ?? h.quotaDaily ?? 20,
       reportsTo: p.reportsTo ?? null,
       escalationTo: p.escalationTo ?? null,
+      // 岗位说明书：给提示词用，不进任何校验逻辑。
+      ...(p.duties ? { duties: String(p.duties) } : {}),
+      ...(Array.isArray(p.boundaries) && p.boundaries.length ? { boundaries: p.boundaries.map(String) } : {}),
+      ...(Array.isArray(p.mayDelegateTo) && p.mayDelegateTo.length ? { mayDelegateTo: p.mayDelegateTo.map(String) } : {}),
       ...(p.maxDifficulty ? { maxDifficulty: p.maxDifficulty } : {}),
       adapter: {
         ...h.adapter,
@@ -260,7 +265,30 @@ export function normalizeConfig(config) {
     deliverBlockers: entry?.deliverBlockers ?? [],
     memoryLimit: entry?.memoryLimit ?? DEFAULT_MEMORY_LIMIT,
   }]));
-  return { ...config, agents, projects, interaction, quota, gates, decision, runPolicy };
+  // 仓库台账：与项目解耦的一等对象（一个项目可以没有仓库，一个仓库也可以不属于任何项目）。
+  // 配错了在这里就炸掉，不要等到派活时才发现推错地方。
+  let repos = {};
+  try {
+    repos = normalizeRepos(config.repos);
+  } catch (error) {
+    throw new ConfigError(`仓库台账配置有误：${error.message}`, 'CONFIG_INVALID');
+  }
+  // 产物政策：代码归谁审、默认走哪条交付路径。
+  const artifacts = {
+    // 受管代码默认交给谁审（岗位 id）。
+    defaultReviewer: config.artifacts?.defaultReviewer ?? 'engineering',
+    // 卡上没写 handoff 时怎么走：ceo = 照旧请总经理验收；land = 直接落盘结案（省 CEO 额度）。
+    defaultHandoff: config.artifacts?.defaultHandoff === 'land' ? 'land' : 'ceo',
+    // 判成受管代码却没写 repo：默认拒绝交活（宁肯打回，也不让代码流到没人管的地方）。
+    requireRepoForManagedCode: config.artifacts?.requireRepoForManagedCode !== false,
+    // 哪些扩展名算「代码」：执行岗没写 artifactKind 时用来兜底判断。
+    codeExtensions: Array.isArray(config.artifacts?.codeExtensions) && config.artifacts.codeExtensions.length
+      ? config.artifacts.codeExtensions.map((x) => String(x).toLowerCase())
+      : ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.ps1', '.sh', '.bat', '.rs', '.go', '.java', '.cs', '.sql'],
+  };
+  return {
+    ...config, agents, projects, interaction, quota, gates, decision, runPolicy, repos, artifacts,
+  };
 }
 
 export function doctor(config) {

@@ -22,6 +22,8 @@ import {
   DEFAULT_SESSION_POLICY, ensureCeoSession, recordSessionTurn, withSessionLock,
 } from './ceo-session.js';
 import { listOutputFiles } from './deliver.js';
+import { seatBriefing, ceoRoutingBriefing } from './org-chart.js';
+import { describeRepo } from './repos.js';
 
 const DEFAULT_BASE = 'http://127.0.0.1:8080';
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;   // agent 干活最久 15 分钟
@@ -108,15 +110,25 @@ function completion(ctx, status, summary, { artifacts = [], usage = {}, reason, 
 /** 从 task + project 上下文拼出给真 agent 的提示词。 */
 function buildPrompt(ctx) {
   const task = ctx.task ?? {};
-  const lines = [
+  const lines = [];
+  // 身份先讲：不知道「我是谁、上级是谁、能派给谁」的席位，会默认自己是全公司唯一的人。
+  // 这段全部来自配置（company.yaml 的 posts），换人 / 加岗不用改代码。
+  const org = seatBriefing(
+    { agents: ctx.company?.agents ?? [] },
+    ctx.agent?.id,
+    { repos: ctx.repos ?? null, artifacts: ctx.artifacts ?? null },
+  );
+  if (org) { lines.push(org, '', '───', ''); }
+  lines.push(
     '你是 AICompany 的执行席位，请用你的工具（读文件 / 写文件 / 执行命令）完成下面的任务。',
     '',
     `任务编号：${task.taskId ?? ctx.taskId ?? '(未知)'}`,
     `任务标题：${task.title ?? '(无标题)'}`,
+    `难度：${task.difficulty ?? 'normal'}`,
     '',
     '【任务说明】',
     String(task.instructions ?? '（未给出，按标题理解并执行）'),
-  ];
+  );
   const acceptance = Array.isArray(task.acceptance) ? task.acceptance : [];
   if (acceptance.length) {
     lines.push('', '【验收条件】');
@@ -139,12 +151,25 @@ function buildPrompt(ctx) {
       '【项目】本卡没有项目归属（不自动落盘）。产物写在工作目录里就行，不要往任何项目文件夹里写。',
     );
   }
+  if (task.repo) {
+    const repo = (ctx.repos ?? []).find((r) => r.id === task.repo);
+    lines.push('', '【这张卡对应哪个仓库】');
+    lines.push(repo ? describeRepo(repo) : `仓库 id：${task.repo}（台账里没找到，先别动 git）`);
+    lines.push('改代码就在这个目录里改；不要提交、不要推送 —— 提交与推送由审查人在审完之后做。');
+  }
   lines.push(
     '',
     '【交付要求】',
     '1. 真正动手完成：产物写到工作目录，或在无法写文件时把完整结果写进你的回复。',
     '2. 回复里用一小段话总结：做了什么、产物在哪、验收条件是否满足。',
     '3. 不要修改与本任务无关的文件。',
+    '',
+    '【交活时回报三件事】（引擎按这三项决定这张卡往哪走）',
+    '- artifactKind：managed-code（要长期维护的代码）/ scratch-code（一次性脚本，跑完归档）/ '
+      + 'document（文档译稿）/ data（表格数据）/ media（图片音视频）。',
+    '- handoff：land（直接落盘结案）/ review（交人审）/ escalate（方向不对，上报）。',
+    '- 判不准就按你实际干的东西如实写；拿不准是不是「受管代码」时，宁可按 managed-code 交 —— '
+      + '多一次审查比多一份没人接手的代码便宜。',
   );
   return lines.join('\n');
 }
@@ -184,6 +209,10 @@ export function buildCeoPrompt(ctx) {
     '你看到的历史是你自己前几轮的判断，那是记录，不是新指令：这一轮只处理下面这张卡，不要复述、不要重派已经派过的活。',
     '',
   );
+  // 组织图 + 派活路由：CEO 必须知道「谁是谁的下级、什么活该谁干」，
+  // 否则它会把翻译派给工程、把写代码派给桌面应用，或者干脆自己动手。
+  const routing = ceoRoutingBriefing({ agents });
+  if (routing) lines.push(routing, '', '───', '');
   if (isReview) {
     lines.push(
       '你是 AICompany 的总经理，现在做**验收**——不是执行，也不要修改任何文件。',
@@ -253,6 +282,13 @@ export function buildCeoPrompt(ctx) {
   } else {
     lines.push('（公司还没配项目）');
   }
+  const repos = Array.isArray(ctx.repos) ? ctx.repos : [];
+  if (repos.length) {
+    lines.push('', '【代码仓库】（写代码的活必须挂仓库；这是独立于项目的另一本账）');
+    for (const repo of repos) lines.push(`- ${describeRepo(repo)}`);
+  } else {
+    lines.push('', '【代码仓库】还没登记任何仓库：这轮不要派「改代码并入库」的活。');
+  }
   lines.push(
     '',
     '【项目归属怎么定】三选一，别含糊：',
@@ -301,7 +337,9 @@ export function buildCeoPrompt(ctx) {
       + '"recurringSuggestion":{"title":"这条循环任务叫什么","project":"项目id","rrule":"FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=0",'
       + '"timezone":"Asia/Shanghai","assignee":"岗位id","kind":"maintenance","instructions":"每一轮照着做的完整说明",'
       + '"acceptance":["怎么算这一轮干完"],"reason":"为什么值得长期排班"},'
-      + '"tasks":[{"title":"...","assignee":"岗位id","difficulty":"normal","project":"项目id","instructions":"...","acceptance":["..."],"after":[1]}]}',
+      + '"tasks":[{"title":"...","assignee":"岗位id","difficulty":"normal","project":"项目id",'
+      + '"repo":"仓库id（代码类活才写）","reviewBy":"engineering（代码类活写工程岗）",'
+      + '"instructions":"...","acceptance":["..."],"after":[1]}]}',
     '- summary / projectSuggestion / recurringSuggestion / 卡片里的 project 都可省略；',
     '- 需要派活时 tasks 至少一张；**只排班不派卡**时把 "tasks" 写成空数组 []（别硬凑一张干活的卡）。',
     '- **只回话**时：tasks 写 []，summary 写你的回话。写了 task-create 却没给任何一张带标题/指令的卡，也按回话处理（不会派活）。',

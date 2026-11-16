@@ -127,6 +127,10 @@ export function migrate(db) {
   // 卡间依赖：存前置卡的 taskId 数组（JSON）。老库补列后为 NULL = 没有依赖，仍是并行。
   // CEO 拆卡时可以在卡上写 after（同批序号），引擎落成真正的依赖关系；派活前会拦。
   addColumn('tasks', 'dependsOn', 'dependsOn TEXT');
+  // 仓库台账：代码在哪、往哪推。与 project 解耦，老库补列后为 NULL（= 这张卡不碰仓库）。
+  addColumn('tasks', 'repo', 'repo TEXT');
+  // 验收人：不写就是总经理。代码类活写工程岗，审完才收账。
+  addColumn('tasks', 'reviewBy', 'reviewBy TEXT');
   addColumn('agents', 'maxDifficulty', 'maxDifficulty TEXT');
   // 席位模型：岗位（postTitle）与担任者（holderName）分开记，老库补列后为空，下次启动由 seedAgents 回填。
   addColumn('agents', 'postTitle', 'postTitle TEXT');

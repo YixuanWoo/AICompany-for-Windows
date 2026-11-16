@@ -138,15 +138,72 @@ async function main() {
       summary: args.summary === true ? '' : (args.summary ?? ''),
       acceptanceResults: acceptance,
       reason: args.reason === true ? undefined : args.reason,
+      artifactKind: args.kind === true ? null : args.kind,
+      handoff: args.handoff === true ? null : args.handoff,
+      reviewNote: args['review-note'] === true ? null : args['review-note'],
     });
     if (!out.ok) { line(`交活失败：${out.reason}`); process.exit(1); }
     line(`已交：${out.report.taskId}｜${out.report.status}`);
     line(`  产物   ${out.report.artifacts.length ? out.report.artifacts.join(', ') : '(无文件产物)'}`);
+    line(`  分类   ${out.report.artifactKind ?? '(未写，引擎推断)'}｜去向 ${out.report.handoff ?? '(未写，引擎推断)'}`);
     line(`  控制面 ${JSON.stringify(out)}`.slice(0, 400));
     return;
   }
 
-  console.error(`未知命令 ${command}；可用：status / inbox / claim / holding / renew / report`);
+  if (command === 'reviews') {
+    const box = await seat.reviews();
+    if (!box.count) { line(`没有等 ${agentId} 审的卡。`); return; }
+    line(`等我审 ${box.count} 张：`);
+    for (const t of box.tasks) {
+      line(`  ${t.taskId}｜${t.title}`);
+      line(`    执行人 ${t.assignee}｜仓库 ${t.repo ?? '—'}｜项目 ${t.project ?? '—'}｜在审 ${t.updatedAt}`);
+    }
+    line();
+    line('看完用：node scripts/seat.js verdict <卡号> --pass 或 --reject --reason "要改什么"');
+    return;
+  }
+
+  if (command === 'verdict') {
+    const taskId = args._[1] ?? args.task;
+    if (!taskId || taskId === true) { console.error('要用：verdict <卡号> --pass|--reject --reason "..."'); process.exit(2); }
+    const pass = args.pass === true && args.reject !== true;
+    const out = await seat.verdict({
+      taskId,
+      pass,
+      reason: args.reason === true ? '' : (args.reason ?? ''),
+      summary: args.summary === true ? '' : (args.summary ?? ''),
+      commit: args.commit === true ? null : args.commit,
+    });
+    line(`${pass ? '已通过' : '已打回'}：${taskId}`);
+    line(`  ${JSON.stringify(out).slice(0, 400)}`);
+    return;
+  }
+
+  if (command === 'spawn') {
+    if (!args.title || !args.instructions || !args.assignee) {
+      console.error('要用：spawn --title "..." --instructions "..." --assignee <岗位id> [--acceptance "条件1;条件2"] [--repo 仓库id]');
+      process.exit(2);
+    }
+    const acceptance = typeof args.acceptance === 'string'
+      ? String(args.acceptance).split(';').map((x) => x.trim()).filter(Boolean)
+      : [];
+    const out = await seat.spawn({
+      parentTaskId: args.parent === true ? undefined : args.parent,
+      title: String(args.title),
+      instructions: String(args.instructions),
+      acceptance,
+      assignee: String(args.assignee),
+      repo: args.repo === true ? undefined : args.repo,
+      reviewBy: args['review-by'] === true ? undefined : args['review-by'],
+      difficulty: args.difficulty === true ? undefined : args.difficulty,
+    });
+    line(`已派子卡：${out.taskId} → ${out.assignee}`);
+    line(`  父卡 ${out.parentTaskId}｜项目 ${out.project ?? '—'}｜仓库 ${out.repo ?? '—'}`);
+    line('  你的卡还在手里：子卡是另一件活，你交自己这张时说明「已拆出一张给谁」即可。');
+    return;
+  }
+
+  console.error(`未知命令 ${command}；可用：status / inbox / claim / holding / renew / report / reviews / verdict / spawn`);
   process.exit(2);
 }
 

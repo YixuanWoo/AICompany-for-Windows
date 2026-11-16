@@ -39,6 +39,40 @@ projects:
     displayName: AICompany 自研开发
     memoryLimit: 20
     # 不填 rootDir：改源码的活由人集成，引擎不自动往仓库里写文件。
+# ── 仓库台账（2026-11-16 定）─────────────────────────────────────
+# 与项目解耦：项目回答「这摊事归谁、交付落哪、经验记哪」，
+# 仓库回答「代码在这台机器的哪个目录、对应哪个远端、谁审、许不许自动推」。
+# 一个项目可以没有仓库（翻译），一个仓库也可以不属于任何项目（开源小工具）。
+# 只有登记在这里的仓库，scripts/repo.js 才会碰；推送必须显式 allowPush: true。
+repos:
+  yitai:
+    displayName: 译台 YiTai
+    path: D:/开源/YiTai
+    remote: YixuanWoo/YiTai
+    # 这个仓库的主干叫 master（远端默认分支也是 master）；写错分支 push 会被闸拦下。
+    branch: master
+    # 谁审这个仓库的代码：工程岗。审完由它提交并推送。
+    reviewer: engineering
+    allowPush: true
+    note: Windows 桌面翻译工作台；公开发布，推送到 main 前必须过工程审查。
+  aicompany:
+    displayName: AICompany 引擎
+    path: D:/开源/AICompany
+    # 还没建远端仓库：先在本地留档，不推送（要上线 GitHub 由董事会点头后再填 remote）。
+    remote: null
+    branch: main
+    reviewer: engineering
+    allowPush: false
+    note: 公司自身源码；改动必须过审查，跑全量测试后才能提交。
+# ── 产物政策 ───────────────────────────────────────────────────
+# 执行岗干完自己判断产物类型与去向，这里只给默认值和兜底规则。
+artifacts:
+  # 受管代码默认交给工程岗审（审完由它提交推送）。
+  defaultReviewer: engineering
+  # 卡上没写 handoff 时：ceo = 照旧请总经理验收（保守）；land = 直接落盘（省 CEO 额度）。
+  defaultHandoff: ceo
+  # 判成受管代码却没写 repo → 打回。代码流到没人管的地方比没写更糟。
+  requireRepoForManagedCode: true
 interaction:
   # delegate = 董事会 → CEO → 员工。CEO 是真 agent：定项目归属、拆活派活、验收。
   # direct 仍然可用（指名直投某个员工，不经 CEO），但不是默认路径。
@@ -173,8 +207,12 @@ posts:
     status: active
     quotaDaily: 40
     reportsTo: null
+    duties: 定方向、拆活派活、验收；不自己动手
+    # 受限 YAML 不支持多行标量列表，一律写成行内数组。
+    boundaries: ["不写代码、不改文件、不产出交付物", "不越过董事会对花钱和对外承诺做决定"]
   # 岗位 2：执行 —— 所有实际干活、产出交付物都走这个岗位。
   # 不写 maxDifficulty = 什么难度都能接（G3 的上限语义）。
+  # 汇报线挂在工程岗下面：遇到技术上的岔路先找工程岗，工程岗判断要不要再往上捅。
   - id: doubao
     title: 执行
     heldBy: doubao-work
@@ -182,19 +220,26 @@ posts:
     capabilities: [execute]
     status: active
     quotaDaily: 20
-    reportsTo: ceo
+    reportsTo: engineering
+    escalationTo: engineering
+    duties: 写文档、翻译、做表格、点界面这类「有手就能干」的活
+    boundaries: ["不自己改代码仓库、不提交、不推送", "方向不对就上报，不闷头返工"]
   # 岗位 3：工程 —— 写代码、改配置、跑命令、查资料这类要动手的活。
   # 和「执行」（豆包，点界面 / 写文档）分开：它要的是能跑命令、能改文件的手。
   # dispatch: pull —— 我不在的时候派活等于白烧一次 Run，所以卡留在队列等我领。
+  # capabilities 多了三样：delegate（把实现拆给执行岗）、review（当代码审查人）、plan（自己定技术方案）。
   - id: engineering
     title: 工程执行
     heldBy: wb-agent
     isCEO: false
-    capabilities: [execute]
+    capabilities: [execute, review, delegate, plan]
     status: active
     quotaDaily: 20
     reportsTo: ceo
+    escalationTo: ceo
     dispatch: pull
+    duties: 写代码、改配置、跑命令、定技术方案；代码审查与 git 提交推送
+    boundaries: ["只对登记过的仓库做提交和推送（scripts/repo.js 白名单）", "永不 force push；拿不准就先上报", "不替董事会做对外承诺"]
 clients: [web]
 # web：看板 inbox 用；desktop：看板关着时也弹气泡提醒「待你拍板」。
 notifier: [web, desktop]

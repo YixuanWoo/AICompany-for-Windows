@@ -17,6 +17,9 @@ export const BRIDGE_ENDPOINTS = Object.freeze([
   { method: 'POST', path: '/api/bridge/change-request', purpose: '变更请求回写，必须带 leaseToken' },
   { method: 'POST', path: '/api/bridge/snapshot', purpose: '现场快照留痕（P4 完整档再挂起落盘）' },
   { method: 'GET', path: '/api/bridge/status', purpose: 'bridge 在线状态与待补投数量' },
+  { method: 'GET', path: '/api/bridge/reviews', purpose: '按席位查「等我审」的卡（拉模式审查）' },
+  { method: 'POST', path: '/api/bridge/review', purpose: '交审查结论（pass / reject），不需要 lease' },
+  { method: 'POST', path: '/api/bridge/spawn', purpose: '子派活：把手里这张卡的一部分派给汇报子树里的人' },
 ]);
 
 // 本地单机模式（绑定 127.0.0.1）默认免 token；跨机器必须显式配 AICOMPANY_BRIDGE_TOKEN。
@@ -94,6 +97,48 @@ export function createBridgeApi({ engine, token = null, onlineWindowSec = 60, no
         ttlSec: body.ttlSec, now: now(),
       });
       return reply(result.status, result);
+    }
+
+    if (method === 'GET' && pathname === '/api/bridge/reviews') {
+      const agentId = query.get('agentId');
+      if (!agentId) return reply(400, { error: '缺 agentId' });
+      const rows = engine.pendingReviews(agentId);
+      return reply(200, {
+        agentId,
+        count: rows.length,
+        tasks: rows.map((t) => ({
+          taskId: t.taskId, title: t.title, assignee: t.assignee, kind: t.artifactKind ?? null,
+          project: t.project ?? null, repo: t.repo ?? null, reviewBy: t.reviewer ?? null,
+          updatedAt: t.updatedAt,
+        })),
+      });
+    }
+
+    // 审查结论：不要求 lease —— 审查人不是执行人，手里没有这张卡的租约。
+    // 身份由 agentId 校验（必须是这张卡该由谁审），防止随便哪个席位把别人的活放过去。
+    if (method === 'POST' && pathname === '/api/bridge/review') {
+      if (!body.taskId || !body.agentId) return reply(400, { error: '缺 taskId / agentId' });
+      if (!['pass', 'reject'].includes(body.verdict)) return reply(400, { error: 'verdict 只能是 pass / reject' });
+      try {
+        const out = engine.reviewTask(body.taskId, {
+          reviewer: body.agentId, verdict: body.verdict,
+          reason: body.reason ?? '', summary: body.summary ?? '', commit: body.commit ?? null,
+        });
+        return reply(200, { ok: true, ...out });
+      } catch (error) {
+        return reply(409, { ok: false, error: String(error.message ?? error) });
+      }
+    }
+
+    if (method === 'POST' && pathname === '/api/bridge/spawn') {
+      const assignerId = body.assignerId ?? body.agentId;
+      if (!assignerId) return reply(400, { error: '缺 agentId（谁在拆这张卡）' });
+      try {
+        const child = engine.spawnChild({ ...body, assignerId });
+        return reply(201, { ok: true, ...child });
+      } catch (error) {
+        return reply(409, { ok: false, error: String(error.message ?? error) });
+      }
     }
 
     // 以下三类回写一律先验 lease（§9.2）；过期 token 一律拒绝（§9.4）。

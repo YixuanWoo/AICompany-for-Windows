@@ -45,6 +45,15 @@ export const WAKE_POLICIES = ['never', 'onRollCall', 'onMessage'];
 export const THREAD_STATES = ['active', 'archived'];
 export const THREAD_STYLES = ['readonly', 'rollCall', 'full'];
 
+// 产物分类：决定「干完之后往哪走」，与项目无关。
+//   managed-code = 要长期维护的代码 → 进仓库、要人审；
+//   scratch-code = 一次性计算脚本（渲染视频 / 清洗数据）→ 归档当资料，不进 git；
+//   document / data / media = 交付物，落盘即可。
+export const ARTIFACT_KINDS = ['managed-code', 'scratch-code', 'document', 'data', 'media'];
+// 交付路由：执行岗干完自己判。
+//   land = 直接落盘结案；review = 交人审；escalate = 上报（方向不对 / 超权限）。
+export const HANDOFF_TARGETS = ['land', 'review', 'escalate'];
+
 // P4：三道常规人审门禁 + 两类按需事件型人审（replan / 循环模板改版）。
 export const APPROVAL_KINDS = ['strategy', 'hiring_budget', 'review_reject', 'replan', 'recurring_change', 'recurring_create', 'project_create'];
 export const APPROVAL_STATUSES = ['pending', 'approved', 'rewrite', 'rejected', 'expired'];

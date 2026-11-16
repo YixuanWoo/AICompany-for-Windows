@@ -12,7 +12,7 @@ import {
 } from './core.js';
 import { getAdapter, availableAdapterTypes } from './adapters.js';
 import { isBridgeOnline } from './lease.js';
-import { DEFAULTS, CAPABILITIES, CEO_OUTPUT_KINDS, RECURRING_KINDS } from './enums.js';
+import { DEFAULTS, CAPABILITIES, CEO_OUTPUT_KINDS, RECURRING_KINDS, ARTIFACT_KINDS, HANDOFF_TARGETS } from './enums.js';
 import { createChannels } from './channels.js';
 import { ensureAllQuotas, checkQuota, consumeQuota, quotaState, resetQuota } from './quota.js';
 import { assertMayAssign, resolveDecisionMaker, rankCandidates, ceoOf, isInSubtree } from './org.js';
@@ -22,10 +22,10 @@ import {
 } from './difficulty.js';
 import { createApproval, getApproval, listApprovals, closeApproval, pendingApprovals, stampRequestPayload } from './approvals.js';
 import { buildSnapshot } from './snapshot.js';
-import {
-  assertProject, buildProjectContext, buildMemoryRecord, appendMemory,
-  listProjects as listProjectEntries, memoryLimitOf, readRecentMemory,
-} from './projects.js';
+import { assertProject, buildProjectContext, buildMemoryRecord, appendMemory,
+  listProjects as listProjectEntries, memoryLimitOf, readRecentMemory } from './projects.js';
+import { repoEntry, findRepoForPath, assertRepo } from './repos.js';
+import { looksLikeCode } from './org-chart.js';
 import {
   deliverTask, runningProcesses, lastDeliveryOf, appendDeliveryLog, DELIVERY_SCHEMA,
 } from './deliver.js';
@@ -119,13 +119,15 @@ export function createEngine({
     acceptance = ['completion.json 通过 schema 校验且 status = success'],
     parentTaskId = null, taskId = `T-${shortId()}`, status = 'todo',
     threadId = null, assignerId = null, difficulty = DEFAULT_DIFFICULTY, project = null,
-    origin = null, dependsOn = [],
+    origin = null, dependsOn = [], repo = null, reviewBy = null,
   }) {
     // P4-3：agent 之间派活只能派进自己的汇报子树；人是董事会，不受此限（§7.4）。
     if (assignerId && assignerId !== assignee) {
       const allowed = assertMayAssign(config, assignerId, assignee);
       if (!allowed.ok) throw new Error(`跨子树派活被拒绝：${allowed.reason}`);
     }
+    // 仓库写错要在建卡时就炸，不能等执行岗干完才发现「这个 repo 根本不存在」。
+    if (repo) assertRepo({ config, requested: repo });
     return {
       schema: 'aicompany.task/v1', taskId, requestId, parentTaskId, title, role,
       // direct 默认抄送 CEO，但直投对象本身就是 CEO 时不能既在 addressedTo 又在 cc（§6C.1）。
@@ -139,6 +141,9 @@ export function createEngine({
       input: { files: [] }, instructions, acceptance,
       completionReportPath: 'output/completion.json',
       retry: { attempt: 0, max: 2, backoffSec: 0 }, tags: [], origin,
+      // 仓库（代码在哪、推哪）与验收人：与项目解耦，都是可选。
+      repo: repo ?? null,
+      reviewBy: reviewBy ?? null,
       // 卡间依赖：前置卡的 taskId。空数组 = 没依赖（默认并行）。
       dependsOn: Array.isArray(dependsOn) ? dependsOn.filter((x) => typeof x === 'string' && x) : [],
     };
@@ -149,12 +154,14 @@ export function createEngine({
     if (!checked.ok) throw new Error(`任务卡不合法：${checked.errors.join('; ')}`);
     db.prepare(`INSERT INTO tasks
       (taskId, requestId, parentTaskId, title, role, assignee, status, mode, addressedTo,
-       assignedBy, revision, threadId, attempt, priority, difficulty, project, createdAt, updatedAt, originJson, dependsOn)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`).run(
+       assignedBy, revision, threadId, attempt, priority, difficulty, project, repo, reviewBy,
+       createdAt, updatedAt, originJson, dependsOn)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       card.taskId, card.requestId, card.parentTaskId, card.title, card.role,
       card.assignee, card.status, card.mode, card.addressedTo, card.assignedBy,
       card.revision, card.threadId, card.priority, normalizeDifficulty(card.difficulty),
-      card.project ?? null, card.createdAt, card.createdAt, JSON.stringify(card.origin ?? null),
+      card.project ?? null, card.repo ?? null, card.reviewBy ?? null,
+      card.createdAt, card.createdAt, JSON.stringify(card.origin ?? null),
       card.dependsOn?.length ? JSON.stringify(card.dependsOn) : null,
     );
     db.prepare(`INSERT INTO task_payload
@@ -569,6 +576,56 @@ export function createEngine({
     };
   }
 
+  /**
+   * 子派活：承接人把手里这张卡的一部分拆出来，派给汇报子树里的人。
+   * 典型场景：工程岗领到「给这个项目加个功能」，自己写完技术方案，把实现派给执行岗。
+   * 三道闸：必须是这张卡的承接人、必须有 delegate 能力、只能派进自己的子树。
+   */
+  function spawnChild({
+    parentTaskId, assignerId, title, instructions, acceptance = [],
+    assignee, difficulty = null, repo = undefined, reviewBy = undefined, project = undefined,
+  } = {}) {
+    const parent = taskById(parentTaskId);
+    if (!parent) throw new Error(`父卡不存在：${parentTaskId}`);
+    if (!assignerId) throw new Error('spawn 必须写 assignerId（谁在拆这张卡）');
+    if (parent.assignee !== assignerId) {
+      throw new Error(`只有这张卡的承接人才能拆它：${parentTaskId} 的承接人是 ${parent.assignee}`);
+    }
+    const caps = cfgFor(assignerId)?.capabilities ?? [];
+    if (!caps.includes('delegate')) {
+      throw new Error(`${assignerId} 没有 delegate 能力，不能往下派活（要派活请在 config 里加 capabilities: [delegate]）`);
+    }
+    if (!assignee) throw new Error('spawn 必须写 assignee（派给谁）');
+    const allowed = assertMayAssign(config, assignerId, assignee);
+    if (!allowed.ok) throw new Error(`跨子树派活被拒绝：${allowed.reason}`);
+    if (!String(title ?? '').trim()) throw new Error('spawn 必须写 title');
+    if (!String(instructions ?? '').trim()) throw new Error('spawn 必须写 instructions：承接人只看这一份说明');
+    const level = difficulty ? normalizeDifficulty(difficulty, { field: 'difficulty' }) : parent.difficulty;
+    assertAssignable(assignee, { difficulty: level });
+    const child = buildCard({
+      requestId: parent.requestId, title: String(title).trim().slice(0, 80),
+      role: 'general', assignee, mode: 'delegate', assignedBy: 'seat',
+      parentTaskId, assignerId,
+      instructions: String(instructions),
+      acceptance: Array.isArray(acceptance) && acceptance.length
+        ? acceptance.map(String)
+        : ['completion.json 通过 schema 校验且 status = success'],
+      difficulty: level,
+      project: project === undefined ? parent.project : project,
+      repo: repo === undefined ? parent.repo : repo,
+      reviewBy: reviewBy === undefined ? null : reviewBy,
+    });
+    insertCard(child, child.assignee);
+    writeAudit(db, {
+      actor: assignerId, action: 'spawn_task',
+      newValue: `${child.taskId}|${assignee}|${child.title}`, taskId: child.taskId,
+    });
+    return {
+      taskId: child.taskId, parentTaskId, assignee, title: child.title,
+      project: child.project, repo: child.repo, difficulty: child.difficulty,
+    };
+  }
+
   // 人工取消：契约里早有 POST /api/tasks/:id/cancel，服务器一直没实现。
   // 「天天用」一定要有这一下 —— 卡在错误方向上时，能立刻停手比什么都重要。
   function cancelTask(taskId, { reason = '人工取消', actor = 'human' } = {}) {
@@ -922,7 +979,8 @@ export function createEngine({
         taskId: task.taskId, title: task.title, mode: task.mode, status: task.status,
         revision: task.revision, attempt: task.attempt, instructions: task.instructions,
         acceptance: task.acceptance, parentTaskId: task.parentTaskId,
-        project: task.project ?? null,
+        project: task.project ?? null, repo: task.repo ?? null, reviewBy: task.reviewBy ?? null,
+        difficulty: task.difficulty ?? DEFAULT_DIFFICULTY,
       } : null,
       // 项目上下文单独给一份：adapter 拿它拼提示词，process/http 型也照此透传给真模型。
       project: projectContext,
@@ -939,8 +997,16 @@ export function createEngine({
           capabilities: a.capabilities ?? [], status: a.status ?? 'active',
           reportsTo: a.reportsTo ?? null, maxDifficulty: a.maxDifficulty ?? null,
           adapter: a.adapter?.type ?? null,
+          // 岗位说明书：提示词靠它说清「你是谁、边界在哪、能派给谁」。
+          duties: a.duties ?? null,
+          boundaries: a.boundaries ?? null,
+          escalationTo: a.escalationTo ?? null,
+          mayDelegateTo: a.mayDelegateTo ?? null,
         })),
       },
+      // 仓库台账与产物政策：提示词要带上「代码在哪、推哪、什么算受管代码」。
+      repos: Object.values(config.repos ?? {}),
+      artifacts: config.artifacts ?? {},
       workRoot: workDir,
       // 会话复用策略（interaction.ceoSession）：adapter 据此决定「共用会话还是每轮新开」。
       interaction: config.interaction ?? {},
@@ -1969,6 +2035,133 @@ export function createEngine({
     }
   }
 
+  // ── 产物分类与交付路由（2026-11-16）──────────────────────────────
+  // 执行岗干完自己判「这算什么产物、该往哪走」，引擎只做兜底与校验：
+  //   · 受管代码必须登记仓库，否则打回（代码流到没人管的地方，比没写更糟）；
+  //   · 一次性脚本（scratch-code）不建审查、不入 git，只归档；
+  //   · 判成 review 且验收人不是总经理时，卡留在 in_review 等人来审（拉模式席位不能被直调）。
+  function inferArtifactKind(task, report = {}) {
+    const declared = String(report.artifactKind ?? '').trim();
+    if (ARTIFACT_KINDS.includes(declared)) return { kind: declared, inferred: false };
+    if (task.repo) return { kind: 'managed-code', inferred: true };
+    const exts = config.artifacts?.codeExtensions ?? [];
+    const files = Array.isArray(report.artifacts) ? report.artifacts : [];
+    const codeFiles = files.filter((f) => exts.some((ext) => String(f).toLowerCase().endsWith(ext)));
+    if (codeFiles.length && looksLikeCode(task, config.artifacts)) return { kind: 'managed-code', inferred: true };
+    if (codeFiles.length) return { kind: 'scratch-code', inferred: true };
+    return { kind: 'document', inferred: true };
+  }
+
+  function resolveHandoff(task, kind, report = {}) {
+    const declared = String(report.handoff ?? '').trim();
+    // 兼容口头写法：handoff=ceo 就是「交总经理验收」。
+    if (declared === 'ceo') return { handoff: 'review', inferred: false };
+    if (HANDOFF_TARGETS.includes(declared)) return { handoff: declared, inferred: false };
+    if (kind === 'managed-code') return { handoff: 'review', inferred: true };
+    const fallback = config.artifacts?.defaultHandoff === 'land' ? 'land' : 'review';
+    return { handoff: fallback, inferred: true };
+  }
+
+  function reviewerOf(task, kind = null) {
+    if (task.reviewBy) return task.reviewBy;
+    // 没传 kind 时（手工审 / 查待审列表），用「这张卡有没有仓库」兜底判断是不是代码活。
+    const isCode = kind === 'managed-code' || (!kind && Boolean(task.repo));
+    if (isCode) {
+      const repo = repoEntry(config, task.repo);
+      if (repo?.reviewer) return repo.reviewer;
+      if (config.artifacts?.defaultReviewer) return config.artifacts.defaultReviewer;
+    }
+    return ceoId();
+  }
+
+  /** 执行岗主动上报：卡转 blocked，不重试；给上级建一张「处理升级」的卡，让他带着证据决定。 */
+  function openEscalation(task, report, agentId, runId, { reason }) {
+    const to = task.escalationTo
+      ?? cfgFor(task.assignee)?.escalationTo
+      ?? task.reportsTo
+      ?? resolveDecisionMaker(config, task.assignee);
+    if (task.status !== 'blocked') transition(db, task.taskId, 'blocked', agentId, runId);
+    writeAudit(db, {
+      actor: agentId, action: 'escalated',
+      newValue: `${to ?? '(无上级)'}|${String(reason ?? '').slice(0, 400)}`, runId, taskId: task.taskId,
+    });
+    if (!to || to === agentId) return { to: null, card: null };
+    const evidence = [
+      `【原卡】${task.taskId}｜${task.title}`,
+      `【执行人】${task.assignee}`,
+      `【卡在哪】${String(reason ?? report.reason ?? '(没写原因)').slice(0, 1500)}`,
+      report.summary ? `【已做到哪】${String(report.summary).slice(0, 800)}` : null,
+      Array.isArray(report.artifacts) && report.artifacts.length
+        ? `【产物】${report.artifacts.join(', ')}` : null,
+      task.repo ? `【仓库】${task.repo}（别在没定方案前提交/推送）` : null,
+      '',
+      '【你要决定的一件事】',
+      '1）改方案返工：把「改成什么」写清，让原执行人重跑；',
+      '2）改派给别人；',
+      '3）如果这会改变项目方向/对外承诺，上报总经理（你只负责把技术事实说清，不要自己拍板）。',
+    ].filter(Boolean).join('\n');
+    const card = buildCard({
+      requestId: task.requestId,
+      title: `处理升级：${task.title}`.slice(0, 80),
+      role: 'escalation', assignee: to, mode: 'delegate', assignedBy: 'control-plane',
+      parentTaskId: task.taskId,
+      instructions: evidence,
+      acceptance: ['明确给出一条处置：返工（改什么）/ 改派（给谁）/ 上报总经理（为什么必须他拍板）'],
+      difficulty: task.difficulty, project: task.project, repo: task.repo,
+    });
+    insertCard(card, to);
+    return { to, card: card.taskId };
+  }
+
+  /**
+   * 交审查结论。人、CEO、工程岗都走这一个入口。
+   * 为什么单独成一个动作而不是「再唤醒一次」：拉模式席位（工程岗）不能被直调，
+   * 它只能自己来查、自己来判。把审查做成动作，谁审都一样。
+   */
+  function reviewTask(taskId, {
+    reviewer, verdict, reason = '', summary = '', commit = null,
+  } = {}) {
+    const task = taskById(taskId);
+    if (!task) throw new Error(`任务不存在：${taskId}`);
+    if (task.status !== 'in_review') {
+      throw new Error(`只有 in_review 的卡能验收，${taskId} 现在是 ${task.status}`);
+    }
+    const expected = reviewerOf(task, null);
+    if (reviewer && reviewer !== expected && reviewer !== ceoId()) {
+      throw new Error(`这张卡该由 ${expected} 验收，不是 ${reviewer}`);
+    }
+    const actor = reviewer ?? expected;
+    const pass = verdict === 'pass';
+    if (!pass && !String(reason ?? '').trim()) {
+      throw new Error('打回必须写 reason：要改什么，执行人只看这一句');
+    }
+    writeAudit(db, {
+      actor, action: pass ? 'review_passed' : 'review_rejected',
+      newValue: `${taskId}|${String(reason || summary || '').slice(0, 500)}`
+        + (commit ? `|commit:${String(commit).slice(0, 80)}` : ''),
+      taskId,
+    });
+    if (pass) {
+      transition(db, taskId, 'done', actor);
+      flushProjectMemory(taskById(taskId) ?? task);
+      deliverAccepted(taskById(taskId) ?? task);
+      return { taskId, status: 'done', verdict: 'pass' };
+    }
+    transition(db, taskId, 'in_progress', actor);
+    const rounds = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE taskId = ? AND wakeReason IN ('review_requested','rework')")
+      .get(taskId).n;
+    if (rounds <= 2) {
+      emitEvent({
+        type: 'issue_assigned', taskId, agentId: task.assignee,
+        payload: { wakeReason: 'rework', reviewNote: String(reason).slice(0, 800) },
+        dedupeKey: `review-reject:${taskId}:${Date.now()}`,
+      });
+    } else {
+      escalateToRescue(task, '验收连续多次打回');
+    }
+    return { taskId, status: 'in_progress', verdict: 'reject' };
+  }
+
   async function handleResult(outcome, task, agentId, payload) {
     let result = outcome.result ?? {};
     // 卡在跑的过程中被人工取消：结果照样留档，但不再推进状态机。
@@ -2180,6 +2373,9 @@ export function createEngine({
             acceptance: c.acceptance ?? undefined,
             // 卡间依赖：CEO 写 after（同批序号，1 基；也可以写同批卡的标题）。没写 = 并行。
             after: Array.isArray(c.after) ? c.after : (c.after === undefined || c.after === null ? [] : [c.after]),
+            // 代码类活：CEO 可以指定仓库和验收人；没指定就走引擎的默认（受管代码默认工程岗审）。
+            repo: c.repo ? String(c.repo) : null,
+            reviewBy: c.reviewBy ? String(c.reviewBy) : null,
           });
         }
         // P4-2 战略门禁：开着就必须人点头才派活；任务停在 in_progress 等审批，不额外烧额度。
@@ -2271,6 +2467,15 @@ export function createEngine({
     // 执行席位：结果必须是 CompletionReport
     const report = result;
     const checked = validate('completion', report);
+
+    // ① 主动上报：不重试、不重投。方向错了，再跑一遍只会更错，还白烧一次额度。
+    if (String(report?.handoff ?? '').trim() === 'escalate') {
+      const opened = openEscalation(task, report, agentId, outcome.runId, {
+        reason: report.reason ?? report.summary ?? '执行岗主动上报',
+      });
+      return { escalated: true, ...opened };
+    }
+
     const passed = checked.ok && report.status === 'success';
     if (!passed) {
       const attempt = (task.attempt ?? 0) + 1;
@@ -2292,6 +2497,37 @@ export function createEngine({
       }
       return;
     }
+
+    const kindInfo = inferArtifactKind(task, report);
+    const kind = kindInfo.kind;
+    const handoffInfo = resolveHandoff(task, kind, report);
+    const handoff = handoffInfo.handoff;
+
+    // ② 受管代码必须登记仓库。不登记就打回：代码是以后还要改的东西，
+    //    连它在哪个仓库都说不清，交上来只是一堆没人接手的文件。
+    if (kind === 'managed-code' && !task.repo && config.artifacts?.requireRepoForManagedCode !== false) {
+      const attempt = (task.attempt ?? 0) + 1;
+      db.prepare('UPDATE tasks SET attempt = ?, updatedAt = ? WHERE taskId = ?').run(attempt, nowIso(), task.taskId);
+      const why = '产物被判定为受管代码，但卡上没有 repo：'
+        + `补上 repo（已登记：${Object.keys(config.repos ?? {}).join(', ') || '无'}）后重交；`
+        + '如果这只是一次性计算脚本（跑完就归档），把 artifactKind 写成 scratch-code。';
+      writeAudit(db, {
+        actor: agentId, action: 'code_repo_missing',
+        newValue: `第 ${attempt} 次：${why}`, runId: outcome.runId, taskId: task.taskId,
+      });
+      if (attempt < 2) {
+        emitEvent({
+          type: 'issue_assigned', taskId: task.taskId, agentId,
+          payload: { wakeReason: 'retry', reviewNote: why },
+          dedupeKey: `repo-missing:${task.taskId}:${attempt}`,
+        });
+      } else {
+        transition(db, task.taskId, 'blocked', 'control-plane', outcome.runId);
+        escalateToRescue({ ...task, attempt }, why);
+      }
+      return;
+    }
+
     // 报告合格：先攒下这份报告，等卡到 done 再落项目记忆（打回重做的不算数）。
     pendingMemory.set(task.taskId, report);
     transition(db, task.taskId, 'in_review', 'control-plane', outcome.runId);
@@ -2303,10 +2539,32 @@ export function createEngine({
       deliverAccepted(task, outcome.runId);
       return;
     }
-    // 按 Run 去重：同一次执行的报告只请一次验收，但返工后的新 Run 可以再请一次。
-    emitEvent({
-      type: 'review_requested', taskId: task.taskId, agentId: ceoId(),
-      payload: { wakeReason: 'review_requested' }, dedupeKey: `review:${task.taskId}:${outcome.runId}`,
+    // ③ 直接落盘：执行岗判断「这活不需要第二个人再看」，就不叫 CEO 跑一轮（省一次按量计费的 Run）。
+    if (handoff === 'land') {
+      transition(db, task.taskId, 'done', 'control-plane', outcome.runId);
+      writeAudit(db, {
+        actor: agentId, action: 'handoff_land',
+        newValue: `${kind}|${kindInfo.inferred ? '推断' : '自报'}`, runId: outcome.runId, taskId: task.taskId,
+      });
+      flushProjectMemory(task, outcome.runId);
+      deliverAccepted(task, outcome.runId);
+      return;
+    }
+    // ④ 交审：代码类默认工程岗；其余默认总经理。
+    const reviewer = reviewerOf(task, kind);
+    if (reviewer === ceoId()) {
+      // 按 Run 去重：同一次执行的报告只请一次验收，但返工后的新 Run 可以再请一次。
+      emitEvent({
+        type: 'review_requested', taskId: task.taskId, agentId: ceoId(),
+        payload: { wakeReason: 'review_requested', kind },
+        dedupeKey: `review:${task.taskId}:${outcome.runId}`,
+      });
+      return;
+    }
+    // 拉模式席位（工程岗）不能被直调：卡留在 in_review，等它自己来审（seat.js reviews / verdict）。
+    writeAudit(db, {
+      actor: 'control-plane', action: 'review_queued',
+      newValue: `${reviewer}|${kind}|${task.repo ?? '无仓库'}`, runId: outcome.runId, taskId: task.taskId,
     });
   }
 
@@ -2610,6 +2868,17 @@ export function createEngine({
     },
     submit, pump, route, emitEvent, wake, submitChangeRequest, onProgressReport,
     cancelTask,
+    // 子派活与审查：工程岗既是执行者也是工头，还要当代码审查人。
+    spawnChild, reviewTask, reviewerOf,
+    // 看板/CLI 用：现在有哪些卡在等「我」审（拉模式席位靠它知道该干活了）。
+    pendingReviews: (agentId = null) => {
+      const rows = db.prepare("SELECT * FROM tasks WHERE status = 'in_review' ORDER BY rowid").all();
+      return rows.filter((t) => {
+        const kind = inferArtifactKind(t, {}).kind;
+        const expect = reviewerOf(t, kind);
+        return agentId ? expect === agentId : true;
+      }).map((t) => ({ ...t, reviewer: reviewerOf(t, inferArtifactKind(t, {}).kind) }));
+    },
     reconcile,
     // 短延迟自检：测试要能看到「还有哪张卡排着等重试」。
     clearGateRetry,
