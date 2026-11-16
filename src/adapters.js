@@ -108,6 +108,22 @@ export const guiAdapter = registerAdapter('gui-template', guiTemplateAdapter);
 import { webhookExecAdapter } from './adapter-webhook-exec.js';
 export const webhookExec = registerAdapter('webhook-exec', webhookExecAdapter);
 
+// 人机席位：担任者是「人叫才醒」的交互式 agent，没有常驻进程。
+// 它只通过 scripts/seat.js 自己来领卡（dispatch: pull），控制面永远不该直调它。
+// 真被直调了 —— 说明配置写错了（没写 pull），这里必须炸，不能假装干完了。
+export const seatAdapter = registerAdapter('seat', {
+  type: 'seat',
+  testEnvironment() {
+    return { ok: true, detail: '人机席位：由本人用 scripts/seat.js 领取，控制面不直调' };
+  },
+  async execute(ctx) {
+    throw new Error(
+      `席位 ${ctx.agent?.id} 是拉模式（seat），控制面不该直调它；`
+      + '请在配置里把该岗位的 dispatch 写成 pull',
+    );
+  },
+});
+
 export const mockAdapter = registerAdapter('mock', {
   type: 'mock',
   testEnvironment() {

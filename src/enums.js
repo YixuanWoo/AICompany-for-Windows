@@ -33,7 +33,8 @@ export const COMPLETION_STATUSES = ['success', 'failed', 'blocked'];
 
 // webhook-exec：可选的外部执行 adapter，通过 HTTP 把任务递给一个带工具的远程 agent。
 // 只是注册一个可用的类型名，不配就不会启用，对核心零影响。
-export const ADAPTER_TYPES = ['process', 'http', 'cli-acp', 'gui-template', 'polling', 'webhook-exec'];
+// 'seat' = 人机席位：担任者是人叫才醒的交互式 agent，只能自己来领（dispatch: pull），控制面不直调。
+export const ADAPTER_TYPES = ['process', 'http', 'cli-acp', 'gui-template', 'polling', 'webhook-exec', 'seat'];
 export const CAPABILITIES = ['plan', 'delegate', 'review', 'execute', 'escalate', 'readOnly'];
 export const CLIENT_TYPES = ['web', 'im', 'cli', 'noop'];
 export const NOTIFIER_TYPES = ['web', 'im', 'webhook', 'stdout', 'noop', 'desktop'];

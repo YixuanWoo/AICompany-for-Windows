@@ -716,6 +716,10 @@ export function createEngine({
       && !isBridgeOnline(db, agentId)) {
       return { ok: false, code: 'bridge_offline', reason: 'bridge 离线，任务留 todo 等待补投' };
     }
+    // 席位级拉模式：任何时候控制面都不主动唤醒它（它自己 checkout 走 lease 通道，不经过这里）。
+    if (cfgFor(agentId)?.dispatch === 'pull') {
+      return { ok: false, code: 'pull', reason: '该席位是拉模式，只由它自己领取' };
+    }
     // §7.3 第 4 项：并发上限可配（原先是写死的 3）。
     const maxConcurrent = config.runPolicy?.maxConcurrent ?? DEFAULTS.maxConcurrent;
     const running = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE status = 'running'").get().n;
@@ -2339,6 +2343,21 @@ export function createEngine({
         });
         return;
       }
+      // 席位级拉模式：交互式 agent（人叫才醒、没有常驻进程）不能由控制面直调 ——
+      // 它不在的时候派活只会白烧一次 Run。卡留 todo，等它自己来领。
+      // 与全局 dispatchMode=bridge 是两件事：bridge 是「整台机器都在拉」，这里只影响这一个席位。
+      {
+        const seat = ev.agentId ?? task.assignee;
+        if (cfgFor(seat)?.dispatch === 'pull') {
+          writeAudit(db, {
+            actor: 'scheduler', action: 'queued_for_pull',
+            newValue: `${seat}|${task.taskId}`,
+            // 带上 taskId：按卡追溯时这是唯一入口，漏了就得靠字符串搜 newValue。
+            taskId: task.taskId,
+          });
+          return;
+        }
+      }
       if (task.status === 'todo' || task.status === 'backlog') transition(db, task.taskId, 'in_progress', 'scheduler');
       const target = ev.agentId ?? task.assignee;
       const fresh = taskById(task.taskId);
@@ -2533,6 +2552,8 @@ export function createEngine({
       if (active) { waiting += 1; continue; }
       // 依赖没满足的卡也不是「躺着」：它在等上游。重投只会被 runPolicy 拦下来白记一条。
       if (unmetDependencies(row).length) { waiting += 1; continue; }
+      // 拉模式席位的卡更不是「躺着」：它在等那个人来领。重投只会每 60 秒刷一条 pull 拦截。
+      if (cfgFor(row.assignee)?.dispatch === 'pull') { waiting += 1; continue; }
       const pending = db.prepare(`SELECT 1 AS n FROM events
         WHERE taskId = ? AND processed = 0 AND type = 'issue_assigned' LIMIT 1`).get(row.taskId);
       if (pending) { waiting += 1; continue; }

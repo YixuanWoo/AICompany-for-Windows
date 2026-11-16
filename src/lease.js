@@ -62,6 +62,25 @@ export function releaseLease(db, taskId, leaseToken) {
   return { released: info.changes === 1 };
 }
 
+// 续租：交互式席位干一张卡可能远超默认 5 分钟，不能逼它「干到一半被判定过期」。
+// 只延长到期时间，不换 token —— 换 token 等于换持有人，会把别的回写路径弄乱。
+export function renewLease(db, { taskId, leaseToken, ttlSec = 3600, now = new Date() }) {
+  const row = db.prepare('SELECT status, leaseToken FROM tasks WHERE taskId = ?').get(taskId);
+  if (!row) return { ok: false, status: 404, reason: '任务不存在' };
+  if (!row.leaseToken || row.leaseToken !== leaseToken) {
+    return { ok: false, status: 409, reason: 'leaseToken 不匹配，拒绝续租' };
+  }
+  // 挂起态 lease 冻结（同 assertLease）：到期时间不动，仍认原持有者。
+  if (row.status === 'awaiting_decision') {
+    return { ok: true, status: 200, frozen: true, reason: '任务挂起，lease 冻结不续' };
+  }
+  const expiresAt = new Date(toMs(now) + ttlSec * 1000).toISOString();
+  db.prepare('UPDATE tasks SET leaseExpiresAt = ? WHERE taskId = ? AND leaseToken = ?')
+    .run(expiresAt, taskId, leaseToken);
+  writeAudit(db, { actor: 'bridge', action: 'lease_renewed', newValue: `${taskId}|${expiresAt}` });
+  return { ok: true, status: 200, leaseToken, leaseExpiresAt: expiresAt, ttlSec };
+}
+
 // 租约到期自动释放并把任务置 blocked 上报；awaiting_decision 显式排除，冻结不释放。
 export function expireLeases(db, now = new Date()) {
   const stamp = new Date(toMs(now)).toISOString();

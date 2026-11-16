@@ -56,13 +56,22 @@
                   "cli-acp",
                   "gui-template",
                   "polling",
-                  "webhook-exec"
+                  "webhook-exec",
+                  "seat"
                 ]
               },
               "config": {
                 "type": "object"
               }
             }
+          },
+          "dispatch": {
+            "type": "string",
+            "enum": [
+              "push",
+              "pull"
+            ],
+            "description": "派活方式：push=控制面直调 adapter（默认）；pull=卡留队列，由席位自己来领（人叫才醒的交互式 agent 用这个）"
           }
         }
       }
@@ -142,6 +151,14 @@
               "string",
               "null"
             ]
+          },
+          "dispatch": {
+            "type": "string",
+            "enum": [
+              "push",
+              "pull"
+            ],
+            "description": "派活方式：push=控制面直调 adapter（默认）；pull=卡留队列，由席位自己来领（人叫才醒的交互式 agent 用这个）"
           }
         }
       }
@@ -429,13 +446,22 @@
                   "cli-acp",
                   "gui-template",
                   "polling",
-                  "webhook-exec"
+                  "webhook-exec",
+                  "seat"
                 ]
               },
               "config": {
                 "type": "object"
               }
             }
+          },
+          "dispatch": {
+            "type": "string",
+            "enum": [
+              "push",
+              "pull"
+            ],
+            "description": "派活方式：push=控制面直调 adapter（默认）；pull=卡留队列，由席位自己来领（人叫才醒的交互式 agent 用这个）"
           }
         }
       }

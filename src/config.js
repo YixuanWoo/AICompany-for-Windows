@@ -184,6 +184,9 @@ export function expandPostsAndHolders(data) {
         ...h.adapter,
         config: { ...(h.adapter?.config ?? {}), ...(p.adapterConfig ?? {}) },
       },
+      // 派活方式：push = 控制面直调 adapter（默认）；pull = 卡留在队列，由席位自己来领。
+      // 交互式 agent（人叫才醒、没有常驻进程）只能走 pull，否则引擎会在它不在的时候派活。
+      dispatch: p.dispatch ?? h.dispatch ?? 'push',
     };
   });
   return { ...data, agents };

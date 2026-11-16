@@ -150,6 +150,15 @@ holders:
           screenshot: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action shot -OutputFile "{{outputFile}}"'
         pollIntervalMs: 5000
         maxMinutes: 20
+  # 担任者 3：会话里的 WorkBuddy agent（就是跟我对话的这个）。
+  # 它没有常驻进程——人叫才醒，所以对应岗位必须配 dispatch: pull：
+  # 控制面不直调，卡留在队列等它自己来领（scripts/seat.js）。
+  # adapter 用 seat 而不是 mock：万一哪天被误配成直派，会当场报错，而不是假装干完了。
+  - id: wb-agent
+    name: WorkBuddy agent
+    kind: external-agent
+    adapter:
+      type: seat
 # ── 岗位（席位） ────────────────────────────────────────────────
 posts:
   # 岗位 1：总经理 —— 只做三件事：定方向、拆活派活、验收；严禁自己干活。
@@ -174,6 +183,18 @@ posts:
     status: active
     quotaDaily: 20
     reportsTo: ceo
+  # 岗位 3：工程 —— 写代码、改配置、跑命令、查资料这类要动手的活。
+  # 和「执行」（豆包，点界面 / 写文档）分开：它要的是能跑命令、能改文件的手。
+  # dispatch: pull —— 我不在的时候派活等于白烧一次 Run，所以卡留在队列等我领。
+  - id: engineering
+    title: 工程执行
+    heldBy: wb-agent
+    isCEO: false
+    capabilities: [execute]
+    status: active
+    quotaDaily: 20
+    reportsTo: ceo
+    dispatch: pull
 clients: [web]
 # web：看板 inbox 用；desktop：看板关着时也弹气泡提醒「待你拍板」。
 notifier: [web, desktop]

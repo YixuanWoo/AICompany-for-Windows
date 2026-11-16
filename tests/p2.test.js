@@ -159,7 +159,7 @@ test('P2-1 · 统一 API：P2 端点全部登记在契约清单里且签名不�
     '/api/recurring', '/api/recurring/:id/fire', '/api/recurring/:id/complete-cycle',
     '/api/cycles', '/api/cycle-history', '/api/scheduler', '/api/scheduler/tick',
   ]) assert.ok(API_ENDPOINTS.some((e) => e.path === path), `契约缺端点 ${path}`);
-  assert.equal(BRIDGE_ENDPOINTS.length, 8);
+  assert.equal(BRIDGE_ENDPOINTS.length, 9);
   assert.equal(WEB_BOARD_P2_PANELS.length, 2);
 });
 

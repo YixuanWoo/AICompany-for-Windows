@@ -2,7 +2,7 @@
 // 依据：任务书 §9.1 / §9.2 / §9.3 / §9.4 —— 这不是另一套协议，只是 /api 下面的一组端点。
 
 import {
-  checkout, assertLease, releaseLease, heartbeat, listBridges, isBridgeOnline,
+  checkout, assertLease, releaseLease, renewLease, heartbeat, listBridges, isBridgeOnline,
 } from './lease.js';
 import { writeAudit } from './core.js';
 import { nowIso } from './ids.js';
@@ -10,6 +10,7 @@ import { nowIso } from './ids.js';
 export const BRIDGE_ENDPOINTS = Object.freeze([
   { method: 'GET', path: '/api/bridge/inbox', purpose: '按席位拉待领任务（todo、无 lease、按 createdAt）' },
   { method: 'POST', path: '/api/bridge/checkout', purpose: 'lease 独占领取，抢不到 409' },
+  { method: 'POST', path: '/api/bridge/renew', purpose: '续租：长活干不完时延长 lease，不换 token' },
   { method: 'POST', path: '/api/bridge/heartbeat', purpose: '上报心跳与本机可用状态' },
   { method: 'POST', path: '/api/bridge/progress', purpose: '进度报告，只留痕、0 唤醒' },
   { method: 'POST', path: '/api/bridge/complete', purpose: '完成报告回写，必须带 leaseToken' },
@@ -82,6 +83,15 @@ export function createBridgeApi({ engine, token = null, onlineWindowSec = 60, no
       const result = checkout(db, {
         taskId: body.taskId, agentId: body.agentId,
         runId: body.runId, ttlSec: body.ttlSec, now: now(),
+      });
+      return reply(result.status, result);
+    }
+
+    if (method === 'POST' && pathname === '/api/bridge/renew') {
+      if (!body.taskId || !body.leaseToken) return reply(400, { error: '缺 taskId / leaseToken' });
+      const result = renewLease(db, {
+        taskId: body.taskId, leaseToken: body.leaseToken,
+        ttlSec: body.ttlSec, now: now(),
       });
       return reply(result.status, result);
     }
