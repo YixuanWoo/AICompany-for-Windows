@@ -97,7 +97,9 @@ export function listProjects({ config = {}, workRoot } = {}) {
       id,
       displayName: entry.displayName ?? id,
       memoryLimit: memoryLimitOf(config, id),
-      archiveDir: entry.archiveDir ?? null,
+      // 落盘位置 = 项目文件夹本身；没配 rootDir 就是「产物只留在公司，人自己取」。
+      rootDir: entry.rootDir ?? null,
+      deliverSubdir: entry.deliverSubdir ?? null,
       specPath: spec.path,
       specExists: spec.ok,
       memoryCount: memory.count,

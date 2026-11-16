@@ -99,7 +99,7 @@ export function applyConfigRules(config) {
   for (const notifier of config.notifier || []) {
     if (!NOTIFIER_TYPES.includes(notifier)) errors.push(`未知 notifier 项：${notifier}`);
   }
-  // P7：项目 id 直接当目录名用，必须是安全文件名；archiveDir 要跨盘，必须绝对路径。
+  // P7：项目 id 直接当目录名用，必须是安全文件名；rootDir 是「项目文件夹在你磁盘上的位置」，要跨盘，必须绝对路径。
   const projects = config.projects;
   if (projects !== undefined) {
     if (!isPlainObject(projects)) {
@@ -113,10 +113,25 @@ export function applyConfigRules(config) {
           errors.push(`projects.${id} 必须是对象或留空`);
           continue;
         }
-        const archiveDir = entry?.archiveDir;
-        if (archiveDir !== undefined && archiveDir !== null && archiveDir !== '') {
-          if (typeof archiveDir !== 'string' || !path.isAbsolute(archiveDir)) {
-            errors.push(`projects.${id}.archiveDir 必须是绝对路径（归档要写到公司文件夹之外）`);
+        // P7：项目文件夹在哪 = 产物落哪（填了就是授权，不再单独授权一个目录）。
+        const rootDir = entry?.rootDir;
+        if (rootDir !== undefined && rootDir !== null && rootDir !== '') {
+          if (typeof rootDir !== 'string' || !path.isAbsolute(rootDir)) {
+            errors.push(`projects.${id}.rootDir 必须是绝对路径（它是这个项目文件夹的位置）`);
+          }
+        }
+        // 子目录只能挂在项目文件夹下面：绝对路径或 .. 会把产物写到项目之外，一律拒绝。
+        const subdir = entry?.deliverSubdir;
+        if (subdir !== undefined && subdir !== null && subdir !== '') {
+          if (typeof subdir !== 'string' || path.isAbsolute(subdir) || subdir.split(/[\\/]/).includes('..')) {
+            errors.push(`projects.${id}.deliverSubdir 只能是项目文件夹下的相对子目录（不能绝对路径、不能带 ..）`);
+          }
+        }
+        // 落盘前的占用检查：这些进程在跑就先不写（例：译台开着会锁住译稿）。
+        const blockers = entry?.deliverBlockers;
+        if (blockers !== undefined) {
+          if (!Array.isArray(blockers) || blockers.some((b) => typeof b !== 'string' || !b.trim())) {
+            errors.push(`projects.${id}.deliverBlockers 必须是字符串数组（进程名，可以带 * 通配）`);
           }
         }
         const limit = entry?.memoryLimit;
@@ -162,10 +177,13 @@ export function normalizeConfig(config) {
   const agents = (config.agents || []).map((agent) => ({
     ...agent, maxDifficulty: ceilingOf(agent),
   }));
-  // P7：项目配置补默认值（显示名、记忆条数）；archiveDir 不填就是「还没有授权归档目录」。
+  // P7：项目配置补默认值（显示名、记忆条数、落盘位置）。
+  // rootDir 有值 = 验收通过后产物落到那里（填了就是授权）；没填 = 产物只在公司任务目录里，由人自己取。
   const projects = Object.fromEntries(Object.entries(config.projects ?? {}).map(([id, entry]) => [id, {
     displayName: entry?.displayName ?? id,
-    archiveDir: entry?.archiveDir ?? null,
+    rootDir: entry?.rootDir ?? null,
+    deliverSubdir: entry?.deliverSubdir ?? null,
+    deliverBlockers: entry?.deliverBlockers ?? [],
     memoryLimit: entry?.memoryLimit ?? DEFAULT_MEMORY_LIMIT,
   }]));
   return { ...config, agents, projects, interaction, quota, gates, decision, runPolicy };

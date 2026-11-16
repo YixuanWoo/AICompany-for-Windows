@@ -1,5 +1,5 @@
 // P7 自主验收（第一步：P7-1 ~ P7-4）：项目层与项目记忆。
-//   ① 项目注册表（id 安全、archiveDir 绝对路径、memoryLimit 范围）
+//   ① 项目注册表（id 安全、rootDir 绝对路径、deliverSubdir 不出项目、memoryLimit 范围）
 //   ② 建卡必选项目（缺 / 未知 / 缺规范 三种都拒，且报出可用列表与路径）
 //   ③ 规范注入 brief（在硬性要求之前）
 //   ④ 记忆写入：卡到 done 才落，元数据由引擎补，员工只能影响「这一条」
@@ -38,7 +38,7 @@ function writeSpec(root, id, text = '规范：产物必须落文件，术语先�
 
 // ---------------------------------------------------------------- ① 配置规则
 
-test('P7-1 · 项目配置：id 必须是安全目录名；archiveDir 必须绝对路径；memoryLimit 有范围', (t) => {
+test('P7-1 · 项目配置：id 必须是安全目录名；rootDir 必须绝对路径；deliverSubdir 不许跑出项目外；memoryLimit 有范围', (t) => {
   const root = tmpRoot(t);
   const base = [
     'version: 1',
@@ -63,18 +63,20 @@ test('P7-1 · 项目配置：id 必须是安全目录名；archiveDir 必须绝�
 
   const bad = [
     [['projects:', '  ../evil:', '    displayName: x'], /项目 id/],
-    [['projects:', '  demo:', '    archiveDir: benny/out'], /绝对路径/],
+    [['projects:', '  demo:', '    rootDir: benny/out'], /绝对路径/],
+    [['projects:', '  demo:', '    deliverSubdir: D:/elsewhere'], /相对子目录/],
+    [['projects:', '  demo:', '    deliverSubdir: ../out'], /相对子目录/],
     [['projects:', '  demo:', '    memoryLimit: 999'], /0–50/],
   ];
   for (const [extra, pattern] of bad) {
     assert.throws(() => load(extra), (error) => error instanceof ConfigError && pattern.test(error.message), extra.join(' '));
   }
 
-  // 合法配置：默认值补齐（displayName 缺省用 id，memoryLimit 缺省 10）
+  // 合法配置：默认值补齐（displayName 缺省用 id，memoryLimit 缺省 10，没配 rootDir = 不自动落盘）
   const { config } = load(['projects:', '  demo:', '    displayName: 演示项目']);
   assert.equal(config.projects.demo.displayName, '演示项目');
   assert.equal(config.projects.demo.memoryLimit, 10);
-  assert.equal(config.projects.demo.archiveDir, null, '没授权就不该有归档目录');
+  assert.equal(config.projects.demo.rootDir, null, '没配项目文件夹就不该有落盘位置');
 });
 
 // ---------------------------------------------------------------- ② 必选与拒绝

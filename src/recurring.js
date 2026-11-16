@@ -85,7 +85,7 @@ export function createRecurring({ db, notifier, now = nowIso }) {
        requiresHumanEachCycle, lastCycleNo, jobJson, nextFireAt, lastFiredAt,
        consecutiveFailures, misfirePolicy, overlapPolicy, dedupeWindowMin, terminationJson)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`).run(
-      job.jobId, job.jobVersion, job.kind, job.status, job.trigger.rrule,
+      job.jobId, job.jobVersion, job.kind, job.status, job.trigger?.rrule ?? null,
       job.trigger.timezone ?? 'UTC', JSON.stringify(job.taskTemplate),
       job.requiresHumanEachCycle ? 1 : 0, job.lastCycleNo, JSON.stringify(job),
       job.nextFireAt, job.consecutiveFailures, job.misfirePolicy ?? 'run_once',
@@ -140,7 +140,8 @@ export function createRecurring({ db, notifier, now = nowIso }) {
     };
   }
 
-  function fire({ jobId, scheduledAt, now: atArg }) {
+  // G2：完成即触发。scheduledKey 可由调用方指定（完成驱动用任务号，避免同分钟连爆被去重误杀）。
+  function fire({ jobId, scheduledAt, now: atArg, scheduledKeyOverride = null }) {
     const at = atArg ?? now();
     const triggerAt = scheduledAt ?? at;
     const job = getJob(jobId);
@@ -182,17 +183,22 @@ export function createRecurring({ db, notifier, now = nowIso }) {
       // parallel：纯只读巡检才允许，继续建卡
     }
 
-    const key = minuteKey(triggerAt);
+    const key = scheduledKeyOverride ?? minuteKey(triggerAt);
     const existing = db.prepare('SELECT taskId FROM cycle_fires WHERE jobId = ? AND scheduledKey = ?')
       .get(jobId, key);
     if (existing) {
       return { skipped: true, reason: '同一触发点已建卡（cron 与补偿扫描双触发只 1 张）', taskId: existing.taskId };
     }
-    const recent = db.prepare(`SELECT scheduledKey, createdAt FROM cycle_fires
-      WHERE jobId = ? ORDER BY createdAt DESC LIMIT 1`).get(jobId);
-    if (recent && recent.scheduledKey !== key
-      && Date.parse(at) - Date.parse(recent.createdAt) < (job.dedupeWindowMin ?? 60) * 60000) {
-      return { skipped: true, reason: `dedupeWindowMin=${job.dedupeWindowMin ?? 60} 窗口内已有触发` };
+    // 完成驱动不吃「时间窗去重」：触发点是「上一轮办完了」，不是墙上时钟。
+    // 若在这里按分钟去重，一轮 20 秒完成的 job 会被自己的上一轮挡住——G2 直接失效。
+    // 瞬时连爆由 onTaskTerminal 的 completionMinIntervalSec 单独管，两件事分开。
+    if (!scheduledKeyOverride) {
+      const recent = db.prepare(`SELECT scheduledKey, createdAt FROM cycle_fires
+        WHERE jobId = ? ORDER BY createdAt DESC LIMIT 1`).get(jobId);
+      if (recent && recent.scheduledKey !== key
+        && Date.parse(at) - Date.parse(recent.createdAt) < (job.dedupeWindowMin ?? 60) * 60000) {
+        return { skipped: true, reason: `dedupeWindowMin=${job.dedupeWindowMin ?? 60} 窗口内已有触发` };
+      }
     }
 
     const prev = latestSummary(jobId);
@@ -365,6 +371,72 @@ export function createRecurring({ db, notifier, now = nowIso }) {
     return { at, fired: results.length, results };
   }
 
+  // G2：完成即触发 —— 引擎在卡到终态时回调这里。
+  // 只处理 onCompletion  job：cron/event 仍由调度器驱动，避免两套触发器抢同一张卡。
+  const pendingCompletions = new Map();
+  function onTaskTerminal({ taskId, status, runId = null, now: atArg } = {}) {
+    const at = atArg ?? now();
+    const cycle = db.prepare('SELECT jobId, cycleNo, status FROM cycles WHERE taskId = ? ORDER BY cycleNo DESC LIMIT 1').get(taskId);
+    if (!cycle || !['todo', 'in_progress'].includes(cycle.status)) {
+      return { skipped: true, reason: cycle ? `轮次已收账（${cycle.status}）` : '不是循环轮次卡' };
+    }
+    const job = getJob(cycle.jobId);
+    if (!job || job.trigger?.type !== 'onCompletion') {
+      return { skipped: true, reason: '这个 job 不是完成即触发型' };
+    }
+    if (job.status !== 'active') return { skipped: true, reason: `job 状态 ${job.status}` };
+
+    // 终态映射：done → done；blocked → failed（计入连续失败）；cancelled → 人手动收摊，不再派生。
+    const cycleStatus = status === 'done' ? 'done' : status === 'blocked' ? 'failed' : 'cancelled';
+    completeCycle({ jobId: job.jobId, cycleNo: cycle.cycleNo, status: cycleStatus, runIds: runId ? [runId] : [] });
+    writeAudit(db, {
+      actor: 'control-plane', action: 'completion_cycle_closed',
+      newValue: `${job.jobId}#${cycle.cycleNo}:${cycleStatus}:${taskId}`, runId, taskId,
+    });
+
+    const fresh = getJob(job.jobId);
+    if (fresh.status !== 'active') return { closed: true, paused: true, reason: '连续失败触顶，已自动暂停' };
+    if (cycleStatus === 'cancelled') return { closed: true, stopped: true, reason: '人工取消，不再派生下一轮' };
+
+    const minMs = (job.trigger.completionMinIntervalSec ?? 30) * 1000;
+    const firedAt = Date.parse(fresh.lastFiredAt ?? at);
+    const elapsed = Number.isFinite(firedAt) ? Date.parse(at) - firedAt : minMs;
+    const fireNext = (fireAt) => {
+      pendingCompletions.delete(job.jobId);
+      const out = fire({
+        jobId: job.jobId, scheduledAt: fireAt, now: fireAt,
+        // 完成驱动不能用「分钟键」去重：一轮 20 秒就完成时，同分钟两轮会被 dedupe 当成一次。
+        scheduledKeyOverride: `completion:${job.jobId}:${cycle.cycleNo + 1}`,
+      });
+      writeAudit(db, {
+        actor: 'scheduler', action: 'completion_triggered',
+        newValue: `${job.jobId}#${cycle.cycleNo + 1}←${taskId}:${out.taskId ?? JSON.stringify(out)}`.slice(0, 300),
+      });
+      return { closed: true, ...out };
+    };
+
+    if (elapsed < minMs) {
+      // 防「瞬时连爆」：两轮派生之间至少隔 completionMinIntervalSec（默认 30 秒）。
+      // 延时用 unref 定时器，不占住 Node 进程；重复触发只保留最后一个，避免连锁建卡。
+      const wait = Math.max(1, minMs - elapsed);
+      const old = pendingCompletions.get(job.jobId);
+      if (old?.timer) clearTimeout(old.timer);
+      const timer = setTimeout(() => {
+        try { fireNext(new Date(Date.parse(at) + wait).toISOString()); } catch (error) {
+          writeAudit(db, { actor: 'scheduler', action: 'completion_deferred_failed', newValue: String(error.message).slice(0, 300) });
+        }
+      }, wait);
+      timer.unref?.();
+      pendingCompletions.set(job.jobId, { cycleNo: cycle.cycleNo, timer });
+      writeAudit(db, {
+        actor: 'scheduler', action: 'completion_deferred',
+        newValue: `${job.jobId}:${cycle.cycleNo + 1} 延迟 ${Math.round(wait / 1000)} 秒（最小间隔防连爆）`,
+      });
+      return { closed: true, deferred: true, waitMs: wait };
+    }
+    return fireNext(at);
+  }
+
   // P4-9 循环 L3：改模板 / 频率必须走人审；批准后只影响「新轮次」，旧轮次原样保留。
   function applyRevision(jobId, patch = {}, { approvedBy = 'human' } = {}) {
     const job = getJob(jobId);
@@ -400,7 +472,7 @@ export function createRecurring({ db, notifier, now = nowIso }) {
   }
 
   return {
-    registerJob, getJob, saveJob, fire, tick, completeCycle,
+    registerJob, getJob, saveJob, fire, tick, completeCycle, onTaskTerminal,
     pauseJob, resumeJob, latestSummary, selectFires, applyRevision,
     listJobs: () => db.prepare('SELECT * FROM recurring_jobs ORDER BY jobId').all().map((r) => getJob(r.jobId)),
     listCycles: (jobId) => db.prepare('SELECT * FROM cycles WHERE jobId = ? ORDER BY cycleNo').all(jobId),

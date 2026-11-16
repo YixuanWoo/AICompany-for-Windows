@@ -207,6 +207,11 @@
   </div>
 
   <div class="col">
+    <section class="card">
+      <h2>项目 · Projects（P7）</h2>
+      <p class="hint">项目是公司里的记忆单元，也是交付物的落点。规范与经验存在公司，产物验收通过后复制到项目自己的文件夹。</p>
+      <div class="list" id="projects-list"></div>
+    </section>
     <div class="grid2">
       <section class="card">
         <h2>任务卡 · Tasks</h2>
@@ -332,6 +337,8 @@
     agents: [], tasks: [], runs: [], threads: [], approvals: [], audit: [],
     briefs: [], notes: [], dashboard: {}, bridge: {}, recurring: [],
     quotas: [], changeRequests: [],
+    // P7：项目面板 —— 项目清单 + 每个项目最近的经验（按需单独取，失败不影响其它面板）。
+    projects: [], projectMemory: {},
     observe: null, tuning: null,
     // P6：公司默认模式 / 席位清单 / GUI 席位闸门状态
     meta: null, gui: null,
@@ -365,6 +372,74 @@
     const prev = el.value;
     el.innerHTML = '<option value="">' + esc(placeholder) + '</option>' + options;
     if (prev && el.querySelector('option[value="' + CSS.escape(prev) + '"]')) el.value = prev;
+  }
+
+  // P7-6：项目面板的纯渲染函数。数据全部来自入参，不读全局、不发请求。
+  // 源自我方执行席位交差的 project-panel.js，按新字段（rootDir / deliverSubdir）改过。
+  function renderProjectPanel(projects, memoryById) {
+    const list = Array.isArray(projects) ? projects : [];
+    if (!list.length) return '<div class="empty">还没有配置项目。</div>';
+    const mems = (memoryById && typeof memoryById === 'object') ? memoryById : {};
+    // 按码点截字，超过上限截断补「…」，不吃掉半个字。
+    const cut = (value, max) => {
+      const chars = Array.from(String(value ?? ''));
+      return chars.length > max ? chars.slice(0, max).join('') + '…' : chars.join('');
+    };
+    const stamp = (item) => {
+      const n = Date.parse(item && item.finishedAt);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const takeTexts = (value, max, prefix) => (Array.isArray(value) ? value : [])
+      .filter((x) => String(x ?? '').trim())
+      .slice(0, max)
+      .map((x) => '<div class="hint">' + prefix + esc(x) + '</div>').join('');
+
+    const cards = list.map((project) => {
+      const p = project || {};
+      const got = mems[p.id];
+      const hasData = Boolean(got && typeof got === 'object');
+      const items = hasData && Array.isArray(got.items) ? got.items : [];
+      const count = hasData && Number.isFinite(Number(got.count)) ? Number(got.count) : (hasData ? items.length : 0);
+      const limit = p.memoryLimit ?? (hasData ? got.limit : null) ?? '—';
+      const spec = p.specExists === true
+        ? '规范已就位'
+        : '<span style="color:#B42318">缺规范</span>';
+      // P7-5：落盘位置跟着项目走。rootDir 是项目文件夹边界，deliverSubdir 是这一单的默认落点。
+      const landing = p.rootDir
+        ? '落盘：' + esc(p.rootDir) + (p.deliverSubdir ? ' / ' + esc(p.deliverSubdir) : '（根目录）')
+        : '落盘：不自动落（产物只留在公司，由人取）';
+      const rows = items.slice().sort((a, b) => stamp(b) - stamp(a)).slice(0, 3).map((item) => {
+        const it = item || {};
+        return '<div class="row">' +
+          '<div class="meta">' + esc(String(it.finishedAt ?? '').slice(0, 10)) + '</div>' +
+          '<div>' + esc(cut(it.summary, 80)) + '</div>' +
+          takeTexts(it.lessons, 2, '· ') +
+          takeTexts(it.nextHints, 1, '→ ') +
+          '</div>';
+      }).join('');
+      return '<div class="card">' +
+        '<div class="row"><b>' + esc(p.displayName || p.id) + '</b> <span class="tag">' + esc(p.id) + '</span>' +
+        '<div class="meta">记忆：已记 ' + esc(count) + ' 条经验 / 上限 ' + esc(limit) + ' 条</div>' +
+        '<div class="meta">规范：' + spec + '</div>' +
+        '<div class="meta">' + landing + '</div>' +
+        '</div>' +
+        '<details data-project="' + esc(p.id) + '"><summary class="hint">最近的经验教训</summary>' +
+        (rows || '<div class="empty">这个项目还没有记忆。</div>') +
+        '</details>' +
+        '</div>';
+    });
+    return cards.join('');
+  }
+
+  function renderProjects() {
+    const host = $('projects-list');
+    // 自动刷新会重绘整块面板；先把展开的项目记下来，重绘后原样展开，免得看一半被合上。
+    const open = new Set(Array.from(host.querySelectorAll('details[open][data-project]'))
+      .map((d) => d.getAttribute('data-project')));
+    host.innerHTML = renderProjectPanel(state.projects || [], state.projectMemory || {});
+    for (const d of host.querySelectorAll('details[data-project]')) {
+      if (open.has(d.getAttribute('data-project'))) d.open = true;
+    }
   }
 
   function renderStats() {
@@ -663,6 +738,7 @@
 
   function render() {
     renderStats();
+    renderProjects();
     renderTasks();
     renderGui();
     renderAgents();
@@ -724,8 +800,17 @@
       ' · ' + esc(t.status) + '</option>').join(''), '（选一张卡）');
   }
 
+  // P7-6：每个项目的最近经验单独取；某个项目取不到只当它没有记忆，不拖累整个看板。
+  async function loadProjectMemory(projects) {
+    const out = {};
+    await Promise.all((projects || []).map(async (p) => {
+      out[p.id] = await api('/api/projects/' + encodeURIComponent(p.id) + '/memory?limit=6').catch(() => null);
+    }));
+    return out;
+  }
+
   async function refresh() {
-    const [agents, tasks, runs, threads, approvals, audit, inbox, dashboard, bridge, recurring, quotas, changeRequests, observe, tuning, meta, gui] =
+    const [agents, tasks, runs, threads, approvals, audit, inbox, dashboard, bridge, recurring, quotas, changeRequests, observe, tuning, meta, gui, projects] =
       await Promise.all([
         api('/api/agents'), api('/api/tasks'), api('/api/runs'), api('/api/threads'),
         api('/api/approvals'), api('/api/audit'), api('/api/inbox'), api('/api/dashboard'),
@@ -734,11 +819,13 @@
         api('/api/observe').catch(() => null), api('/api/config/tuning').catch(() => null),
         // P6：老实例没有这两个端点，读不到就当没有，不影响其它面板。
         api('/api/meta').catch(() => null), api('/api/gui/state').catch(() => null),
+        api('/api/projects').catch(() => []),
       ]);
     state = {
       agents, tasks, runs, threads, approvals, audit, dashboard, bridge, recurring,
       quotas, changeRequests,
-      observe, tuning, meta, gui,
+      observe, tuning, meta, gui, projects,
+      projectMemory: await loadProjectMemory(projects),
       briefs: inbox.briefs || [], notes: inbox.notifications || [],
     };
     if (!metaApplied) applyMetaDefaults();

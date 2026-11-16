@@ -56,6 +56,9 @@ export function createServer({
     ?? null;
   const rec = recurring ?? createRecurring({ db: engine.db, notifier: engine.notifier });
   const sched = scheduler ?? createScheduler({ recurring: rec, logger });
+  // G2：把引擎的「卡到终态」接到循环引擎。onCompletion 型 job 在这里派生下一轮；
+  // 其余 job 不受影响，仍由调度器按 rrule 到点触发。
+  engine.setTaskTerminalHook?.((payload) => rec.onTaskTerminal(payload));
   // P4-9：循环模板改版的人审通过后，落到 recurring 上（只影响新轮次）。
   if (typeof engine.setApprovalHandler === 'function') {
     engine.setApprovalHandler('recurring_change', (payload, meta = {}) =>
@@ -315,6 +318,16 @@ export function createServer({
       }
       if (method === 'GET') {
         const q = url.searchParams;
+        // P7-6：单个项目的最近记忆（看板项目面板展开时读它）。
+        const projectMem = /^\/api\/projects\/([^/]+)\/memory$/.exec(pathname);
+        if (projectMem) {
+          const id = decodeURIComponent(projectMem[1]);
+          const limit = Math.min(50, Math.max(1, Number(q.get('limit') ?? 10) || 10));
+          const got = engine.projectMemory(id, { limit });
+          if (!got) { json(res, 404, { error: `没有这个项目：${id}`, code: 'PROJECT_UNKNOWN' }); return; }
+          json(res, 200, got);
+          return;
+        }
         const routes = {
           // P6：看板要知道「这家公司默认怎么派活、有哪些席位」，否则每次都得手选模式。
           '/api/meta': () => {

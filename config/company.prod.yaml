@@ -17,13 +17,23 @@ company:
 # 生产产物与演示实例（work/）分开，互不干扰。
 workRoot: D:/开源/AICompany/work-prod
 # P7 项目层：配了项目就「建卡必选项目」。
-# 规范与记忆都在 work-prod/projects/<id>/ 下（公司文件夹 = 大脑），
-# 你的项目文件夹（工地上）只放交付物，而且必须先授权 archiveDir 引擎才会往里写。
+# 规范与记忆都在 work-prod/projects/<id>/ 下（公司文件夹 = 大脑）。
+# 产物落哪儿跟着项目走：项目条目里 rootDir 就写它的文件夹位置（填了就是授权），
+# 验收通过后产物落到 rootDir（+ deliverSubdir 子目录）；不填 rootDir = 产物只留在公司，人自己取。
 projects:
   benny:
-    displayName: Benny 翻译项目
+    displayName: 小王子翻译
     memoryLimit: 10
-    # archiveDir: D:/benny      # P7-5 归档用；未经你授权不填，引擎就不往公司外写任何东西
+    # 项目文件夹（这个项目的工地）：产物验收通过后落到它里面，引擎只在这个边界内写。
+    rootDir: D:/Benny/20_项目/小王子翻译
+    # 默认落点（相对 rootDir）：这一单没指定落哪儿时用。四道工序各自的正式落点写在 project.yaml 里。
+    deliverSubdir: 04-译稿
+    # 这些进程在跑时先不落盘（译台开着会锁住 04-译稿 里的文件），等它关掉由维护心跳重试。
+    deliverBlockers: ["YiTai*"]
+  aicompany-dev:
+    displayName: AICompany 自研开发
+    memoryLimit: 20
+    # 不填 rootDir：改源码的活由人集成，引擎不自动往仓库里写文件。
 interaction:
   defaultMode: direct
   defaultTarget: ceo

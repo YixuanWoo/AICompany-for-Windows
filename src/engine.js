@@ -8,7 +8,7 @@ import { nowIso, atomicWriteJson, decisionPath, revisionPath, taskDir, snapshotP
 import { validate, loadSchema } from './validate.js';
 import {
   seedAgents, emit, nextEvent, markProcessed, pendingEvents,
-  transition, writeAudit, compensationScan,
+  transition as rawTransition, writeAudit, compensationScan,
 } from './core.js';
 import { getAdapter, availableAdapterTypes } from './adapters.js';
 import { isBridgeOnline } from './lease.js';
@@ -24,8 +24,9 @@ import { createApproval, getApproval, listApprovals, closeApproval, pendingAppro
 import { buildSnapshot } from './snapshot.js';
 import {
   assertProject, buildProjectContext, buildMemoryRecord, appendMemory,
-  listProjects as listProjectEntries, memoryLimitOf,
+  listProjects as listProjectEntries, memoryLimitOf, readRecentMemory,
 } from './projects.js';
+import { deliverTask, runningProcesses, lastDeliveryOf } from './deliver.js';
 
 export function createNotifier(kind = 'web') {
   // P4-6：可传单个通道名或数组；web / noop / stdout 内置，im / webhook 需显式地址。
@@ -50,6 +51,8 @@ export function createEngine({
   dispatchMode = 'inline', approvalHandlers = {}, workRoot = null, now = () => new Date(),
   // 被「临时条件」拦下的卡多久自己再试一次（毫秒）。0 = 关闭，只靠维护心跳。
   gateRetryMs = 0,
+  // G2：卡进终态时通知外部（由 server 接到循环引擎）。钩子失败只留审计，不影响卡的状态。
+  taskTerminalHook = null,
 }) {
   // inline = P1 单机直调 adapter（默认，本地演示一等公民）；
   // bridge = P2 拉模式，控制面只排队，等本机 bridge 来 checkout。两者共用同一套统一 API。
@@ -1407,6 +1410,83 @@ export function createEngine({
     }
   }
 
+  // P7-5：卡真正 done 才把产物落到项目自己的文件夹。
+  // 三条纪律：没配 rootDir 的项目不落；别人占着（译台等）就先不落、等心跳重试；落盘失败不改卡状态。
+  const deliverAttempts = new Map();
+  function deliverAccepted(task, runId) {
+    if (!task?.project || !task?.taskId) return null;
+    const entry = config?.projects?.[task.project] ?? {};
+    if (!entry.rootDir) return null;
+    const running = runningProcesses(entry.deliverBlockers ?? []);
+    if (running.length) {
+      writeAudit(db, {
+        actor: 'control-plane', action: 'deliver_deferred',
+        newValue: `${task.project}|${running.join(',')} 正在占用，等它关掉再落`.slice(0, 300),
+        runId, taskId: task.taskId,
+      });
+      return { deferred: true, running };
+    }
+    const out = deliverTask({ workRoot: workDir, config, task, at: clockIso() });
+    if (out.ok) {
+      writeAudit(db, {
+        actor: 'control-plane', action: 'delivered',
+        newValue: `${task.project}|${out.copied.length} 个文件 → ${out.targetDir}`.slice(0, 300),
+        runId, taskId: task.taskId,
+      });
+    } else {
+      const why = out.error ?? (out.failed ?? []).map((f) => f.reason).join('; ') ?? '';
+      writeAudit(db, {
+        actor: 'control-plane', action: 'deliver_failed',
+        newValue: `${out.code ?? 'ERROR'}|${why}`.slice(0, 300),
+        runId, taskId: task.taskId,
+      });
+    }
+    return out;
+  }
+
+  // 维护心跳顺手补落盘：卡已 done、清单里没有成功记录 → 再试一次，最多 5 次。
+  function retryPendingDeliveries({ limit = 5 } = {}) {
+    const rows = db.prepare(`SELECT * FROM tasks WHERE status = 'done' AND project IS NOT NULL
+      ORDER BY updatedAt DESC LIMIT 30`).all();
+    let retried = 0;
+    for (const row of rows) {
+      const entry = config?.projects?.[row.project] ?? {};
+      if (!entry.rootDir) continue;
+      const last = lastDeliveryOf(workDir, row.project, row.taskId);
+      if (last && Array.isArray(last.failed) && last.failed.length === 0 && last.copied?.length) continue;
+      const attempts = deliverAttempts.get(row.taskId) ?? 0;
+      if (attempts >= 5) continue;
+      if (runningProcesses(entry.deliverBlockers ?? []).length) continue;
+      deliverAttempts.set(row.taskId, attempts + 1);
+      deliverAccepted(row, null);
+      retried += 1;
+      if (retried >= limit) break;
+    }
+    return retried;
+  }
+
+  // G2：状态机是全国的统一出口，终态通知挂在这里，任何路径进 done/blocked/cancelled 都不会漏。
+  // 循环引擎自己收账走的是直接 UPDATE（completeCycle），不经过这里，不会自激。
+  function transition(dbHandle, taskId, to, actor = 'control-plane', runId = null) {
+    const out = rawTransition(dbHandle, taskId, to, actor, runId);
+    if (to === 'done' || to === 'blocked' || to === 'cancelled') noteTaskTerminal(taskId, to, runId);
+    return out;
+  }
+
+  // G2：卡到终态时通知外部。循环引擎据此做「完成即触发下一轮」。
+  // 钩子是外部注入的，失败绝不能把一张已经办完的卡拖回失败态——只留审计。
+  function noteTaskTerminal(taskId, status, runId = null) {
+    if (typeof taskTerminalHook !== 'function') return;
+    try {
+      taskTerminalHook({ taskId, status, runId, at: clockIso() });
+    } catch (error) {
+      writeAudit(db, {
+        actor: 'control-plane', action: 'terminal_hook_failed',
+        newValue: `${status}|${String(error.message).slice(0, 200)}`, runId, taskId,
+      });
+    }
+  }
+
   async function handleResult(outcome, task, agentId, payload) {
     const result = outcome.result ?? {};
     // 卡在跑的过程中被人工取消：结果照样留档，但不再推进状态机。
@@ -1502,6 +1582,8 @@ export function createEngine({
           transition(db, task.taskId, 'done', 'ceo', outcome.runId);
           // CEO 放行了才算这张卡真的收账，这时才把这次的经验写进项目记忆。
           flushProjectMemory(task, outcome.runId);
+          // 同一时刻把产物落进项目自己的文件夹（不落盘不影响卡的状态）。
+          deliverAccepted(task, outcome.runId);
         } else {
           transition(db, task.taskId, 'in_progress', 'ceo', outcome.runId);
           emitEvent({
@@ -1545,6 +1627,7 @@ export function createEngine({
       transition(db, task.taskId, 'done', 'control-plane', outcome.runId);
       writeAudit(db, { actor: 'human', action: 'machine_acceptance', newValue: task.taskId, runId: outcome.runId });
       flushProjectMemory(task, outcome.runId);
+      deliverAccepted(task, outcome.runId);
       return;
     }
     // 按 Run 去重：同一次执行的报告只请一次验收，但返工后的新 Run 可以再请一次。
@@ -1781,7 +1864,9 @@ export function createEngine({
     if (requeued) {
       writeAudit(db, { actor: 'scheduler', action: 'reconcile_requeue', newValue: String(requeued) });
     }
-    return { scanned: rows.length, requeued, waiting, ...pumped };
+    // P7-5：顺手补落盘 —— 被译台挡住、或上次落盘失败的卡，在这里重试。
+    const deliveries = retryPendingDeliveries();
+    return { scanned: rows.length, requeued, waiting, deliveries, ...pumped };
   }
 
   async function onProgressReport() {
@@ -1803,12 +1888,22 @@ export function createEngine({
       if (!found) return null;
       return { ...found, memoryLimit: memoryLimitOf(config, id) };
     },
+    // P7-6：看板项目面板展开时读最近 N 条记忆。只读、只给最近几条，不给全库。
+    projectMemory: (id, { limit = 10 } = {}) => {
+      const found = listProjectEntries({ config, workRoot: workDir }).find((p) => p.id === id);
+      if (!found) return null;
+      const got = readRecentMemory(workDir, id, { limit });
+      return { project: id, count: got.count, limit, items: got.entries };
+    },
     submit, pump, route, emitEvent, wake, submitChangeRequest, onProgressReport,
     cancelTask,
     reconcile,
     // 短延迟自检：测试要能看到「还有哪张卡排着等重试」。
     clearGateRetry,
     pendingGateRetries: () => [...gateRetries.keys()],
+    // P7-5：落盘（测试与手工补偿用）。
+    deliverAccepted: (task, runId = null) => deliverAccepted(task, runId),
+    retryPendingDeliveries: (opts) => retryPendingDeliveries(opts),
     compensationScan: (opts) => compensationScan(db, opts),
     getTasks: () => db.prepare('SELECT * FROM tasks ORDER BY rowid').all(),
     getRuns: () => db.prepare('SELECT * FROM runs ORDER BY rowid').all(),
@@ -1825,6 +1920,7 @@ export function createEngine({
     getApprovals: (filter = {}) => listApprovals(db, filter),
     requestApproval, decideApproval, submitDecision, expireDecisions,
     setApprovalHandler: (kind, fn) => { approvalHandlers[kind] = fn; return true; },
+    setTaskTerminalHook: (fn) => { taskTerminalHook = typeof fn === 'function' ? fn : null; return true; },
     rollCall, promoteThread, archiveThread, archiveStaleThreads,
     getChangeRequests: (taskId = null) => {
       const rows = db.prepare('SELECT * FROM change_requests ORDER BY rowid').all();
@@ -1887,6 +1983,7 @@ export function createEngine({
       // 先把挂着的「等会儿再试」清掉，再关库：否则定时器醒来会朝一个已关的库写事件。
       for (const entry of gateRetries.values()) clearTimeout(entry.timer);
       gateRetries.clear();
+      deliverAttempts.clear();
       db.close();
     },
     adapterTypes: availableAdapterTypes,

@@ -20,10 +20,11 @@
       "type": "object",
       "required": ["type"],
       "properties": {
-        "type": { "enum": ["cron", "event"] },
+        "type": { "enum": ["cron", "event", "onCompletion"] },
         "rrule": { "type": ["string", "null"] },
         "timezone": { "type": "string" },
-        "eventTrigger": { "type": ["string", "null"] }
+        "eventTrigger": { "type": ["string", "null"] },
+        "completionMinIntervalSec": { "type": "integer", "minimum": 0 }
       }
     },
     "misfirePolicy": { "enum": ["run_once", "skip", "catch_up"] },
