@@ -27,6 +27,10 @@ import { assertProject, buildProjectContext, buildMemoryRecord, appendMemory,
 import { repoEntry, findRepoForPath, assertRepo } from './repos.js';
 import { looksLikeCode } from './org-chart.js';
 import {
+  recordMessage, listMessages, markMessagesRead as markReadInDb, unreadMessageCount, speakerLabel,
+  composeDoneMessage, composeBlockedMessage, composeAnswerMessage, plainText,
+} from './messages.js';
+import {
   deliverTask, runningProcesses, lastDeliveryOf, appendDeliveryLog, DELIVERY_SCHEMA,
 } from './deliver.js';
 import { nextFireAt } from './rrule.js';
@@ -789,6 +793,20 @@ export function createEngine({
         actor: 'control-plane', action: 'suspend_for_decision',
         oldValue: task.status, newValue: `awaiting_decision:${normalized.changeRequestId}`, taskId: task.taskId,
       });
+      const whyText = plainText(normalized.reason, 240) || '没说原因';
+      // 只有真到董事会这一级才进消息箱；CEO 自己能定的不打扰人（挂起面板里还是能查到）。
+      if (requestedBy === 'human' || requestedBy === 'board') {
+        recordMessage(db, {
+          from: normalized.agentId ?? 'system', kind: 'decision', taskId: task.taskId,
+          project: task.project ?? null,
+          title: `等你定：${task.title}`,
+          body: [
+            `${speakerLabel(config, normalized.agentId)} 做不下去了，要你定一件事：${task.title}`,
+            `原因：${whyText}`,
+            '它已经停下来等你，不会再自己乱试；定完它接着干。',
+          ].join('\n'),
+        });
+      }
       notifier.send({
         title: `待拍板：${task.title}`,
         body: `席位 ${normalized.agentId} 上报变更（${normalized.kind}）：${normalized.reason}\n` +
@@ -1200,9 +1218,17 @@ export function createEngine({
       actor: 'ceo', action: 'ceo_report',
       newValue: answer.slice(0, 2000), runId, taskId: task.taskId,
     });
+    // 回话本身就是给董事会的那条消息：落库（重启还在）+ 推气泡。
+    const composed = composeAnswerMessage({ config, task, answer });
+    recordMessage(db, {
+      from: ceoId() ?? 'ceo', kind: 'answer', taskId: task.taskId,
+      project: task.project ?? null, title: composed.title, body: composed.body,
+    });
+    // 父卡随后转 done，但答案是上面那条，不再重复播报一次「总经理干完了」。
+    boardSilent.add(task.taskId);
     notifier.send({
-      title: `总经理回复：${String(task.title ?? '(无标题)').slice(0, 60)}`,
-      body: answer.slice(0, 1500),
+      title: composed.title,
+      body: composed.body.slice(0, 1500),
       scene: 'answer', taskId: task.taskId,
     });
     transition(db, task.taskId, 'in_review', 'ceo', runId);
@@ -2023,6 +2049,7 @@ export function createEngine({
         newValue: `${task.project}|${running.join(',')} 正在占用，等它关掉再落`.slice(0, 300),
         runId, taskId: task.taskId,
       });
+      amendDoneMessage(task.taskId, `文件先没放过去：${running.join('、')} 正占着那个文件夹，等它关掉我再自动放。`);
       return { deferred: true, running };
     }
     const out = deliverTask({ workRoot: workDir, config, task, at: clockIso() });
@@ -2032,6 +2059,13 @@ export function createEngine({
         newValue: `${task.project}|${out.copied.length} 个文件 → ${out.targetDir}`.slice(0, 300),
         runId, taskId: task.taskId,
       });
+      // 完成消息在状态流转时就发了，那时还不知道落没落成；这里回来补一句「放哪了」。
+      const projectName = config?.projects?.[task.project]?.displayName ?? task.project;
+      const target = String(out.targetDir ?? '').split(/[\\/]/).filter(Boolean).slice(-1)[0];
+      amendDoneMessage(
+        task.taskId,
+        `已经放进「${projectName}」${target ? ` 的 ${target} 文件夹` : '的项目文件夹'}（${out.copied.length} 个文件）。`,
+      );
     } else if (out.code === 'NO_ARTIFACTS') {
       // 「这卡天生没有产物」（只排班 / 只给建议 / 只做验收）不是失败：
       // 记一条账就算结案，否则维护心跳每重启一次就再刷 5 条 deliver_failed，
@@ -2161,8 +2195,82 @@ export function createEngine({
   function transition(dbHandle, taskId, to, actor = 'control-plane', runId = null) {
     const out = rawTransition(dbHandle, taskId, to, actor, runId);
     if (to === 'done' || to === 'blocked' || to === 'cancelled') noteTaskTerminal(taskId, to, runId);
+    if (to === 'done' || to === 'blocked') noteBoardMessage(taskId, to, actor, runId);
     if (to === 'done') releaseReadyDependencies();
     return out;
+  }
+
+  // ── 董事会消息：卡到终态就对人说一句人话 ────────────────────────────
+  // 谁 → 干了什么 → 结果 → 东西在哪 → 我要不要动手。技术细节一概不进消息，
+  // 想深究就点消息里的「看这张卡」，那里有完整审计与产物。
+  // 只对「人关心的卡」发：循环巡检这类内部卡不发，否则消息区会被日程噪音刷满。
+  const doneMessageOf = new Map(); // taskId → msgId，落盘成功后回来补一句「放哪了」
+  // 已经用别的形式说过话的卡（比如总经理只回话不派活）：卡照样转 done，但不再重复播报。
+  const boardSilent = new Set();
+
+  function noteBoardMessage(taskId, to, actor = 'control-plane', runId = null) {
+    try {
+      const task = taskById(taskId);
+      if (!task) return null;
+      if (task.origin?.internal === true) return null;
+      // 「处理升级」这类由引擎自己建的系统卡：它本身就是一条消息，不再重复播报。
+      if (task.origin?.escalationOf) return null;
+      if (boardSilent.has(taskId)) return null;
+      // 只派活、不干活的父卡：它的成果已经由下面每一张子卡各报一次了，
+      // 再播一条「总经理干完了」只会让消息区看起来做了两件事。
+      if (task.status === 'done'
+        && db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parentTaskId = ?').get(taskId).n > 0) return null;
+
+      if (to === 'done') {
+        const report = pendingMemory.get(taskId) ?? null;
+        const approvedByBoard = actor === 'human' || actor === 'board';
+        const reviewedBy = (!approvedByBoard && task.reviewBy && task.reviewBy !== task.assignee)
+          ? task.reviewBy : null;
+        const composed = composeDoneMessage({
+          config, task, report, reviewedBy, approvedByBoard, actor: task.assignee,
+        });
+        const msg = recordMessage(db, {
+          from: task.assignee ?? 'system', kind: 'done', taskId, project: task.project ?? null,
+          title: composed.title, body: composed.body,
+          docs: (report?.artifacts ?? []).slice(0, 20),
+        });
+        if (msg) doneMessageOf.set(taskId, msg.msgId);
+        return msg;
+      }
+
+      // blocked：卡住 / 上报，都是「需要你定」，只是措辞不同。
+      const latest = db.prepare(`SELECT newValue FROM audit
+        WHERE taskId = ? AND action IN ('report_rejected', 'escalated', 'handoff_escalate')
+        ORDER BY rowid DESC LIMIT 1`).get(taskId);
+      const composed = composeBlockedMessage({
+        config, task, reason: latest?.newValue ?? null, actor: task.assignee,
+      });
+      return recordMessage(db, {
+        from: task.assignee ?? 'system', kind: 'blocked', taskId, project: task.project ?? null,
+        title: composed.title, body: composed.body,
+      });
+    } catch (error) {
+      // 消息是旁路：写不进去只留审计，绝不影响卡的状态流转。
+      writeAudit(db, {
+        actor: 'control-plane', action: 'board_message_failed',
+        newValue: String(error.message).slice(0, 200), runId, taskId,
+      });
+      return null;
+    }
+  }
+
+  /** 落盘成功回来补一句「东西放哪了」——董事会最想知道的就是这个。 */
+  function amendDoneMessage(taskId, suffix) {
+    try {
+      // 按库查最近一条完成消息，不靠内存映射：落盘重试、重启后再补，也照样补得上。
+      const row = db.prepare(`SELECT msgId, body FROM board_messages
+        WHERE taskId = ? AND kind = 'done' ORDER BY rowid DESC LIMIT 1`).get(taskId);
+      if (!row) return;
+      const body = String(row.body ?? '');
+      if (body.includes(suffix)) return;
+      db.prepare('UPDATE board_messages SET body = ? WHERE msgId = ?')
+        .run(`${body}\n${suffix}`.slice(0, 4000), row.msgId);
+    } catch { /* 补句子失败不值得报错 */ }
   }
 
   // G2：卡到终态时通知外部。循环引擎据此做「完成即触发下一轮」。
@@ -2998,6 +3106,11 @@ export function createEngine({
       assertCeoOutput(outcome.result ?? {});
       if (outcome.result.verdict === 'pass') {
         transition(db, task.taskId, 'done', 'ceo', outcome.runId);
+        // 验收通过才算真收账。这里原来只改了状态：卡显示「完成」，产物却一直留在任务目录里，
+        // 项目记忆也没落——跟 reviewTask / 审批通过两条路不一致（真机上是「说办完了，文件没进项目」）。
+        const accepted = taskById(task.taskId) ?? task;
+        flushProjectMemory(accepted, outcome.runId);
+        deliverAccepted(accepted, outcome.runId);
       } else {
         transition(db, task.taskId, 'in_progress', 'ceo', outcome.runId);
         // 验收打回只自动重跑一次；第二次打回留痕等人审，避免无限空转烧额度（§7.6 / P1-6）。
@@ -3277,6 +3390,10 @@ export function createEngine({
       };
     },
     getBriefs: () => db.prepare('SELECT * FROM briefs ORDER BY rowid').all(),
+    // 董事会消息箱：agent 对人说的话（完成 / 卡住 / 等拍板 / 回话）。
+    getMessages: (opts = {}) => listMessages(db, opts),
+    unreadMessages: () => unreadMessageCount(db),
+    markMessagesRead: (opts = {}) => markReadInDb(db, opts),
     getThreads: () => db.prepare('SELECT * FROM threads ORDER BY rowid').all(),
     getEvents: () => db.prepare('SELECT * FROM events ORDER BY rowid').all(),
     getQuotas: () => getAgentCandidates(),

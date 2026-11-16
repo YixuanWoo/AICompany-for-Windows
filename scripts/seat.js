@@ -142,6 +142,8 @@ async function main() {
       handoff: args.handoff === true ? null : args.handoff,
       reviewBy: args['review-by'] === true ? null : args['review-by'],
       reviewNote: args['review-note'] === true ? null : args['review-note'],
+      // 给董事会的一句话（人话）：不写的话，消息区只好拿 summary 硬凑，往往太技术。
+      boardNote: args.note === true ? null : args.note,
     });
     if (!out.ok) { line(`交活失败：${out.reason}`); process.exit(1); }
     line(`已交：${out.report.taskId}｜${out.report.status}`);

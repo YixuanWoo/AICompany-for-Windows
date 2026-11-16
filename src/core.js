@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS task_revisions (
 CREATE TABLE IF NOT EXISTS briefs (
   briefId TEXT PRIMARY KEY, body TEXT, createdAt TEXT
 );
+-- 董事会消息箱：agent 对人说的话（完成 / 卡住 / 等拍板 / 回话）。
+-- 与 briefs 分开：briefs 是机器统计，这里是「人话」，界面主视图只显示这一张。
+CREATE TABLE IF NOT EXISTS board_messages (
+  msgId TEXT PRIMARY KEY, fromAgent TEXT, kind TEXT, taskId TEXT, project TEXT,
+  title TEXT, body TEXT, docsJson TEXT, createdAt TEXT, readAt TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_board_messages_created ON board_messages(createdAt);
 CREATE TABLE IF NOT EXISTS recurring_jobs (
   jobId TEXT PRIMARY KEY, jobVersion INTEGER, kind TEXT, status TEXT, rrule TEXT,
   timezone TEXT, taskTemplateJson TEXT, requiresHumanEachCycle INTEGER, lastCycleNo INTEGER,

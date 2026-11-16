@@ -269,6 +269,14 @@ export function createServer({
         }));
         return;
       }
+      if (method === 'POST' && pathname === '/api/messages/read') {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        json(res, 200, engine.markMessagesRead({
+          ids: Array.isArray(body.ids) ? body.ids : null,
+          all: body.all === true,
+        }));
+        return;
+      }
       // ---- P7：新建项目（董事会才有的权限；CEO 只能建议，点审批单通过也算这里）----
       if (method === 'POST' && pathname === '/api/projects') {
         const body = JSON.parse((await readBody(req)) || '{}');
@@ -459,6 +467,14 @@ export function createServer({
             FROM tasks WHERE leaseToken IS NOT NULL ORDER BY taskId`).all(),
           '/api/threads': () => engine.getThreads(),
           '/api/inbox': () => ({ briefs: engine.getBriefs(), notifications: engine.notifier.messages }),
+          // 董事会消息箱：agent 对人说的话。界面上就一个区，按时间倒序，未读在前。
+          '/api/messages': () => ({
+            messages: engine.getMessages({
+              limit: Number(q.get('limit') ?? 60),
+              unreadOnly: q.get('unread') === '1',
+            }),
+            unread: engine.unreadMessages(),
+          }),
           // 总经理会话：共用会话能命中缓存省钱，但得让人看得见「现在这个有多长了」。
           '/api/ceo-session': () => engine.getCeoSession(),
           '/api/dashboard': () => engine.getDashboard(),

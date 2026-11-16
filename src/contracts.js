@@ -54,6 +54,9 @@ export const API_ENDPOINTS = Object.freeze([
   { method: 'POST', path: '/api/tasks/:id/cancel', purpose: '取消收尾', section: '§6D.5' },
   { method: 'GET', path: '/api/tasks/:id/revisions', purpose: '查指令版本历史', section: '§6D.6' },
   { method: 'GET', path: '/api/inbox', purpose: '待办', section: '§6B.8' },
+  // 董事会消息箱：所有 agent 对人说的话集中一处（完成 / 卡住 / 等定 / 回话）。
+  { method: 'GET', path: '/api/messages', purpose: '董事会消息箱（人话汇报）', section: '§6B.8' },
+  { method: 'POST', path: '/api/messages/read', purpose: '标记消息已读', section: '§6B.8' },
   { method: 'GET', path: '/api/dashboard', purpose: '状态汇总', section: '§6B.8' },
   { method: 'GET', path: '/api/runs', purpose: 'Run transcript 查询', section: '§6B.8' },
   { method: 'GET', path: '/api/audit', purpose: '审计查询', section: '§6B.8' },

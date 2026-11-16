@@ -221,8 +221,14 @@
       <div class="list" id="tasks-list" style="max-height:none"></div>
     </section>
     <section class="card">
-      <h2>收件箱 · Inbox</h2>
-      <div class="list" id="inbox-list"></div>
+      <h2>消息 · Messages / Inbox <span class="tag" id="msg-unread" hidden></span></h2>
+      <p class="hint">所有同事对你说的都在这里：干完了、卡住了、等你定。一条一句人话，不摆汇报文档；
+        想深究就点标题旁的「看这张卡」。</p>
+      <div class="btnrow" style="margin-bottom:8px">
+        <button type="button" class="ghost" id="msg-read-all">全部标记已读</button>
+        <button type="button" class="ghost" id="msg-filter">只看未读</button>
+      </div>
+      <div class="list" id="messages-list" style="max-height:520px;overflow:auto"></div>
     </section>
     <section class="card">
       <h2>最近唤醒 · Runs</h2>
@@ -389,6 +395,11 @@
       <div class="list" id="tune-history" style="margin-top:10px"></div>
     </section>
     <section class="card">
+      <h2>系统简报 · Briefs</h2>
+      <p class="hint">机器统计（今天完成几张、跑了几次）。日常看「消息」就够，这里是查账用的。</p>
+      <div class="list" id="inbox-list"></div>
+    </section>
+    <section class="card">
       <h2>审计 · Audit</h2>
       <div class="list" id="audit-list"></div>
     </section>
@@ -446,6 +457,8 @@
     agents: [], tasks: [], runs: [], threads: [], approvals: [], audit: [],
     briefs: [], notes: [], dashboard: {}, bridge: {}, recurring: [],
     quotas: [], changeRequests: [],
+    // 董事会消息箱：同事对人说的话（干完了 / 卡住了 / 等你定）。界面上只显示这一处。
+    messages: [], msgUnread: 0,
     // P7：项目面板 —— 项目清单 + 每个项目最近的经验（按需单独取，失败不影响其它面板）。
     projects: [], projectMemory: {},
     observe: null, tuning: null,
@@ -1008,6 +1021,57 @@
       : '';
   }
 
+  // 同事名字：优先「担任者（岗位）」，跟消息正文里的称呼保持一致。
+  function speakerName(id) {
+    const a = (state.agents || []).find((x) => (x.agentId || x.id) === id);
+    if (!a) return id || '系统';
+    const name = a.holderName || a.displayName || a.agentId || id;
+    const post = a.postTitle;
+    return post && post !== name ? name + '（' + post + '）' : name;
+  }
+
+  // 消息区：董事会只看这一处。一条一句人话，未读左侧亮条，点标题看那张卡的明细。
+  function renderMessages() {
+    const el = $('messages-list');
+    if (!el) return;
+    const badge = $('msg-unread');
+    const unread = state.msgUnread || 0;
+    if (badge) {
+      badge.hidden = !unread;
+      badge.textContent = unread ? unread + ' 条未读' : '';
+    }
+    const filterBtn = $('msg-filter');
+    if (filterBtn) filterBtn.textContent = state.msgUnreadOnly ? '看全部' : '只看未读';
+    const rows = state.messages || [];
+    if (!rows.length) {
+      el.innerHTML = '<div class="empty">' +
+        (state.msgUnreadOnly ? '没有未读消息。' : '还没有消息。同事干完活、卡住了，都会在这儿跟你说一句。') +
+        '</div>';
+      return;
+    }
+    el.innerHTML = rows.map((m) => {
+      const isUnread = !m.readAt;
+      const when = String(m.createdAt || '').replace('T', ' ').slice(5, 16);
+      const proj = m.project ? ' · ' + esc(m.project) : '';
+      const jump = m.taskId
+        ? '<button type="button" class="ghost" data-msg-task="' + esc(m.taskId) + '">看这张卡 →</button>'
+        : '';
+      return '<div class="row" data-msg-id="' + esc(m.msgId) + '"' +
+        (isUnread ? ' style="border-left:3px solid #d08b2c;padding-left:8px"' : '') + '>' +
+        '<b>' + (isUnread ? '<span class="tag">未读</span> ' : '') + esc(m.title || '(无标题消息)') + '</b>' +
+        '<div class="meta">' + esc(speakerName(m.from)) + ' · ' + esc(when) + proj + '</div>' +
+        '<pre class="brief">' + esc(m.body || '') + '</pre>' +
+        jump +
+        '</div>';
+    }).join('');
+  }
+
+  async function markAllMessagesRead() {
+    const out = await post('/api/messages/read', { all: true }).catch(() => null);
+    if (out === null) return; // 服务没响应就当没点，不弹窗打扰
+    await refresh();
+  }
+
   function render() {
     renderPendingBanner();
     renderStats();
@@ -1019,6 +1083,7 @@
     renderDecisions();
     renderQuotas();
     renderObserve();
+    renderMessages();
     const briefRows = [];
     for (const b of [...state.briefs].reverse()) {
       briefRows.push('<div class="row"><pre class="brief">' + esc(b.body) + '</pre>' +
@@ -1147,7 +1212,7 @@
   }
 
   async function refresh() {
-    const [agents, tasks, runs, threads, approvals, audit, inbox, dashboard, bridge, recurring, quotas, changeRequests, observe, tuning, meta, gui, projects, ceoSession] =
+    const [agents, tasks, runs, threads, approvals, audit, inbox, dashboard, bridge, recurring, quotas, changeRequests, observe, tuning, meta, gui, projects, ceoSession, mailbox] =
       await Promise.all([
         api('/api/agents'), api('/api/tasks'), api('/api/runs'), api('/api/threads'),
         api('/api/approvals'), api('/api/audit'), api('/api/inbox'), api('/api/dashboard'),
@@ -1159,6 +1224,8 @@
         api('/api/projects').catch(() => []),
         // 总经理会话（共用会话省钱，但得看得见它多长了）
         api('/api/ceo-session').catch(() => null),
+        // 老实例没有这个端点也不该白屏：读不到就当没有消息。
+        api('/api/messages?limit=60' + (state.msgUnreadOnly ? '&unread=1' : '')).catch(() => null),
       ]);
     state = {
       ceoSession,
@@ -1171,6 +1238,8 @@
       observe, tuning, meta, gui, projects,
       projectMemory: await loadProjectMemory(projects),
       briefs: inbox.briefs || [], notes: inbox.notifications || [],
+      messages: (mailbox && mailbox.messages) || [],
+      msgUnread: (mailbox && mailbox.unread) || 0,
     };
     if (!metaApplied) applyMetaDefaults();
     render();
@@ -1273,6 +1342,27 @@
     } catch (err) {
       say('request-msg', false, '切 GUI 开关失败：' + err.message);
     } finally { btn.disabled = false; }
+  });
+
+  // 消息区：看全部 / 只看未读、全部已读、点「看这张卡」打开明细。
+  // 事件挂在容器上做委托：消息是整段重绘的，逐条绑会随刷新失效。
+  $('msg-read-all').addEventListener('click', markAllMessagesRead);
+  $('msg-filter').addEventListener('click', () => {
+    state.msgUnreadOnly = !state.msgUnreadOnly;
+    refresh().catch(() => {});
+  });
+  $('messages-list').addEventListener('click', async (e) => {
+    const jump = e.target.closest('button[data-msg-task]');
+    if (jump) { openResult(jump.dataset.msgTask).catch(() => {}); return; }
+    // 点消息体本身也算看过：标这一条已读，未读条数随之减少。
+    const row = e.target.closest('[data-msg-id]');
+    if (!row) return;
+    const msg = (state.messages || []).find((m) => m.msgId === row.dataset.msgId);
+    if (!msg || msg.readAt) return;
+    await post('/api/messages/read', { ids: [msg.msgId] }).catch(() => null);
+    msg.readAt = new Date().toISOString();
+    state.msgUnread = Math.max(0, (state.msgUnread || 0) - 1);
+    renderMessages();
   });
 
   // P5-2：调参。前端只做类型转换，真正的校验与留痕在服务端（src/tune.js）。

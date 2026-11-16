@@ -158,7 +158,7 @@ export function createSeat({
   async function complete({
     taskId, leaseToken, runId, status = 'success', summary,
     artifacts = null, acceptanceResults = [], usage = {}, reason,
-    artifactKind = null, handoff = null, reviewNote = null, reviewBy = null,
+    artifactKind = null, handoff = null, reviewNote = null, reviewBy = null, boardNote = null,
   } = {}) {
     const held = holding();
     const id = taskId ?? held?.taskId;
@@ -187,6 +187,8 @@ export function createSeat({
       // 审查人：只能指自己汇报链上的上级（引擎会校验，越权忽略并留痕）。
       ...(reviewBy ? { reviewBy } : {}),
       ...(reviewNote ? { reviewNote: String(reviewNote).slice(0, 1000) } : {}),
+      // 给董事会的一句话（人话）：控制面会把它原样放进消息区。
+      ...(boardNote ? { boardNote: String(boardNote).slice(0, 500) } : {}),
       finishedAt: new Date().toISOString(),
     };
     const out = await call('POST', '/api/bridge/complete', {
