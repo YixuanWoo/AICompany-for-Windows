@@ -80,6 +80,18 @@ artifacts:
   defaultHandoff: byAssigner
   # 判成受管代码却没写 repo → 打回。代码流到没人管的地方比没写更糟。
   requireRepoForManagedCode: true
+# ── 主动唤醒 ───────────────────────────────────────────────────
+# 工程岗是「人叫才醒」的席位：没有常驻进程，卡排进队列就等人来领。
+# 这里让控制面自己去叫 —— 往 WorkBuddy 当前会话投一条消息，收到消息我就醒了。
+# 走的是 CodeBuddy Gateway（剪辑工作台「交给 Agent」用的同一条），
+# 不需要常驻进程，也不需要任何外部 API key。
+# 凭据由工作台的 SessionStart hook 每次会话写入（端口和密码每个会话都变），这里只读不写。
+wake:
+  enabled: true
+  # 会话正忙时最多等 10 分钟补发（忙时硬发会被网关直接丢掉）。
+  maxWaitMs: 600000
+  # 同一张卡 10 分钟内不重复叫：打回重做、心跳重投不该把会话刷爆。
+  cooldownMs: 600000
 interaction:
   # delegate = 董事会 → CEO → 员工。CEO 是真 agent：定项目归属、拆活派活、验收。
   # direct 仍然可用（指名直投某个员工，不经 CEO），但不是默认路径。

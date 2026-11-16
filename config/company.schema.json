@@ -615,6 +615,32 @@
           }
         }
       }
+    },
+    "wake": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "主动唤醒：卡排进「人叫才醒」的拉模式席位时，控制面往 WorkBuddy 会话投一条消息把它叫起来（走 CodeBuddy Gateway，不需要常驻进程、不需要外部 API key）。",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "关掉就退回「只提醒」：卡排队时消息区留一句，等人自己开口。"
+        },
+        "credsFiles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "网关凭据文件（端口 + 密码，每个会话都不一样）。给了就只认这几个，不再回落到系统默认路径。"
+        },
+        "maxWaitMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "description": "会话正忙时最多等多久再补发唤醒，默认 10 分钟。"
+        },
+        "cooldownMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "同一张卡的唤醒冷却，避免打回重做时反复叫，默认 10 分钟。"
+        }
+      }
     }
   }
 }

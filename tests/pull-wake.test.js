@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 
 import { openDb } from '../src/core.js';
 import { createEngine, createNotifier } from '../src/engine.js';
@@ -79,13 +80,17 @@ function company(root) {
       },
     ],
     clients: ['web'], notifier: ['noop'],
+    // 测试默认关掉主动唤醒：否则会读到本机真实的网关凭据、真的往会话里投消息。
+    wake: { enabled: false },
   };
 }
 
-function setup(t) {
+function setup(t, patch = {}) {
   const root = tmpRoot(t);
   const db = openDb(':memory:');
-  const engine = createEngine({ db, config: company(root), notifier: createNotifier('noop') });
+  const engine = createEngine({
+    db, config: { ...company(root), ...patch }, notifier: createNotifier('noop'),
+  });
   t.after(() => db.close());
   return { root, db, engine };
 }
@@ -149,4 +154,74 @@ test('W4 · 不误报：常驻席位（push）的卡不产生「等你领」', a
   assert.equal(pullNotes(db).length, 0, '常驻席位自己会跑，不该打扰董事会');
   const card = db.prepare("SELECT * FROM tasks WHERE assignee = 'doubao' ORDER BY rowid DESC").get();
   assert.equal(card.status, 'done');
+});
+
+// ── 主动唤醒：卡排进拉模式席位时，控制面要真的把会话叫起来 ──────────
+// 假网关：模拟 WorkBuddy 的 CodeBuddy Gateway（/api/v1/status + /api/v1/runs）。
+async function fakeGateway(t) {
+  const state = { busy: false, runs: [] };
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => {
+      const json = () => ({ 'Content-Type': 'application/json' });
+      if (req.url === '/api/v1/status') {
+        res.writeHead(200, json());
+        res.end(JSON.stringify({ data: { status: 'ok', busy: state.busy, runStatus: 'idle' } }));
+        return;
+      }
+      if (req.url === '/api/v1/runs') {
+        state.runs.push(JSON.parse(body || '{}'));
+        res.writeHead(200, json());
+        res.end(JSON.stringify({ data: { runId: `run-${state.runs.length}` } }));
+        return;
+      }
+      res.writeHead(404); res.end('{}');
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  return { state, port: server.address().port };
+}
+
+test('W5 · 卡排进拉模式席位：控制面主动叫醒会话，不是只留一句提醒', async (t) => {
+  const gw = await fakeGateway(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aicompany-creds-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const credsFile = path.join(dir, 'creds.json');
+  fs.writeFileSync(credsFile, JSON.stringify({
+    port: String(gw.port), password: 'pw', updatedAt: new Date().toISOString(),
+  }), 'utf8');
+
+  const { db, engine } = setup(t, { wake: { enabled: true, credsFiles: [credsFile] } });
+  await engine.submit({ text: '叫醒我', mode: 'direct', addressedTo: 'engineering' });
+  await pumpAll(engine);
+  await new Promise((r) => setTimeout(r, 250)); // 唤醒是旁路，给它跑完
+
+  assert.equal(gw.state.runs.length, 1, '必须真的往会话投一条唤醒');
+  assert.match(gw.state.runs[0].text, /自动叫醒/, '唤醒内容要能一眼看出是控制面在叫');
+  assert.match(gw.state.runs[0].text, /seat\.js inbox/, '要写明怎么领活');
+
+  const card = db.prepare("SELECT * FROM tasks WHERE assignee = 'engineering' ORDER BY rowid DESC").get();
+  const sent = db.prepare("SELECT * FROM audit WHERE taskId = ? AND action = 'wake_sent'").get(card.taskId);
+  assert.ok(sent, '唤醒成功要留痕（wake_sent）');
+  assert.match(sent.newValue, /engineering\|run-1/);
+});
+
+test('W6 · 叫不醒就留痕，不假装成功（没开 WorkBuddy 的场景）', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aicompany-creds-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const credsFile = path.join(dir, 'creds.json');
+  // 指向没人监听的端口：网关探不通
+  fs.writeFileSync(credsFile, JSON.stringify({ port: '1', password: 'pw' }), 'utf8');
+
+  const { db, engine } = setup(t, { wake: { enabled: true, credsFiles: [credsFile] } });
+  await engine.submit({ text: '叫不醒也得有记录', mode: 'direct', addressedTo: 'engineering' });
+  await pumpAll(engine);
+  await new Promise((r) => setTimeout(r, 250));
+
+  const card = db.prepare("SELECT * FROM tasks WHERE assignee = 'engineering' ORDER BY rowid DESC").get();
+  const failed = db.prepare("SELECT * FROM audit WHERE taskId = ? AND action = 'wake_failed'").get(card.taskId);
+  assert.ok(failed, '叫不醒必须记 wake_failed，不能静默');
+  assert.equal(pullNotes(db).length, 1, '叫不醒时那条「等你领」提醒要还在，人还能自己开口');
 });

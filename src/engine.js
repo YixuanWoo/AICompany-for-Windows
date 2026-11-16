@@ -26,6 +26,7 @@ import { assertProject, buildProjectContext, buildMemoryRecord, appendMemory,
   listProjects as listProjectEntries, memoryLimitOf, readRecentMemory } from './projects.js';
 import { repoEntry, findRepoForPath, assertRepo } from './repos.js';
 import { looksLikeCode } from './org-chart.js';
+import { wakeSession } from './wake.js';
 import {
   recordMessage, listMessages, markMessagesRead as markReadInDb, unreadMessageCount, speakerLabel,
   composeDoneMessage, composeBlockedMessage, composeAnswerMessage, plainText,
@@ -2313,6 +2314,58 @@ export function createEngine({
     return null;
   }
 
+  /**
+   * 真的去叫醒「人叫才醒」的席位。
+   *
+   * 为什么提醒不够：提醒只是让人知道「有活」，活还在原地。会话宿主的网关能往
+   * 当前会话投一条消息，收到消息会话里的 agent 就醒了 —— 这是本机唯一一条
+   * 「不用常驻进程、不用外部 API key」的唤醒路（剪辑工作台「交给 Agent」用的就是它）。
+   *
+   * 叫不醒（宿主没开、凭据过期）就安静退回上一步那条提醒，绝不假装叫过。
+   */
+  function wakePullSeat(task, seat) {
+    if (config.wake?.enabled === false) return;
+    const cooldownMs = Number(config.wake?.cooldownMs ?? 10 * 60 * 1000);
+    // 冷却：同一张卡反复排队（打回重做、心跳重投）不该把会话刷爆。
+    const last = db.prepare(`SELECT createdAt FROM audit
+      WHERE taskId = ? AND action IN ('wake_sent','wake_queued','wake_failed')
+      ORDER BY rowid DESC LIMIT 1`).get(task.taskId);
+    if (last && Date.now() - Date.parse(last.createdAt) < cooldownMs) return;
+
+    const post = cfgFor(seat)?.postTitle ?? seat;
+    const text = [
+      `【AICompany 自动叫醒】「${post}」有一张卡在队列里等你领：`,
+      `${String(task.title ?? '(无标题)').slice(0, 80)}`,
+      '',
+      `领活并干完（在本项目根目录下执行）：`,
+      `AICOMPANY_AGENT_ID=${seat} node scripts/seat.js inbox`,
+      '（这条不是董事会发的，是 AICompany 控制面在叫醒你）',
+    ].join('\n');
+
+    const mark = (action, detail) => {
+      try {
+        writeAudit(db, {
+          actor: 'control-plane', action, newValue: `${seat}|${String(detail).slice(0, 200)}`, taskId: task.taskId,
+        });
+      } catch { /* 唤醒是旁路：库已经关了（收尾/测试）也不能把回调变成未捕获异常 */ }
+    };
+
+    // 不 await：唤醒是旁路，卡已经落库；叫不醒不能把控制面卡住。
+    wakeSession({
+      text,
+      key: task.taskId,
+      files: config.wake?.credsFiles ?? [],
+      maxWaitMs: Number(config.wake?.maxWaitMs ?? 10 * 60 * 1000),
+      // 排队之后真正发出的那一次只能从回调里知道。
+      onResult: (result) => mark(result.ok ? 'wake_sent' : 'wake_failed',
+        result.ok ? (result.runId ?? 'ok') : result.error),
+    }).then((result) => {
+      if (!result.ok) mark('wake_failed', result.reason ?? 'unknown');
+      else if (result.queued) mark('wake_queued', result.reason ?? 'busy');
+      // 直发成功的情况由 onResult 记 wake_sent，这里不重复。
+    }).catch((error) => mark('wake_failed', error?.message ?? String(error)));
+  }
+
   function noteBoardMessage(taskId, to, actor = 'control-plane', runId = null) {
     try {
       const task = taskById(taskId);
@@ -3439,6 +3492,8 @@ export function createEngine({
           });
           // 排队必须出声：拉模式席位不叫不动，静默排队等于把活扔进黑洞。
           notePullWaiting(task, seat);
+          // 出声只让人「知道」，还得真把它叫起来 —— 这才叫「随时能被唤醒」。
+          wakePullSeat(task, seat);
           return;
         }
       }
