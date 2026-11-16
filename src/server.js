@@ -36,6 +36,12 @@ function json(res, code, data) {
   res.end(body);
 }
 
+// 路径里的标识符可能带中文（循环 jobId 就是 CEO 起的标题）。
+// url.pathname 保持编码态，不解码就查不到；非法编码原样返回，别让一个坏 URL 抛 500。
+function safeDecode(text) {
+  try { return decodeURIComponent(String(text)); } catch { return String(text); }
+}
+
 export function createServer({
   engine, port = 3100, host = '127.0.0.1', bridgeToken = null, onlineWindowSec = 60,
   recurring = null, scheduler = null, logger = null, now = () => new Date(),
@@ -151,7 +157,10 @@ export function createServer({
         if (method === 'GET' && pathname === '/api/recurring') { json(res, 200, rec.listJobs()); return; }
         if (method === 'POST' && pathname === '/api/recurring') { json(res, 201, rec.registerJob(body)); return; }
         if (method === 'POST' && match) {
-          const [, jobId, action] = match;
+          // jobId 常带中文（CEO 起的标题就是 id），url.pathname 是**编码后**的：
+          // 不解码就永远查不到这个 job，接口只会回「循环任务不存在」。
+          const [, rawJobId, action] = match;
+          const jobId = safeDecode(rawJobId);
           if (action === 'pause') { json(res, 200, rec.pauseJob(jobId, body.reason ?? '人工暂停')); return; }
           if (action === 'resume') { json(res, 200, rec.resumeJob(jobId)); return; }
           if (action === 'fire') {
@@ -165,7 +174,7 @@ export function createServer({
           json(res, 200, sched.runOnce({ now: body.now })); return;
         }
         if (method === 'POST' && /^\/api\/recurring\/[^/]+\/revise$/.test(pathname)) {
-          const jobId = pathname.split('/')[3];
+          const jobId = safeDecode(pathname.split('/')[3]);
           const approval = engine.requestApproval({
             kind: 'recurring_change', title: `循环模板改版：${jobId}`,
             body: '改频率 / 模板 / 终止条件必须人审；批准后只影响新轮次，旧 CycleHistory 不动。',

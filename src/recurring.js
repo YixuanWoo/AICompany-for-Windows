@@ -357,8 +357,24 @@ export function createRecurring({ db, notifier, now = nowIso }) {
     for (const row of rows) {
       const job = getJob(row.jobId);
       if (!job?.nextFireAt || Date.parse(job.nextFireAt) > Date.parse(at)) continue;
-      const from = job.lastFiredAt ?? job.nextFireAt;
-      for (const scheduledAt of selectFires(job, from, at)) {
+      // 首次触发时 lastFiredAt 为空，只能拿 nextFireAt 当搜索起点。
+      // 但 occurrencesBetween 是**左开区间**（candidate > from），直接传 nextFireAt 会把这一刻的触发点
+      // 自己排除掉 —— 于是「第一次触发」永远不建卡、也不留审计，nextFireAt 却照常前进一整周。
+      // 2026-11-16 20:30 的 yitai 周体检就是这么静默没跑的（tick 走完、lastFiredAt 写了、卡是 0 张）。
+      // 往前挪 1 秒，把触发点本身重新纳入区间。
+      const from = job.lastFiredAt
+        ?? (job.nextFireAt
+          ? new Date(Date.parse(job.nextFireAt) - 1000).toISOString()
+          : job.nextFireAt);
+      const fires = selectFires(job, from, at);
+      if (!fires.length) {
+        // 到点了却算不出触发点：正常不该发生（上面已把起点前挪）。留痕，别再静默。
+        writeAudit(db, {
+          actor: 'scheduler', action: 'job_due_no_occurrence',
+          newValue: `${job.jobId}:nextFireAt=${job.nextFireAt} from=${from} at=${at}`,
+        });
+      }
+      for (const scheduledAt of fires) {
         const result = fire({ jobId: job.jobId, scheduledAt, now: at });
         results.push({ jobId: job.jobId, scheduledAt, ...result });
       }
