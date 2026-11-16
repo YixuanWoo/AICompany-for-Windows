@@ -390,8 +390,11 @@ export function createRecurring({ db, notifier, now = nowIso }) {
     return { at, fired: results.length, results };
   }
 
-  // G2：完成即触发 —— 引擎在卡到终态时回调这里。
-  // 只处理 onCompletion  job：cron/event 仍由调度器驱动，避免两套触发器抢同一张卡。
+  // 卡到终态时回调这里：**先收账，再决定要不要派生下一轮**。
+  // 收账（completeCycle）必须对所有触发类型都做 —— 否则 cron 型 job 的 cycles.status
+  // 会永远停在 todo，下一轮到点时被 overlapPolicy=skip 当成「上一轮还没完」而直接跳过。
+  // 2026-11-16 的 yitai 周体检就踩了这个：卡早就 done，轮次却一直 todo，
+  // 下周一 20:30 会被自己的上一轮挡住。派生下一轮只有 onCompletion 型才做（cron 归调度器）。
   const pendingCompletions = new Map();
   function onTaskTerminal({ taskId, status, runId = null, now: atArg } = {}) {
     const at = atArg ?? now();
@@ -400,12 +403,9 @@ export function createRecurring({ db, notifier, now = nowIso }) {
       return { skipped: true, reason: cycle ? `轮次已收账（${cycle.status}）` : '不是循环轮次卡' };
     }
     const job = getJob(cycle.jobId);
-    if (!job || job.trigger?.type !== 'onCompletion') {
-      return { skipped: true, reason: '这个 job 不是完成即触发型' };
-    }
-    if (job.status !== 'active') return { skipped: true, reason: `job 状态 ${job.status}` };
+    if (!job) return { skipped: true, reason: '轮次指向的 job 已不存在' };
 
-    // 终态映射：done → done；blocked → failed（计入连续失败）；cancelled → 人手动收摊，不再派生。
+    // 终态映射：done → done；blocked → failed（计入连续失败）；cancelled → 人手动收摊。
     const cycleStatus = status === 'done' ? 'done' : status === 'blocked' ? 'failed' : 'cancelled';
     completeCycle({ jobId: job.jobId, cycleNo: cycle.cycleNo, status: cycleStatus, runIds: runId ? [runId] : [] });
     writeAudit(db, {
@@ -413,9 +413,14 @@ export function createRecurring({ db, notifier, now = nowIso }) {
       newValue: `${job.jobId}#${cycle.cycleNo}:${cycleStatus}:${taskId}`, runId, taskId,
     });
 
-    const fresh = getJob(job.jobId);
-    if (fresh.status !== 'active') return { closed: true, paused: true, reason: '连续失败触顶，已自动暂停' };
+    // cron / event 型：账已经收了，下一轮由各自的触发器负责，这里不派生。
+    if (job.trigger?.type !== 'onCompletion') {
+      return { closed: true, reason: `已收账；${job.trigger?.type ?? 'event'} 型由调度器触发下一轮` };
+    }
     if (cycleStatus === 'cancelled') return { closed: true, stopped: true, reason: '人工取消，不再派生下一轮' };
+
+    const fresh = getJob(job.jobId);
+    if (fresh.status !== 'active') return { closed: true, paused: true, reason: `job 状态 ${fresh.status}，不再派生` };
 
     const minMs = (job.trigger.completionMinIntervalSec ?? 30) * 1000;
     const firedAt = Date.parse(fresh.lastFiredAt ?? at);

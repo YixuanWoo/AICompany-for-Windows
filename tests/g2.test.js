@@ -95,8 +95,13 @@ test('G2 · 非 onCompletion 的 job 不受影响：cron 型卡完成不会自�
   });
   const first = s.rec.fire({ jobId: 'JOB-G2', scheduledAt: stamp(0), now: stamp(0) });
   const out = s.rec.onTaskTerminal({ taskId: first.taskId, status: 'done', now: stamp(1) });
-  assert.equal(out.skipped, true);
+  // 不派生下一轮（cron 归调度器），但**这一轮必须收账**。
+  // 原断言只写 skipped=true，等于「什么都不做」也过 —— 结果 cycles 永远停在 todo，
+  // 下一轮会被 overlapPolicy=skip 当成「上轮未完成」挡掉（2026-11-16 周体检踩过）。
+  assert.equal(out.closed, true, '要收账');
+  assert.equal(out.created, undefined, '但不能派生下一轮：cron 型由调度器到点触发');
   assert.equal(s.rec.listCycles('JOB-G2').length, 1, 'cron 型仍由调度器到点触发');
+  assert.equal(s.rec.listCycles('JOB-G2')[0].status, 'done', '卡 done 了，轮次也要跟着结账');
 });
 
 // ---------------------------------------------------------------- ② 连败自动停

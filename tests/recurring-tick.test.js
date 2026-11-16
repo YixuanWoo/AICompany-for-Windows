@@ -160,3 +160,27 @@ test('RT-5 · 生产配置原样复刻：周一 20:30 到点那一刻进来的 t
   assert.equal(card.mode, 'delegate');
   db.close();
 });
+
+test('RT-6 · cron 型：卡跑完必须收账，否则下一轮会被自己的上一轮挡住', () => {
+  const { db, rec } = makeRecurring();
+  rec.registerJob(makeJob({ jobId: 'JOB-CLOSE', nextFireAt: DUE, overlapPolicy: 'skip' }));
+  const sched = createScheduler({ recurring: rec, now: () => TICK_AT });
+  sched.runOnce({ now: TICK_AT });
+
+  const card = db.prepare('SELECT taskId FROM tasks').get();
+  assert.equal(db.prepare('SELECT status FROM cycles').get().status, 'todo', '刚建卡时这一轮还没收账');
+
+  // 卡跑完（delegate 模式下 CEO 验收过 → done）→ 引擎回调
+  rec.onTaskTerminal({ taskId: card.taskId, status: 'done', runId: 'R-close', now: TICK_AT });
+  assert.equal(db.prepare('SELECT status FROM cycles').get().status, 'done', '卡终态了，这一轮就必须收账');
+  assert.ok(
+    audits(db).some((a) => a.action === 'completion_cycle_closed'),
+    '收账要留审计，否则「这轮到底算不算完」只能靠猜',
+  );
+
+  // 一周后：上一轮已收账，不能被 overlapPolicy=skip 当成「还没完」挡掉
+  const next = sched.runOnce({ now: '2026-11-23T12:30:08.652Z' });
+  assert.equal(next.fired, 1, '上一轮已收账，这一轮必须能跑');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM cycles').get().n, 2);
+  db.close();
+});
