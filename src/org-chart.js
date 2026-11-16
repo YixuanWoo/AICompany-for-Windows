@@ -87,6 +87,18 @@ export function seatBriefing(config = {}, agentId, { repos = null, artifacts = n
   lines.push('- document：文档、报告、译稿；data：表格、数据集；media：图片、音频、视频。');
   if (codeExt) lines.push(`- 判不准时看扩展名：${codeExt} 这些通常算代码；算不算「受管」看它以后还要不要改。`);
 
+  // 会拆活的席位（工程岗）最常犯的错：拆完就把「我拆成了 N 张」当成果交上去。
+  // 真公司里那不是交付，只是排工；总任务要等每一张子卡都回来才收账。
+  if ((me.capabilities ?? []).includes('delegate')) {
+    lines.push('', '【把卡拆给下级之后：总任务还在你手上】');
+    lines.push('- 你不是交完就走。子卡一张张回来，你得逐张看结果；全部收齐了对发布者交一次总账。');
+    lines.push('- 还有子卡没收尾时，你这张卡交活会被系统挂住（不会送到上级面前）——'
+      + '这是有意的：别把「我拆成 N 张」当成果交上去。');
+    lines.push('- 子卡全部收尾后，系统自动拼一份总汇报（父卡目录 output/总任务汇总.md）并按发布者路由送审；'
+      + '发布者通过，总任务才算完。');
+    lines.push('- 哪张子卡卡住 / 跑偏，当场处理或按上报规则交上级，不要等汇总时才发现。');
+  }
+
   if (repoList.length) {
     lines.push('', '【已登记的代码仓库】');
     for (const repo of repoList) lines.push(`- ${describeRepo(repo)}`);
@@ -133,6 +145,8 @@ export function ceoRoutingBriefing(config = {}) {
   lines.push('只有跨工种（一边写代码、一边写文档/翻译）或确有先后依赖时，才拆成两三张，并在后一张写 after。');
   lines.push('不要为了「拆得细」把一件事切成五步流水账：那不是管理，是提前把员工的判断力替掉。');
   lines.push('代码类活：在卡上写 repo（仓库 id），并把 reviewBy 写成工程岗 —— 代码由工程岗审完再收账。');
+  lines.push('你派的卡如果被接收人继续往下拆（比如工程岗拆给执行岗），它不会拆完就回来找你：'
+    + '系统会等子卡全部收尾，拼一份总汇报再送你验收。你看到的是「整件事的结果」，不是「他排了哪些工」。');
   lines.push('');
   lines.push('【交付路由：谁发布谁负责】');
   lines.push('- 你派出去的卡，默认**回你审**：员工交活时卡会停在待审，你看到结果再放行。这是你的责任，不能甩给董事会。');

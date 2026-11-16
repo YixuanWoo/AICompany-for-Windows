@@ -146,6 +146,11 @@ export function migrate(db) {
   addColumn('tasks', 'handoff', 'handoff TEXT');
   // 是否授权执行者自己判「干完直接落盘」。默认 0：上级派的活，员工无权替上级免审。
   addColumn('tasks', 'allowSelfLand', 'allowSelfLand INTEGER DEFAULT 0');
+  // 父卡等子卡：承接人把卡拆开交给下级后，先挂在这里（=1），子卡全部收尾再汇总交审。
+  // 没有这一位，「拆了 8 张」会被当成成果提前送上级验收，而活其实一张都还没干完。
+  addColumn('tasks', 'waitingChildren', 'waitingChildren INTEGER DEFAULT 0');
+  // 挂起时暂存承接人交上来的原报告（summary/产物/验收结论）：重启后照样能拼总汇报。
+  addColumn('tasks', 'parentReportJson', 'parentReportJson TEXT');
   addColumn('agents', 'maxDifficulty', 'maxDifficulty TEXT');
   // 席位模型：岗位（postTitle）与担任者（holderName）分开记，老库补列后为空，下次启动由 seedAgents 回填。
   addColumn('agents', 'postTitle', 'postTitle TEXT');

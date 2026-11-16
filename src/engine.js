@@ -2213,11 +2213,18 @@ export function createEngine({
     deliver_deferred: '等对方程序关掉再落盘',
   };
   function holdReasons() {
-    const rows = db.prepare(`SELECT taskId, status, dependsOn FROM tasks
+    const rows = db.prepare(`SELECT taskId, status, dependsOn, waitingChildren FROM tasks
       WHERE status IN ('todo','in_progress','in_review','blocked','paused','awaiting_decision')`).all();
     const out = {};
     for (const row of rows) {
       if (row.status === 'awaiting_decision') { out[row.taskId] = '等你拍板'; continue; }
+      // 父卡挂起等子卡：看板要一眼看出「不是没人管，是在等下面几张回来」。
+      if (Number(row.waitingChildren ?? 0) === 1) {
+        const kids = childrenOf(row.taskId);
+        const closed = kids.filter((k) => CHILD_CLOSED.includes(k.status)).length;
+        out[row.taskId] = `等子卡：${closed}/${kids.length} 已收尾`;
+        continue;
+      }
       // 董事会亲审：卡停在 in_review，要让人看出这是「等他」而不是「等员工」。
       if (row.status === 'in_review') {
         const card = taskById(row.taskId);
@@ -2247,6 +2254,9 @@ export function createEngine({
     if (to === 'done' || to === 'blocked' || to === 'cancelled') noteTaskTerminal(taskId, to, runId);
     if (to === 'done' || to === 'blocked') noteBoardMessage(taskId, to, actor, runId);
     if (to === 'done') releaseReadyDependencies();
+    // 子卡收尾 → 看看父卡是不是「拆出去的活全回来了」，是就拼总汇报送审。
+    // 放在状态机之后：父卡能收束的前提是这张子卡已经真的到终态。
+    if (to === 'done' || to === 'blocked' || to === 'cancelled') settleParent(taskId);
     return out;
   }
 
@@ -2266,10 +2276,14 @@ export function createEngine({
       // 「处理升级」这类由引擎自己建的系统卡：它本身就是一条消息，不再重复播报。
       if (task.origin?.escalationOf) return null;
       if (boardSilent.has(taskId)) return null;
-      // 只派活、不干活的父卡：它的成果已经由下面每一张子卡各报一次了，
-      // 再播一条「总经理干完了」只会让消息区看起来做了两件事。
-      if (task.status === 'done'
-        && db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parentTaskId = ?').get(taskId).n > 0) return null;
+      // 只派活、不干活的父卡分两种：
+      //   · 拆完就交（子卡还在跑）→ 不播报，成果由子卡各自报；
+      //   · 子卡全收尾后才收账 → 单独播一条「总任务收束」，
+      //     否则董事会看完 N 条子卡消息，也不知道这一摊整体收没收。
+      const kids = childrenOf(taskId);
+      const allClosed = kids.length > 0 && kids.every((k) => CHILD_CLOSED.includes(k.status));
+      if (kids.length && !allClosed) return null;
+      const isParent = allClosed;
 
       if (to === 'done') {
         const report = pendingMemory.get(taskId) ?? null;
@@ -2279,9 +2293,29 @@ export function createEngine({
         const composed = composeDoneMessage({
           config, task, report, reviewedBy, approvedByBoard, actor: task.assignee,
         });
+        // 父卡（拆过子卡的卡）到 done = 整摊活收账。子卡消息讲的是「每一件」，
+        // 这一条讲的是「总共」，并且由**验收的那个人**对董事会说 ——
+        // 总经理派下来的活由他验，自然由他向董事会汇报；不署名成工程岗，
+        // 否则董事会会以为是干活的人在自说自话。
+        const doneN = kids.filter((k) => k.status === 'done').length;
+        const badN = kids.length - doneN;
+        const byCeo = isParent && actor === ceoId();
+        const shortTitle = String(task.title ?? '(无标题任务)').slice(0, 40);
+        const kidsLine = `拆下去的 ${kids.length} 张子卡：${doneN} 张完成${badN ? `，${badN} 张没成` : ''}。`;
+        const title = isParent
+          ? `${byCeo ? '总经理汇报' : '总任务收束'}：${shortTitle}`
+          : composed.title;
+        const body = isParent
+          ? [
+            byCeo ? `总经理说：这摊活办完了。${kidsLine}` : kidsLine,
+            '每张子卡的结果都有记录，点开这张卡就能逐条看。',
+            byCeo ? '董事会不用管，这一单已经收账。' : '',
+          ].filter(Boolean).join('\n')
+          : composed.body;
         const msg = recordMessage(db, {
-          from: task.assignee ?? 'system', kind: 'done', taskId, project: task.project ?? null,
-          title: composed.title, body: composed.body,
+          from: byCeo ? ceoId() : (task.assignee ?? 'system'),
+          kind: 'done', taskId, project: task.project ?? null,
+          title, body,
           docs: (report?.artifacts ?? []).slice(0, 20),
         });
         if (msg) doneMessageOf.set(taskId, msg.msgId);
@@ -2306,6 +2340,186 @@ export function createEngine({
         newValue: String(error.message).slice(0, 200), runId, taskId,
       });
       return null;
+    }
+  }
+
+  // ── 父卡收束：拆出去的活全回来了，才轮到总任务交账 ──────────────────
+  // 真公司里，工程岗把活拆给执行岗之后不是「交完就走」：子卡一张张回来，
+  // 他得逐张验，全部收齐了再对发布者（总经理 / 董事会）交一次总账。
+  // 固化两条规则：
+  //   ① 还有子卡没收尾时交活 → 父卡挂起（waitingChildren=1），不送审；
+  //   ② 最后一张子卡到终态 → 自动拼总汇报，按父卡自己的路由送审。
+  // 有这两条，「8 张子卡完成 = 总任务完成」才真的成立：
+  // 总任务是在子卡全收尾之后才出现在总经理面前的，而不是拆完卡那一刻。
+  const CHILD_CLOSED = ['done', 'blocked', 'cancelled'];
+  const STATUS_WORD = { done: '完成', blocked: '卡住了', cancelled: '取消', in_progress: '在做', in_review: '待验收' };
+
+  function childrenOf(taskId) {
+    return db.prepare('SELECT * FROM tasks WHERE parentTaskId = ? ORDER BY rowid').all(taskId);
+  }
+
+  /** 子卡的一句话结论：优先用它报给董事会的那句人话，其次验收记录。 */
+  function childOutcome(kid) {
+    const msg = db.prepare("SELECT body FROM board_messages WHERE taskId = ? AND kind = 'done' ORDER BY rowid DESC LIMIT 1")
+      .get(kid.taskId);
+    if (msg) {
+      const said = String(msg.body ?? '').split('\n').map((s) => s.trim()).find((s) => s.startsWith('它说：'));
+      if (said) return said.replace(/^它说：/, '').slice(0, 160);
+    }
+    const hit = db.prepare(`SELECT newValue FROM audit WHERE taskId = ? AND action IN
+      ('review_passed','review_rejected','handoff_land','report_rejected') ORDER BY rowid DESC LIMIT 1`).get(kid.taskId);
+    const raw = String(hit?.newValue ?? '').split('|').slice(1).join('|').trim();
+    return raw ? raw.slice(0, 160) : '';
+  }
+
+  /**
+   * 把 N 张子卡的结果写成一份人话汇总，落到父卡的任务目录。
+   * 为什么必须落文件：总经理验收时是去读 output 目录和 completion.json 的，
+   * 只把汇总放在内存里，它看到的还是那句「我拆了 8 张」。
+   */
+  function writeChildrenSummary(parent, kids, lines) {
+    try {
+      const dir = path.join(workDir, 'tasks', parent.taskId);
+      fs.mkdirSync(path.join(dir, 'output'), { recursive: true });
+      const md = [
+        `# 总任务：${parent.title}`,
+        '',
+        `共 ${kids.length} 张子卡，全部收尾。`,
+        '',
+        ...lines.map((x) => `- ${x}`),
+        '',
+        `时间：${nowIso()}`,
+      ].join('\n');
+      fs.writeFileSync(path.join(dir, 'output', '总任务汇总.md'), `${md}\n`, 'utf8');
+
+      const reportPath = path.join(dir, 'completion.json');
+      let card = {};
+      try { card = JSON.parse(fs.readFileSync(reportPath, 'utf8')); } catch { card = {}; }
+      // 第一次收束前先把「拆解方案」那份原件留一份：覆盖掉就再也查不到它当初怎么拆的了。
+      if (!card.children && Object.keys(card).length) {
+        fs.writeFileSync(path.join(dir, 'completion.plan.json'), `${JSON.stringify(card, null, 2)}\n`, 'utf8');
+      }
+      const merged = {
+        ...card,
+        schema: card.schema ?? 'aicompany.completion/v1',
+        taskId: parent.taskId,
+        status: 'success',
+        summary: `总任务收束：${kids.length} 张子卡全部收尾（${kids.filter((k) => k.status === 'done').length} 张完成${kids.some((k) => k.status !== 'done') ? `，${kids.filter((k) => k.status !== 'done').length} 张没成` : ''}）。逐张结果见 output/总任务汇总.md。`,
+        artifacts: [...new Set([...(Array.isArray(card.artifacts) ? card.artifacts : []), 'output/总任务汇总.md'])],
+        children: kids.map((k) => ({
+          taskId: k.taskId, title: k.title, status: k.status, assignee: k.assignee,
+        })),
+        finishedAt: nowIso(),
+      };
+      fs.writeFileSync(reportPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
+    } catch (error) {
+      writeAudit(db, {
+        actor: 'control-plane', action: 'children_summary_failed',
+        newValue: String(error.message).slice(0, 200), taskId: parent.taskId,
+      });
+    }
+  }
+
+  /**
+   * 子卡到终态时调用：父卡如果正挂着等它，且这是最后一张，就收束父卡。
+   * 收束 ≠ 自动完成：只是把「总任务的结果」交到发布者手里，让发布者验收。
+   * 发布者是总经理就叫他审，是董事会就出待拍板单，明确要落盘才直接落。
+   */
+  function settleParent(childTaskId) {
+    try {
+      const child = taskById(childTaskId);
+      if (!child?.parentTaskId) return false;
+      const parent = taskById(child.parentTaskId);
+      if (!parent || ['done', 'cancelled'].includes(parent.status)) return false;
+      // 父卡自己还没交活（还在做 / 还在拆）→ 等它自己交，别替它收。
+      if (Number(parent.waitingChildren ?? 0) !== 1) return false;
+      const kids = childrenOf(parent.taskId);
+      if (!kids.length) return false;
+      if (kids.some((k) => !CHILD_CLOSED.includes(k.status))) return false;
+
+      // 多张子卡可能同一时刻收尾：CAS 抢位，只有一张能出总汇报。
+      const claimed = db.prepare('UPDATE tasks SET waitingChildren = 0, updatedAt = ? WHERE taskId = ? AND waitingChildren = 1')
+        .run(nowIso(), parent.taskId);
+      if (!Number(claimed.changes ?? 0)) return false;
+
+      let seed = {};
+      try { seed = JSON.parse(parent.parentReportJson ?? '{}') ?? {}; } catch { seed = {}; }
+      const lines = kids.map((k, i) => {
+        const said = childOutcome(k);
+        return `${i + 1}. ${k.title}｜${STATUS_WORD[k.status] ?? k.status}｜${k.assignee}${said ? `｜${said}` : ''}`;
+      });
+      writeChildrenSummary(parent, kids, lines);
+
+      const doneN = kids.filter((k) => k.status === 'done').length;
+      const badN = kids.length - doneN;
+      const summary = [
+        seed.summary ? plainText(seed.summary, 300) : `${parent.title}：拆成 ${kids.length} 张交给下级，现在全部收尾。`,
+        `子卡结果：${doneN} 张完成${badN ? `，${badN} 张没成` : ''}。`,
+        ...lines,
+      ].join('\n');
+      const report = {
+        schema: 'aicompany.completion/v1',
+        taskId: parent.taskId, runId: null, agent: parent.assignee,
+        revision: parent.revision ?? 1,
+        status: 'success',
+        summary,
+        artifacts: [...new Set([...(Array.isArray(seed.artifacts) ? seed.artifacts : []), 'output/总任务汇总.md'])],
+        acceptanceResults: Array.isArray(seed.acceptanceResults) ? seed.acceptanceResults : [],
+        usage: seed.usage ?? {},
+        children: kids.map((k) => ({ taskId: k.taskId, title: k.title, status: k.status, assignee: k.assignee })),
+        finishedAt: nowIso(),
+      };
+      pendingMemory.set(parent.taskId, report);
+      writeAudit(db, {
+        actor: 'control-plane', action: 'children_settled',
+        newValue: `${kids.length} 张子卡全部收尾（${doneN} 完成${badN ? `，${badN} 没成` : ''}）`, taskId: parent.taskId,
+      });
+
+      // 父卡按自己的路由走：发布者是谁就交给谁。这一步就是「最终收束到发布者」。
+      // 类型固定按 document 算：子卡里的代码已经各自过过代码审查，父卡收的是总账，不是代码。
+      const kind = 'document';
+      const handoffInfo = resolveHandoff(parent, kind, report);
+      transition(db, parent.taskId, 'in_review', 'control-plane', null);
+      if (handoffInfo.handoff === 'land') {
+        const fresh = taskById(parent.taskId) ?? parent;
+        transition(db, parent.taskId, 'done', 'control-plane', null);
+        flushProjectMemory(fresh, null);
+        deliverAccepted(fresh, null);
+        return true;
+      }
+      const reviewer = reviewerOf(parent, kind);
+      writeAudit(db, {
+        actor: 'control-plane', action: 'children_settle_routed',
+        newValue: `${reviewer}|${handoffInfo.source ?? '默认'}`, taskId: parent.taskId,
+      });
+      if (reviewer === ceoId()) {
+        emitEvent({
+          type: 'review_requested', taskId: parent.taskId, agentId: ceoId(),
+          payload: { wakeReason: 'review_requested', kind, children: kids.length },
+          dedupeKey: `review:${parent.taskId}:children:${nowIso()}`,
+        });
+        return true;
+      }
+      if (reviewer === 'human') {
+        requestTaskReview(parent, report, kind, null);
+        notifier.send({
+          title: `待你拍板：${parent.title}`,
+          body: `${kids.length} 张子卡全部收尾，${doneN} 张完成。总汇报已汇总，等你过目。`,
+          scene: 'review', taskId: parent.taskId,
+        });
+        return true;
+      }
+      writeAudit(db, {
+        actor: 'control-plane', action: 'review_queued',
+        newValue: `${reviewer}|${kind}|子卡汇总`, taskId: parent.taskId,
+      });
+      return true;
+    } catch (error) {
+      writeAudit(db, {
+        actor: 'control-plane', action: 'children_settle_failed',
+        newValue: String(error.message).slice(0, 300), taskId: childTaskId,
+      });
+      return false;
     }
   }
 
@@ -3001,6 +3215,31 @@ export function createEngine({
 
     // 报告合格：先攒下这份报告，等卡到 done 再落项目记忆（打回重做的不算数）。
     pendingMemory.set(task.taskId, report);
+
+    // ★ 父卡等子卡：这张卡已经拆给下级了（有子卡还没收尾），现在交上来的只是「拆解方案」，
+    //   不是「总任务的结果」。先挂在这里，别请发布者来验收半成品 ——
+    //   否则总经理会看到一张写着「我拆了 8 张」的完成报告，而八件事一件都还没干。
+    const kids = childrenOf(task.taskId);
+    const openKids = kids.filter((k) => !CHILD_CLOSED.includes(k.status));
+    if (kids.length && openKids.length) {
+      // 挂起也要算「在手上」：拉模式席位领卡前状态还是 todo，
+      // 停在 todo 会被看板当成「没人接」，也让下一轮唤醒以为卡还没开始。
+      if (task.status === 'todo' || task.status === 'backlog') {
+        transition(db, task.taskId, 'in_progress', agentId, outcome.runId);
+      }
+      const seed = {
+        summary: report.summary, artifacts: report.artifacts, acceptanceResults: report.acceptanceResults,
+        usage: report.usage, boardNote: report.boardNote,
+      };
+      db.prepare('UPDATE tasks SET waitingChildren = 1, parentReportJson = ?, updatedAt = ? WHERE taskId = ?')
+        .run(JSON.stringify(seed), nowIso(), task.taskId);
+      writeAudit(db, {
+        actor: agentId, action: 'parent_waiting_children',
+        newValue: `${kids.length} 张子卡，还有 ${openKids.length} 张没收尾：${openKids.map((k) => k.taskId).join(',')}`.slice(0, 400),
+        runId: outcome.runId, taskId: task.taskId,
+      });
+      return { waitingChildren: true, open: openKids.length, total: kids.length };
+    }
 
     // 执行者自己指定了审查人：先过闸（只能指汇报链上的上级 / 默认审查人）。
     // 过了就写回卡上，审计才查得出「这活当初是谁说要交给谁审的」。

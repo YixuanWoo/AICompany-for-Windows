@@ -272,6 +272,7 @@ export function buildCeoPrompt(ctx) {
       '【去这些地方找证据】',
       `- 产物目录：${workRoot ? `${workRoot}/tasks/${task.taskId}/output` : '（未知）'}`,
       `- 完成报告：${workRoot ? `${workRoot}/tasks/${task.taskId}/completion.json` : '（未知）'}`,
+      '- 这张卡下面拆过子卡的话：先看 output/总任务汇总.md，每张子卡的结果和结论都在里面。',
       '用你的工具真的去读文件、看内容，不要凭承接人的自述下结论。',
       '',
       '【输出】只输出一个 JSON 对象，不要别的文字：',
