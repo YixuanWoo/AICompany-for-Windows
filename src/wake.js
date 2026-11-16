@@ -152,34 +152,40 @@ export async function wakeSession({
   onResult = null,
 } = {}) {
   const creds = loadGatewayCreds({ files });
-  if (!creds) return { ok: false, reason: '没找到网关凭据（会话宿主没开过，或 hook 没写过）' };
+  const probe = creds
+    ? await probeSession(creds)
+    : { ok: false, busy: null, reason: '没找到网关凭据（会话宿主没开过，或 hook 没写过）' };
 
-  const probe = await probeSession(creds);
-  if (!probe.ok) return { ok: false, reason: `网关探不通：${probe.reason}` };
-
-  if (probe.busy === false) {
+  if (probe.ok && probe.busy === false) {
     const sent = await sendWake(creds, text);
     if (onResult) { try { onResult(sent); } catch { /* 回调是旁路 */ } }
     return sent;
   }
 
-  // 忙：排队等空闲。每次重读凭据（端口可能随会话变）。
+  // 忙（或探不通）就排队重试，每次 tick **重读凭据** —— 端口和密码每个会话都变，
+  // 凭据文件由 hook 在会话开始时写入，可能比投卡晚几秒（真机事故：卡 00:15:46 投进来，
+  // 凭据 00:16:12 才刷新，旧代码拿旧端口探一次就永久放弃）。探不通和忙走同一条重试路，
+  // hook 一把新凭据写好，下一 tick 就能补发。同一个 key 只留最后一次，避免刷屏。
   const old = pending.get(key);
   if (old?.timer) clearTimeout(old.timer);
   const queuedAt = Date.now();
   const entry = { queuedAt, timer: null, tries: 0 };
   pending.set(key, entry);
+  const firstReason = !probe.ok
+    ? `网关探不通（${probe.reason}），已排队重试，凭据刷新后自动补发`
+    : `会话正忙（${probe.runStatus ?? 'busy'}），已排队等它空闲`;
 
   const tick = async () => {
     const cur = pending.get(key);
     if (!cur || cur.queuedAt !== queuedAt) return;      // 被更新的唤醒取代
     if (Date.now() - queuedAt > maxWaitMs) {
       pending.delete(key);
-      if (onResult) { try { onResult({ ok: false, error: `排队超时（等满 ${Math.round(maxWaitMs / 60000)} 分钟）` }); } catch { /* 旁路 */ } }
+      if (onResult) { try { onResult({ ok: false, error: `重试超时（等满 ${Math.round(maxWaitMs / 60000)} 分钟仍探不通或没空闲）` }); } catch { /* 旁路 */ } }
       return;
     }
     cur.tries += 1;
-    const fresh = loadGatewayCreds({ files }) ?? creds;
+    const fresh = loadGatewayCreds({ files });
+    if (!fresh) { cur.timer = setTimeout(tick, pollMs); if (cur.timer.unref) cur.timer.unref(); return; }
     const again = await probeSession(fresh);
     if (again.busy === false) {
       const sent = await sendWake(fresh, text);
@@ -193,5 +199,5 @@ export async function wakeSession({
   entry.timer = setTimeout(tick, 300);
   if (entry.timer.unref) entry.timer.unref();
 
-  return { ok: true, queued: true, reason: `会话正忙（${probe.runStatus ?? 'busy'}），已排队等它空闲` };
+  return { ok: true, queued: true, reason: firstReason };
 }

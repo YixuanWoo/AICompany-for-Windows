@@ -106,17 +106,26 @@ test('K3 · 会话正忙：先排队，等它空闲再发（硬发会被网关�
   assert.equal(results[0].ok, true);
 });
 
-test('K4 · 叫不醒就老实失败：凭据缺失 / 端口不通都要给出原因', async (t) => {
+test('K4 · 叫不醒就排队重试：凭据缺失 / 端口不通都不秒放弃，也不假装成功', async (t) => {
   const dir = tmpDir(t);
   const missing = await wakeSession({ text: 'x', files: [path.join(dir, 'none.json')] });
-  assert.equal(missing.ok, false);
-  assert.match(missing.reason, /凭据/);
+  assert.equal(missing.ok, true);
+  assert.equal(missing.queued, true, '凭据缺失时排队等 hook 刷新，不秒放弃');
+  assert.match(missing.reason, /排队重试|凭据/);
 
-  // 指向一个没人监听的端口：必须报错，不能假装成功。
+  // 指向一个没人监听的端口：进重试队列等凭据刷新，最终超时要认输。
   const dead = writeCreds(dir, 1);
-  const refused = await wakeSession({ text: 'x', files: [dead], maxWaitMs: 1000 });
-  assert.equal(refused.ok, false);
-  assert.match(refused.reason, /探不通|ECONNREFUSED|超时/);
+  const refused = await wakeSession({ text: 'x', files: [dead], maxWaitMs: 400, pollMs: 80 });
+  assert.equal(refused.ok, true);
+  assert.equal(refused.queued, true);
+  assert.match(refused.reason, /探不通/);
+  // 超时由 onResult 通知：等它走完。
+  const outcome = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ ok: false, error: 'onResult 没回调' }), 2000);
+    wakeSession({ text: 'x2', files: [dead], maxWaitMs: 300, pollMs: 80, onResult: (r) => { clearTimeout(timer); resolve(r); } });
+  });
+  assert.equal(outcome.ok, false, '重试超时必须通过 onResult 认输');
+  assert.match(outcome.error ?? '', /超时/);
 });
 
 test('K5 · 探活：忙闲读得对，状态码不对不装成功', async (t) => {

@@ -208,20 +208,59 @@ test('W5 · 卡排进拉模式席位：控制面主动叫醒会话，不是只�
   assert.match(sent.newValue, /engineering\|run-1/);
 });
 
-test('W6 · 叫不醒就留痕，不假装成功（没开 WorkBuddy 的场景）', async (t) => {
+test('W6 · 叫不醒就排队重试，重试超时才认输并留痕', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aicompany-creds-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const credsFile = path.join(dir, 'creds.json');
-  // 指向没人监听的端口：网关探不通
+  // 指向没人监听的端口：网关探不通。maxWaitMs 调短，让重试超时能在测试里走完。
   fs.writeFileSync(credsFile, JSON.stringify({ port: '1', password: 'pw' }), 'utf8');
 
-  const { db, engine } = setup(t, { wake: { enabled: true, credsFiles: [credsFile] } });
+  const { db, engine } = setup(t, {
+    wake: { enabled: true, credsFiles: [credsFile], maxWaitMs: 400, pollMs: 100 },
+  });
   await engine.submit({ text: '叫不醒也得有记录', mode: 'direct', addressedTo: 'engineering' });
   await pumpAll(engine);
-  await new Promise((r) => setTimeout(r, 250));
+  await new Promise((r) => setTimeout(r, 900));
 
   const card = db.prepare("SELECT * FROM tasks WHERE assignee = 'engineering' ORDER BY rowid DESC").get();
+  const queued = db.prepare("SELECT * FROM audit WHERE taskId = ? AND action = 'wake_queued'").get(card.taskId);
+  assert.ok(queued, '探不通先排队重试，不能秒放弃');
+  assert.match(queued.newValue, /已排队重试/, '留痕要讲清为什么排队（凭据没刷新时自动补发）');
   const failed = db.prepare("SELECT * FROM audit WHERE taskId = ? AND action = 'wake_failed'").get(card.taskId);
-  assert.ok(failed, '叫不醒必须记 wake_failed，不能静默');
+  assert.ok(failed, '重试超时后必须记 wake_failed，不能静默');
   assert.equal(pullNotes(db).length, 1, '叫不醒时那条「等你领」提醒要还在，人还能自己开口');
+});
+
+test('W7 · 心跳兜底：叫醒失败的卡，凭据刷新后由 reconcile 自动补叫', async (t) => {
+  const gw = await fakeGateway(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aicompany-creds-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const credsFile = path.join(dir, 'creds.json');
+
+  // 第一幕：凭据是死端口（模拟 hook 还没刷新、旧会话已重启）→ 唤醒失败。
+  fs.writeFileSync(credsFile, JSON.stringify({ port: '1', password: 'pw' }), 'utf8');
+  const { db, engine } = setup(t, {
+    wake: { enabled: true, credsFiles: [credsFile], maxWaitMs: 300, pollMs: 80, cooldownMs: 300 },
+  });
+  await engine.submit({ text: '心跳兜底验证', mode: 'direct', addressedTo: 'engineering' });
+  await pumpAll(engine);
+  await new Promise((r) => setTimeout(r, 900));
+  const card = db.prepare("SELECT * FROM tasks WHERE assignee = 'engineering' ORDER BY rowid DESC").get();
+  assert.ok(db.prepare("SELECT 1 AS n FROM audit WHERE taskId = ? AND action = 'wake_failed'").get(card.taskId),
+    '第一幕：旧凭据叫不醒，必须先失败');
+  assert.equal(gw.state.runs.length, 0);
+
+  // 第二幕：hook 刷新凭据（端口换成活网关），心跳跑一轮 → 必须自动补叫成功。
+  fs.writeFileSync(credsFile, JSON.stringify({
+    port: String(gw.port), password: 'pw', updatedAt: new Date().toISOString(),
+  }), 'utf8');
+  await new Promise((r) => setTimeout(r, 350)); // 等冷却期过去
+  const report = await engine.reconcile({ olderThanMs: 0 });
+  assert.equal(report.wakes, 1, '心跳要给冷却期外的失败卡补叫');
+  await new Promise((r) => setTimeout(r, 300));
+
+  const sent = db.prepare("SELECT * FROM audit WHERE taskId = ? AND action = 'wake_sent'").get(card.taskId);
+  assert.ok(sent, '补叫成功必须留痕（wake_sent）');
+  assert.equal(gw.state.runs.length, 1, '新凭据必须真的把会话叫起来');
+  assert.match(gw.state.runs[0].text, /seat\.js inbox/);
 });

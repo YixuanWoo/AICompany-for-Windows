@@ -2356,6 +2356,7 @@ export function createEngine({
       key: task.taskId,
       files: config.wake?.credsFiles ?? [],
       maxWaitMs: Number(config.wake?.maxWaitMs ?? 10 * 60 * 1000),
+      pollMs: Number(config.wake?.pollMs ?? 2000),
       // 排队之后真正发出的那一次只能从回调里知道。
       onResult: (result) => mark(result.ok ? 'wake_sent' : 'wake_failed',
         result.ok ? (result.runId ?? 'ok') : result.error),
@@ -3709,6 +3710,26 @@ export function createEngine({
       requeued += 1;
       if (requeued >= limit) break;
     }
+    // 主动唤醒的兜底：排队那一刻叫过一次但没叫醒（凭据还没刷新 / 会话宿主重启 /
+    // 引擎重启丢了排队定时器）的卡，靠心跳周期补叫。冷却在 wakePullSeat 里面。
+    // 唤醒成功（wake_sent）也照补：人被叫起来 ≠ 活被领走，躺过冷却期还没人领就再叫一声。
+    let wakes = 0;
+    if (config.wake?.enabled !== false) {
+      const pullCards = rows.filter((row) => cfgFor(row.assignee)?.dispatch === 'pull'
+        && !unmetDependencies(row).length
+        && !db.prepare("SELECT 1 AS n FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1").get(row.taskId));
+      for (const row of pullCards) {
+        const last = db.prepare(`SELECT createdAt FROM audit
+          WHERE taskId = ? AND action IN ('wake_sent','wake_queued','wake_failed')
+          ORDER BY rowid DESC LIMIT 1`).get(row.taskId);
+        if (last && Date.now() - Date.parse(last.createdAt)
+          < Number(config.wake?.cooldownMs ?? 10 * 60 * 1000)) continue;
+        const task = taskById(row.taskId);
+        if (!task) continue;
+        wakePullSeat(task, row.assignee);
+        wakes += 1;
+      }
+    }
     // 泵可能已经死了（上一次 drain 抛异常被后台调用方吞掉）：
     // 只看 requeued 的话，「todo 卡有待处理投递事件」会让心跳永远不 pump，
     // 而死泵又永远不消费这些事件 —— 互相死锁。所以只要队列里有事件就先泵一次。
@@ -3723,7 +3744,7 @@ export function createEngine({
     }
     // P7-5：顺手补落盘 —— 被译台挡住、或上次落盘失败的卡，在这里重试。
     const deliveries = retryPendingDeliveries();
-    return { scanned: rows.length, requeued, waiting, deliveries, releasedDeps, ...pumped };
+    return { scanned: rows.length, requeued, waiting, wakes, deliveries, releasedDeps, ...pumped };
   }
 
   async function onProgressReport() {
