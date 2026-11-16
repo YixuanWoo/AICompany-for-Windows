@@ -44,6 +44,12 @@ interaction:
   # direct 仍然可用（指名直投某个员工，不经 CEO），但不是默认路径。
   defaultMode: delegate
   defaultTarget: ceo
+  # 总经理会话：所有工作共用一个会话 —— 前缀稳定才能命中缓存，按量计费席位省的是真钱。
+  # 到 warnTurns 提醒董事会换新，到 maxTurns 自动换；reuse=false 可回到「每轮新会话」的旧行为。
+  ceoSession:
+    reuse: true
+    warnTurns: 30
+    maxTurns: 60
   allowDirectTo: [execute]
   autoAssign: false
   modes:

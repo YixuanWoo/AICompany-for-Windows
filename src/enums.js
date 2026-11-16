@@ -18,6 +18,8 @@ export const SCHEMA_IDS = {
 
 export const INTERACTION_MODES = ['delegate', 'direct', 'cowork', 'meeting'];
 export const DECISION_OUTCOMES = ['resume', 'redo', 'derive', 'cancel'];
+// 四类出口是 P0 冻结的封闭枚举，不许加第五类（契约测试会拦）。
+// 「只回话、不派卡」不占新类型：用 task-create + 空 tasks + summary 表达（同「只排班不派卡」一脉）。
 export const CEO_OUTPUT_KINDS = ['task-create', 'review', 'escalation', 'decision'];
 // 循环任务的类别（协议写死的四个）：简报 / 巡检 / 清理 / 维护。
 export const RECURRING_KINDS = ['brief', 'inspection', 'cleanup', 'maintenance'];

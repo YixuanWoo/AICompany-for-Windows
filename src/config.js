@@ -200,6 +200,12 @@ export function normalizeConfig(config) {
   interaction.thread = { ...(interaction.thread || {}) };
   interaction.thread.ttlDays = interaction.thread.ttlDays ?? DEFAULTS.ttlDays;
   interaction.thread.promoteRequiresExplicit = interaction.thread.promoteRequiresExplicit ?? DEFAULTS.promoteRequiresExplicit;
+  // 总经理会话复用：共用一个会话才能命中前缀缓存（按量计费席位省的是真钱）。
+  // warnTurns 到点提醒董事会换新，maxTurns 到点自动换；reuse=false 回到「每轮新会话」的旧行为。
+  interaction.ceoSession = { ...(interaction.ceoSession || {}) };
+  interaction.ceoSession.reuse = interaction.ceoSession.reuse ?? true;
+  interaction.ceoSession.warnTurns = interaction.ceoSession.warnTurns ?? 30;
+  interaction.ceoSession.maxTurns = interaction.ceoSession.maxTurns ?? 60;
   // P4-1：配额阈值可配，默认 80% 预警、100% 停派。
   const quota = { ...(config.quota || {}) };
   quota.warnRatio = quota.warnRatio ?? DEFAULTS.warnRatio;

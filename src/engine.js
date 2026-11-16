@@ -30,6 +30,9 @@ import {
   deliverTask, runningProcesses, lastDeliveryOf, appendDeliveryLog, DELIVERY_SCHEMA,
 } from './deliver.js';
 import { nextFireAt } from './rrule.js';
+import {
+  DEFAULT_SESSION_POLICY, describeCeoSession, markSessionWarned, readCeoSession, rotateCeoSession,
+} from './ceo-session.js';
 
 export function createNotifier(kind = 'web') {
   // P4-6：可传单个通道名或数组；web / noop / stdout 内置，im / webhook 需显式地址。
@@ -935,12 +938,22 @@ export function createEngine({
         })),
       },
       workRoot: workDir,
+      // 会话复用策略（interaction.ceoSession）：adapter 据此决定「共用会话还是每轮新开」。
+      interaction: config.interaction ?? {},
       // P7：项目可选。没指定项目时把「可用项目清单」交给 agent，由它自己判断归属
       // （新项目 / 复用已有 / 一次性任务），而不是逼人在下单时先选。
       projectAuto: task?.project == null && (config.projects ? Object.keys(config.projects).length > 0 : false),
       availableProjects: listProjectEntries({ config, workRoot: workDir }).map((p) => ({
         id: p.id, displayName: p.displayName, specExists: p.specExists,
-        rootDir: p.rootDir, deliverSubdir: p.deliverSubdir,
+        rootDir: p.rootDir, deliverSubdir: p.deliverSubdir, memoryCount: p.memoryCount ?? 0,
+        // CEO 要「根据现有项目信息给建议」，光有项目名不够：得看到各项目最近干了什么、踩过什么坑。
+        // 只取最近 3 条、每条压成一句话——每次唤醒都塞全文太贵，而摘要足够它判断「这项目卡在哪」。
+        recentMemory: readRecentMemory(workDir, p.id, { limit: 3 }).entries.map((m) => ({
+          at: String(m.finishedAt ?? m.at ?? '').slice(0, 10),
+          title: String(m.title ?? '').slice(0, 60),
+          summary: String(m.summary ?? '').slice(0, 140),
+          lesson: Array.isArray(m.lessons) && m.lessons.length ? String(m.lessons[0]).slice(0, 120) : null,
+        })),
       })),
       adapterConfig: { ...(cfg.adapter?.config ?? {}), workRoot: cfg.adapter?.config?.workRoot ?? workDir },
       extra,
@@ -967,14 +980,76 @@ export function createEngine({
         newValue: JSON.stringify(outcome.sessionParams).slice(0, 2000), runId, taskId,
       });
     }
+    maybeWarnCeoSession(outcome, task);
     return { ...outcome, runId, agentId, wakeReason, resumed: Boolean(resumeRunId) };
   }
 
+  // 共用会话是为了省钱（前缀缓存命中），但不能让它无限变长：越长越脏、每轮输入也越贵。
+  // 到 warnTurns 提醒董事会「可以换个新的」，同一档位只提醒一次（记在会话文件里，重启不重发）。
+  function maybeWarnCeoSession(outcome, task) {
+    const sp = outcome?.sessionParams ?? {};
+    const turns = Number(sp.sessionTurns ?? 0);
+    if (sp.mode !== 'ceo' || !sp.sessionId || !(turns > 0)) return;
+    const warnAt = Number(config.interaction?.ceoSession?.warnTurns ?? DEFAULT_SESSION_POLICY.warnTurns);
+    if (!(warnAt > 0) || turns < warnAt) return;
+    const bucket = Math.floor(turns / warnAt);
+    const state = readCeoSession(workDir, ceoId());
+    if (Array.isArray(state?.warnAts) && state.warnAts.includes(bucket)) return;
+    markSessionWarned(workDir, ceoId(), bucket);
+    const short = String(sp.sessionId).slice(-12);
+    writeAudit(db, {
+      actor: 'control-plane', action: 'ceo_session_warn',
+      newValue: `${short}|${turns} 轮`, taskId: task?.taskId ?? null,
+    });
+    notifier.send({
+      title: `总经理会话已 ${turns} 轮，要不要换个新的`,
+      body: `共用会话是为了命中缓存省钱，但跑久了上下文会脏、每轮输入也越来越贵。\n`
+        + `看板「席位与配额」里点「新建会话」就能换，下一轮起用新会话；手上在跑的卡不受影响。\n`
+        + `（不动也行：到 ${Number(config.interaction?.ceoSession?.maxTurns ?? DEFAULT_SESSION_POLICY.maxTurns)} 轮会自动换。）`,
+      scene: 'answer', taskId: task?.taskId ?? null,
+    });
+  }
+
+  // 模型偶尔会把「只回话」写成 type:"report"。四类出口是 P0 冻结的，不能为它加第五类，
+  // 所以在这里归一成 task-create + 空 tasks（＝不派卡、只把话交回去），而不是判它非法。
   function assertCeoOutput(result) {
+    if (result && typeof result === 'object' && !CEO_OUTPUT_KINDS.includes(result.type)
+      && ['report', 'answer', 'reply'].includes(String(result.type))) {
+      return { ...result, type: 'task-create', tasks: [] };
+    }
     if (!result || !CEO_OUTPUT_KINDS.includes(result.type)) {
-      throw new Error(`CEO 输出必须是四类之一 [${CEO_OUTPUT_KINDS.join(', ')}]，收到 ${String(result?.type)}`);
+      throw new Error(`CEO 输出必须是这几类之一 [${CEO_OUTPUT_KINDS.join(', ')}]，收到 ${String(result?.type)}`);
     }
     return result;
+  }
+
+  // 判「这是不是一张卡」：得带实质字段。只写 summary / 建议的对象是回话，不是卡。
+  function looksLikeTaskCard(x) {
+    return Boolean(x && typeof x === 'object'
+      && (x.title || x.instructions || x.assignee
+        || (Array.isArray(x.acceptance) && x.acceptance.length)));
+  }
+
+  // 「只回话、不派卡」的收尾：父卡直接结案，答复原样交回董事会。
+  // 不建子卡、不进项目、不再唤醒第二次。答复同时写审计（可追）与收件箱（看得见、能弹气泡）。
+  // 依据：任务与项目解耦——问一句「你好」不该变成一张给员工的活。
+  function closeAsReport(task, result, runId) {
+    const answer = String(result.answer ?? result.summary ?? '').trim();
+    if (!answer) {
+      throw new Error('CEO 这一轮既没派卡、也没排班、也没给答复（answer / summary 都是空的），等于什么都没做');
+    }
+    writeAudit(db, {
+      actor: 'ceo', action: 'ceo_report',
+      newValue: answer.slice(0, 2000), runId, taskId: task.taskId,
+    });
+    notifier.send({
+      title: `总经理回复：${String(task.title ?? '(无标题)').slice(0, 60)}`,
+      body: answer.slice(0, 1500),
+      scene: 'answer', taskId: task.taskId,
+    });
+    transition(db, task.taskId, 'in_review', 'ceo', runId);
+    transition(db, task.taskId, 'done', 'ceo', runId);
+    return { reported: true, chars: answer.length };
   }
 
   // G3：子卡派给谁。CEO 点了名且接得了 → 尊重；接不了 → 在它的子树里找一个「刚够用」的替补；
@@ -1891,7 +1966,7 @@ export function createEngine({
   }
 
   async function handleResult(outcome, task, agentId, payload) {
-    const result = outcome.result ?? {};
+    let result = outcome.result ?? {};
     // 卡在跑的过程中被人工取消：结果照样留档，但不再推进状态机。
     // 不加这道护栏会撞「cancelled → in_review」的非法跳转，日志里全是假错误，
     // 而人看到的只是「我按了取消，系统却在报状态机异常」。
@@ -1918,8 +1993,12 @@ export function createEngine({
       return submitted;
     }
     if (payload.wakeReason === 'escalation') {
-      assertCeoOutput(result);
-      if (result.type === 'task-create') deriveAndCancel(task, result);
+      result = assertCeoOutput(result);
+      // 只回话（空 tasks / 只有 summary）不派生新卡：变更请求的处置要么给方案，要么明确不动。
+      const cards = [...(Array.isArray(result.tasks) ? result.tasks : []), result];
+      if (result.type === 'task-create' && cards.some(looksLikeTaskCard)) {
+        deriveAndCancel(task, result);
+      }
       return;
     }
     // 「现在抢不到前台 / 你正在用电脑」是临时条件，adapter 会明确报 deferred：
@@ -1935,7 +2014,9 @@ export function createEngine({
       return { deferred: true };
     }
     if (agentId === ceoId()) {
-      assertCeoOutput(result);
+      result = assertCeoOutput(result);
+      // 「只回话、不派卡」：寒暄 / 咨询 / 让 CEO 出主意 / 让它根据现有信息汇报现状。
+      // 这类不需要员工动手，硬派一张卡等于为了回一句「你好」烧一次桌面席位。
       if (result.type === 'task-create') {
         // CEO 可以一次拆多张卡（result.tasks）；只给一张时也用顶层字段，兼容老的派单器脚本。
         // 「只排班不派卡」是合法产出：显式给空 tasks + 带了排班建议时，不该硬凑一张空壳卡出来。
@@ -1944,11 +2025,11 @@ export function createEngine({
           ...(result.recurringSuggestion ? [result.recurringSuggestion] : []),
         ].filter((x) => x && typeof x === 'object');
         const explicitTasks = Array.isArray(result.tasks) ? result.tasks : null;
-        const requested = (explicitTasks ?? [result])
-          .filter((c) => c && typeof c === 'object')
-          .slice(0, 8);
+        // 少了这道判定，CEO 没写 tasks 时会把整个结果当卡派下去——问句「你好」也会变成一张给员工的活。
+        const requested = (explicitTasks ?? [result]).filter(looksLikeTaskCard).slice(0, 8);
         if (!requested.length && !recList.length) {
-          throw new Error('CEO 既没派卡、也没提排班，这一轮等于没产出（tasks 空且无 recurringSuggestion）');
+          // 没卡没排班，但有答复 → 这就是「只汇报」。真的什么都没有才算空产出。
+          return closeAsReport(task, result, outcome.runId);
         }
         // 项目归属：人没指定时由 CEO 改判（这是「不逼人选项目」的另一半）。
         // 但它只能指向「已有且配了规范」的项目；写了不存在的项目照样拒，绝不让产物落到野地里。
@@ -2523,6 +2604,22 @@ export function createEngine({
     holdReasons: () => holdReasons(),
     getRuns: () => db.prepare('SELECT * FROM runs ORDER BY rowid').all(),
     getAudit: () => db.prepare('SELECT * FROM audit ORDER BY rowid').all(),
+    // 总经理会话（外部按量计费席位）：看板显示 + 手动换新。
+    getCeoSession: () => ({
+      ...describeCeoSession(readCeoSession(workDir, ceoId())),
+      policy: { ...DEFAULT_SESSION_POLICY, ...(config.interaction?.ceoSession ?? {}) },
+    }),
+    resetCeoSession: ({ reason = '董事会手动新建', actor = 'board' } = {}) => {
+      const state = rotateCeoSession(workDir, ceoId(), { reason, actor });
+      writeAudit(db, {
+        actor, action: 'ceo_session_reset',
+        newValue: `${state.sessionId}｜${String(reason).slice(0, 200)}`.slice(0, 300),
+      });
+      return {
+        ...describeCeoSession(state),
+        policy: { ...DEFAULT_SESSION_POLICY, ...(config.interaction?.ceoSession ?? {}) },
+      };
+    },
     getBriefs: () => db.prepare('SELECT * FROM briefs ORDER BY rowid').all(),
     getThreads: () => db.prepare('SELECT * FROM threads ORDER BY rowid').all(),
     getEvents: () => db.prepare('SELECT * FROM events ORDER BY rowid').all(),

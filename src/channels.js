@@ -34,7 +34,8 @@ function desktopChannel() {
     // 只弹「要人处理」的：拍板 / 项目 / 排班 / 卡住 / 额度。日常进展不打扰。
     send(message) {
       const scene = String(message?.scene ?? '');
-      if (!['decision', 'project', 'recurring', 'difficulty', 'quota', 'approval'].includes(scene)) return;
+      // answer：CEO 只回话不派卡时给你的答复 —— 你问了就得让你看见，别藏在看板里等你自己翻。
+      if (!['decision', 'project', 'recurring', 'difficulty', 'quota', 'approval', 'answer'].includes(scene)) return;
       pop(message.title ?? 'AICompany', message.body ?? '');
     },
     requestApproval(request) {

@@ -251,6 +251,14 @@ export function createServer({
         json(res, 200, { ...state, seats: guiSeats.map((s) => s.agentId) });
         return;
       }
+      // ---- 总经理会话换新（董事会手动）：只影响下一轮，不打断在跑的卡 ----
+      if (method === 'POST' && pathname === '/api/ceo-session/reset') {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        json(res, 200, engine.resetCeoSession({
+          reason: body.reason ?? null, actor: body.actor ?? 'board',
+        }));
+        return;
+      }
       // ---- P7：新建项目（董事会才有的权限；CEO 只能建议，点审批单通过也算这里）----
       if (method === 'POST' && pathname === '/api/projects') {
         const body = JSON.parse((await readBody(req)) || '{}');
@@ -441,6 +449,8 @@ export function createServer({
             FROM tasks WHERE leaseToken IS NOT NULL ORDER BY taskId`).all(),
           '/api/threads': () => engine.getThreads(),
           '/api/inbox': () => ({ briefs: engine.getBriefs(), notifications: engine.notifier.messages }),
+          // 总经理会话：共用会话能命中缓存省钱，但得让人看得见「现在这个有多长了」。
+          '/api/ceo-session': () => engine.getCeoSession(),
           '/api/dashboard': () => engine.getDashboard(),
           // P5-1 / P5-3：试运行观察（五项指标 + 四项结论 + 脏状态）。
           '/api/observe': () => buildObservation({

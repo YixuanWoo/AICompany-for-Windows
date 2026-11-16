@@ -22,20 +22,46 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "name", "adapter"],
+        "required": [
+          "id",
+          "name",
+          "adapter"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
-          "name": { "type": "string", "minLength": 1 },
-          "kind": { "type": "string" },
-          "quotaDaily": { "type": "integer", "minimum": 0 },
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string"
+          },
+          "quotaDaily": {
+            "type": "integer",
+            "minimum": 0
+          },
           "adapter": {
             "type": "object",
-            "required": ["type"],
+            "required": [
+              "type"
+            ],
             "properties": {
               "type": {
-                "enum": ["process", "http", "cli-acp", "gui-template", "polling", "webhook-exec"]
+                "enum": [
+                  "process",
+                  "http",
+                  "cli-acp",
+                  "gui-template",
+                  "polling",
+                  "webhook-exec"
+                ]
               },
-              "config": { "type": "object" }
+              "config": {
+                "type": "object"
+              }
             }
           }
         }
@@ -47,25 +73,76 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "title", "heldBy", "isCEO"],
+        "required": [
+          "id",
+          "title",
+          "heldBy",
+          "isCEO"
+        ],
         "properties": {
-          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
-          "title": { "type": "string", "minLength": 1 },
-          "heldBy": { "type": "string" },
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "heldBy": {
+            "type": "string"
+          },
           "adapterConfig": {
             "description": "覆盖担任者的 adapter 参数（例：同一 agent 在总经理岗用 mode=ceo）。",
             "type": "object"
           },
-          "isCEO": { "type": "boolean" },
+          "isCEO": {
+            "type": "boolean"
+          },
           "capabilities": {
             "type": "array",
-            "items": { "enum": ["plan", "delegate", "review", "execute", "escalate", "readOnly"] }
+            "items": {
+              "enum": [
+                "plan",
+                "delegate",
+                "review",
+                "execute",
+                "escalate",
+                "readOnly"
+              ]
+            }
           },
-          "status": { "enum": ["active", "setup", "paused", "pending_approval", "error"] },
-          "quotaDaily": { "type": "integer", "minimum": 0 },
-          "maxDifficulty": { "enum": ["easy", "normal", "hard"] },
-          "reportsTo": { "type": ["string", "null"] },
-          "escalationTo": { "type": ["string", "null"] }
+          "status": {
+            "enum": [
+              "active",
+              "setup",
+              "paused",
+              "pending_approval",
+              "error"
+            ]
+          },
+          "quotaDaily": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxDifficulty": {
+            "enum": [
+              "easy",
+              "normal",
+              "hard"
+            ]
+          },
+          "reportsTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "escalationTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },
@@ -213,6 +290,29 @@
               "type": "boolean"
             }
           }
+        },
+        "ceoSession": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "总经理（按量计费席位）的会话复用：共用会话才能命中缓存省钱。",
+          "properties": {
+            "reuse": {
+              "type": "boolean",
+              "description": "false = 每轮新开会话（排查用）；默认 true"
+            },
+            "warnTurns": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000,
+              "description": "到这个轮次提醒董事会换新"
+            },
+            "maxTurns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "description": "到这个轮次自动换新"
+            }
+          }
         }
       }
     },
@@ -244,14 +344,22 @@
           "holder": {
             "description": "由谁担任这个岗位。写字符串即人名/agent 名；也可写 {name, kind}。",
             "oneOf": [
-              { "type": "string" },
+              {
+                "type": "string"
+              },
               {
                 "type": "object",
                 "properties": {
-                  "name": { "type": "string" },
-                  "kind": { "type": "string" }
+                  "name": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  }
                 },
-                "required": ["name"]
+                "required": [
+                  "name"
+                ]
               }
             ]
           },

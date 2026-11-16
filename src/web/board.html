@@ -698,8 +698,26 @@
     'external-agent': '外部 agent', 'dsh-agent': '外部 agent',
     'gui-app': '桌面应用', 'process': '本地脚本',
   };
+  function renderCeoSession() {
+    const cs = state.ceoSession;
+    if (!cs) return '';
+    if (!cs.exists) {
+      return '<div class="row"><b>总经理会话</b> <span class="tag">下一轮自动开</span>'
+        + '<div class="meta">所有工作共用一个会话，命中缓存省额度；太长时我会提醒你换一个新的。</div></div>';
+    }
+    const pol = cs.policy || {};
+    const hot = Number(cs.turns) >= Number(pol.warnTurns || 30);
+    return '<div class="row"><b>总经理会话</b> <span class="tag">' + esc(cs.short) + '</span>'
+      + (hot ? ' <span class="tag" style="background:#FDECEA;color:#B3261E">该换新了</span>' : '')
+      + '<div class="meta">' + esc(cs.text) + ' · 近一次 ' + esc(short(cs.lastTaskId || '—')) + '</div>'
+      + '<div class="meta">共用会话是为了命中缓存省钱；到 ' + esc(pol.warnTurns || 30)
+      + ' 轮提醒，' + esc(pol.maxTurns || 60) + ' 轮自动换。'
+      + '<button type="button" class="ghost" data-ceo-session-reset="1" style="margin-left:8px">新建会话</button></div></div>';
+  }
+
   function renderAgents() {
-    $('agents-list').innerHTML = state.agents.length ? state.agents.map((a) => {
+    $('agents-list').innerHTML = (state.agents.length
+      ? renderCeoSession() + state.agents.map((a) => {
       const post = a.postTitle || a.displayName || a.agentId;
       const holder = a.holderName || '（未登记担任者）';
       const kind = a.holderKind ? '（' + (HOLDER_KIND_LABEL[a.holderKind] || a.holderKind) + '）' : '';
@@ -712,7 +730,7 @@
         ' · 额度 ' + esc(a.quotaUsed) + '/' + esc(a.quotaLimit) +
         ' · 最多接 ' + esc(a.maxDifficulty || 'hard') + ' · 席位 id ' + esc(a.agentId) + '</div></div>';
     }).join('')
-      : '<div class="empty">没有席位。</div>';
+      : renderCeoSession() + '<div class="empty">没有席位。</div>');
   }
 
   function renderSimple(id, items, emptyText) {
@@ -972,7 +990,10 @@
     }
     for (const n of [...state.notes].reverse().slice(0, 6)) {
       if (n.kind === 'approval') continue;
-      briefRows.push('<div class="row"><b>' + esc(n.title || '通知') + '</b>' +
+      // 摘要类通知只有标题就够；总经理的回话 / 报告正文才是内容本身，得显示出来。
+      const nbody = (n.scene === 'answer' || n.scene === 'brief') && n.body
+        ? '<pre class="brief">' + esc(String(n.body).slice(0, 1500)) + '</pre>' : '';
+      briefRows.push('<div class="row"><b>' + esc(n.title || '通知') + '</b>' + nbody +
         '<div class="meta">' + esc(n.at || '') + '</div></div>');
     }
     renderSimple('inbox-list', briefRows, '还没有简报。');
@@ -1090,7 +1111,7 @@
   }
 
   async function refresh() {
-    const [agents, tasks, runs, threads, approvals, audit, inbox, dashboard, bridge, recurring, quotas, changeRequests, observe, tuning, meta, gui, projects] =
+    const [agents, tasks, runs, threads, approvals, audit, inbox, dashboard, bridge, recurring, quotas, changeRequests, observe, tuning, meta, gui, projects, ceoSession] =
       await Promise.all([
         api('/api/agents'), api('/api/tasks'), api('/api/runs'), api('/api/threads'),
         api('/api/approvals'), api('/api/audit'), api('/api/inbox'), api('/api/dashboard'),
@@ -1100,8 +1121,11 @@
         // P6：老实例没有这两个端点，读不到就当没有，不影响其它面板。
         api('/api/meta').catch(() => null), api('/api/gui/state').catch(() => null),
         api('/api/projects').catch(() => []),
+        // 总经理会话（共用会话省钱，但得看得见它多长了）
+        api('/api/ceo-session').catch(() => null),
       ]);
     state = {
+      ceoSession,
       agents, tasks, runs, threads,
       // 审批单的申请内容在接口里是 requestJson 字符串；界面一律用 a.request。
       // 不在这层拆开，审批卡会渲染成一张「只有按钮、没有内容」的空单子（董事会根本没法拍）。
@@ -1167,6 +1191,18 @@
   }
 
   $('refresh-btn').addEventListener('click', () => refresh().catch((e) => say('request-msg', false, e.message)));
+
+  // 总经理会话换新：只影响下一轮投递，不打断正在跑的卡（adapter 里按会话排队）。
+  $('agents-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-ceo-session-reset]');
+    if (!btn) return;
+    if (!confirm('换一个新的总经理会话？当前会话不再追加，下一轮起用新会话；正在跑的卡不受影响。')) return;
+    btn.disabled = true;
+    post('/api/ceo-session/reset', { reason: '董事会手动新建' })
+      .then(() => refresh())
+      .catch((err) => say('request-msg', false, '换会话失败：' + err.message))
+      .finally(() => { btn.disabled = false; });
+  });
 
   // P6：看结果。用事件委托，避免每次重绘都要重新绑一堆 onclick。
   $('tasks-list').addEventListener('click', (e) => {

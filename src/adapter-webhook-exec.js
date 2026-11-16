@@ -18,6 +18,9 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CEO_OUTPUT_KINDS } from './enums.js';
+import {
+  DEFAULT_SESSION_POLICY, ensureCeoSession, recordSessionTurn, withSessionLock,
+} from './ceo-session.js';
 import { listOutputFiles } from './deliver.js';
 
 const DEFAULT_BASE = 'http://127.0.0.1:8080';
@@ -150,7 +153,8 @@ function buildPrompt(ctx) {
  * CEO 模式的提示词：把「你有员工、你只负责拆解与验收、你必须输出结构化 JSON」讲死。
  * 不给名册，CEO 就只能自己动手——这正是之前的毛病。
  */
-function buildCeoPrompt(ctx) {
+// 导出给测试用：提示词是 CEO 行为的唯一约束，改动了必须有断言盯着。
+export function buildCeoPrompt(ctx) {
   const task = ctx.task ?? {};
   const workRoot = ctx.workRoot ?? ctx.adapterConfig?.workRoot ?? '';
   const agents = Array.isArray(ctx.company?.agents) ? ctx.company.agents : [];
@@ -173,6 +177,13 @@ function buildCeoPrompt(ctx) {
   };
 
   const lines = [];
+  // 共用会话会带着历史：必须说清「历史是记录，不是这一轮的任务」。
+  // 不说这句，它会看到上一轮自己拆的卡，以为还没派，于是重派一遍。
+  lines.push(
+    '【会话】你和董事会的往来都在这一个会话里（为了命中缓存、省额度）。',
+    '你看到的历史是你自己前几轮的判断，那是记录，不是新指令：这一轮只处理下面这张卡，不要复述、不要重派已经派过的活。',
+    '',
+  );
   if (isReview) {
     lines.push(
       '你是 AICompany 的总经理，现在做**验收**——不是执行，也不要修改任何文件。',
@@ -228,6 +239,16 @@ function buildCeoPrompt(ctx) {
     for (const p of projects) {
       const where = p.rootDir ? `${p.rootDir}${p.deliverSubdir ? '/' + p.deliverSubdir : ''}` : '不自动落盘';
       lines.push(`- ${p.id}（${p.displayName ?? p.id}）→ ${where}${p.specExists ? '' : '｜【还没有规范，派活会被拒】'}`);
+      // 项目记忆是 CEO 判断「这项目现在缺什么」的唯一依据：只给项目名，它就只会说空话。
+      const memory = Array.isArray(p.recentMemory) ? p.recentMemory : [];
+      if (memory.length) {
+        for (const m of memory) {
+          const bits = [m.at, m.title, m.summary].filter(Boolean).join('｜');
+          lines.push(`    · 近事：${bits}${m.lesson ? `｜教训：${m.lesson}` : ''}`);
+        }
+      } else if (p.memoryCount > 0) {
+        lines.push(`    · 记忆 ${p.memoryCount} 条（最近几条读不出来，别猜内容）`);
+      }
     }
   } else {
     lines.push('（公司还没配项目）');
@@ -244,7 +265,8 @@ function buildCeoPrompt(ctx) {
     '【重要：项目没批之前不会开跑】',
     '如果这活归某个**还不存在**的项目，就照实在卡片里写 "project":"它的id"（哪怕它还没建），同时给 projectSuggestion。',
     '引擎会把这单**挂起等董事会**，子卡一张都不建；批了自动唤醒你重拆，拒了按一次性任务跑（产物只留公司）。',
-    '反过来：绝不为了「先跑起来」就把 project 留空——那会让产物、经验、交付全部落不到项目里，等于白干。',
+    '真的一次性活（干完就散、以后不会再做）**就该留空**：产物留在公司工作目录，不进任何项目，这是正常的；',
+    '但**本来属于某个项目的活**别偷懒留空——那会让产物、经验、交付全落不到项目里，等于白干。',
     '只是「以后可以单开一个项目」的建议，可以只写 projectSuggestion 不写 project，不会阻塞当前这单。',
     '',
     '【什么活要排班（循环任务）】',
@@ -255,12 +277,24 @@ function buildCeoPrompt(ctx) {
     '- instructions 要写成「每一轮照着做就能做完」的自足说明（不要写「同上」「按上次」）；acceptance 每轮都要能判死。',
     '- 已有项目里的长期工作，一定要写 project，否则那一轮产物不归这个项目。',
     '',
+    '【先判断：这条到底要不要派卡】',
+    '不是每条消息都是活。下面这些**直接回话，不要派卡**：',
+    '- 寒暄 / 确认 / 感谢（「你好」「收到」「辛苦了」）；',
+    '- 单纯咨询：问你现状、问你意见、问「这事能不能这么办」；',
+    '- 让你根据现有项目信息出主意：有什么可做的、下一步该盯什么；',
+    '- 你手上的信息（项目清单、近期记忆、审计）已经够答，不需要员工动手。',
+    '这类**不派卡**：type 照写 task-create，把 "tasks" 写成空数组 []，想说的话写进 summary（也可以另写 answer）。',
+    '为一句「你好」派一张卡，等于让员工干一件没必要干的活，还占住席位。',
+    '反过来：只要这活**需要产出东西**（文件、译稿、脚本、报告、跑命令），就必须派卡，别用空 tasks 假装干完了。',
+    '这类回话不建卡、不进项目、不再唤醒你；答复会原样送到董事会面前。',
+    '',
     '【怎么拆】',
     '- 一张卡能干完就别拆两张；跨工种 / 跨目录 / 有前后依赖才拆。最多 8 张。',
     '- 每张卡写清三样：title（一句话）、instructions（做什么、产物放哪、什么不要碰）、acceptance（怎么算过，要能判死）。',
     '- difficulty 取 easy / normal / hard，按员工接得住的程度标。',
     '',
     '【输出】只输出一个 JSON 对象，不要解释、不要多余文字：',
+    '{"type":"task-create","tasks":[],"summary":"给董事会的回话，可以多句"}   ← 只回话、不派卡时用这个',
     '{"type":"task-create","summary":"给董事会的一句话说明（含项目归属判断）",'
       + '"projectSuggestion":{"id":"kebab-case-id","displayName":"中文名","rootDir":null,"deliverSubdir":null,'
       + '"reason":"为什么值得单开","acceptance":["产物在哪个目录、怎么算过"],"rules":["必须遵守的规矩"]},'
@@ -270,6 +304,7 @@ function buildCeoPrompt(ctx) {
       + '"tasks":[{"title":"...","assignee":"岗位id","difficulty":"normal","project":"项目id","instructions":"...","acceptance":["..."],"after":[1]}]}',
     '- summary / projectSuggestion / recurringSuggestion / 卡片里的 project 都可省略；',
     '- 需要派活时 tasks 至少一张；**只排班不派卡**时把 "tasks" 写成空数组 []（别硬凑一张干活的卡）。',
+    '- **只回话**时：tasks 写 []，summary 写你的回话。写了 task-create 却没给任何一张带标题/指令的卡，也按回话处理（不会派活）。',
     '- **卡是串着做的就写 after**：after 填同批卡的序号（从 1 数，如 "after":[1] 表示等第 1 张做完）'
       + '或那张卡的标题。不写 = 几张卡同时开跑。'
       + '凡是「后一张必须用上前一张的成果」（先接管再定计划、先写脚本再发布）就一定要写 after，'
@@ -364,7 +399,7 @@ export function createWebhookExecAdapter(overrides = {}) {
     requestFn(base, endpoint, payload, { token: tk, timeoutMs: timeout });
 
   /** 投一棒并等这一轮结束：返回 { text, sessionId, turn }；出错抛异常（由调用方决定怎么收场）。 */
-  async function runTurn({ taskId, prompt, cwd, config = {}, label = '' }) {
+  async function runTurn({ taskId, prompt, cwd, sessionId = null, config = {}, label = '' }) {
     const base = config.baseUrl ?? baseUrl;
     const tk = config.token ?? token;
     const budget = Number(config.timeoutMs ?? timeoutMs);
@@ -373,6 +408,9 @@ export function createWebhookExecAdapter(overrides = {}) {
     try {
       submitted = unwrap(await call('/aiceo/api/task', {
         taskId, prompt, ...(cwd ? { cwd } : {}),
+        // 带上固定会话 = 命中前缀缓存（按量计费席位省的是真金白银）。
+        // 不带则服务端按 taskId 新建一个，每轮都要重新付一遍系统提示词的钱。
+        ...(sessionId ? { sessionId } : {}),
       }, Math.min(budget, 30000), base, tk), `${label}投递`);
     } catch (error) {
       throw new Error(`${label}投递失败：${error.message}`);
@@ -435,16 +473,34 @@ export function createWebhookExecAdapter(overrides = {}) {
     const taskId = ctx.task?.taskId ?? ctx.taskId;
     if (!taskId) throw new Error('缺 taskId，无法递给 webhook');
     const isReview = ctx.wakeReason === 'review_requested';
-    // 同一张卡的「拆解」和「验收」必须是两轮，所以会话键带轮次后缀：
+    // 同一张卡的「拆解」和「验收」必须是两轮，所以任务键带轮次后缀：
     // 插件对同名任务只做一次投递，重复用同一个键会拿回上一轮的旧结果。
+    // 但**会话是共用的**：任务键只用于取结果，sessionId 决定上下文与缓存。
     const key = `${taskId}-${isReview ? 'review' : 'plan'}`;
-    const done = await runTurn({
-      taskId: key,
-      prompt: buildCeoPrompt(ctx),
-      cwd: ctx.workRoot ?? ctx.adapterConfig?.workRoot ?? null,
-      config: { ...cfg, ...(ctx.adapterConfig ?? {}) },
-      label: 'CEO ',
-    });
+    const workRoot = ctx.workRoot ?? ctx.adapterConfig?.workRoot ?? null;
+    const agentId = ctx.agent?.id ?? 'ceo';
+    const policy = { ...DEFAULT_SESSION_POLICY, ...(ctx.interaction?.ceoSession ?? {}) };
+    const session = workRoot
+      ? ensureCeoSession(workRoot, agentId, policy)
+      : { sessionId: null };
+    // 一个会话同时只能跑一轮（否则服务端按 sessionId 收集文本会串台），这里排队。
+    const done = session.sessionId
+      ? await withSessionLock(session.sessionId, () => runTurn({
+        taskId: key,
+        prompt: buildCeoPrompt(ctx),
+        cwd: workRoot,
+        sessionId: session.sessionId,
+        config: { ...cfg, ...(ctx.adapterConfig ?? {}) },
+        label: 'CEO ',
+      }))
+      : await runTurn({
+        taskId: key,
+        prompt: buildCeoPrompt(ctx),
+        cwd: workRoot,
+        config: { ...cfg, ...(ctx.adapterConfig ?? {}) },
+        label: 'CEO ',
+      });
+    const after = workRoot ? recordSessionTurn(workRoot, agentId, { taskId }) : null;
     const parsed = extractJsonObject(done.text, (value) => CEO_OUTPUT_KINDS.includes(value.type));
     if (!parsed) {
       throw new Error(`CEO 没有给出可解析的 JSON（要 {"type":"task-create"|"review",…}）：${done.text.slice(0, 300)}`);
@@ -452,7 +508,12 @@ export function createWebhookExecAdapter(overrides = {}) {
     return {
       status: 'success',
       usage: { quotaUnits: 1, turn: done.turn },
-      sessionParams: { transport: 'webhook-exec', mode: 'ceo', sessionId: done.sessionId, turn: done.turn },
+      sessionParams: {
+        transport: 'webhook-exec', mode: 'ceo',
+        sessionId: done.sessionId ?? session.sessionId ?? null,
+        turn: done.turn,
+        sessionTurns: after?.turns ?? null,
+      },
       result: parsed,
     };
   }
