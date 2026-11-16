@@ -35,7 +35,8 @@ function desktopChannel() {
     send(message) {
       const scene = String(message?.scene ?? '');
       // answer：CEO 只回话不派卡时给你的答复 —— 你问了就得让你看见，别藏在看板里等你自己翻。
-      if (!['decision', 'project', 'recurring', 'difficulty', 'quota', 'approval', 'answer'].includes(scene)) return;
+      // pull：活排给了「人叫才醒」的席位 —— 不弹一下，董事会永远不会知道该开口叫人了。
+      if (!['decision', 'project', 'recurring', 'difficulty', 'quota', 'approval', 'answer', 'pull'].includes(scene)) return;
       pop(message.title ?? 'AICompany', message.body ?? '');
     },
     requestApproval(request) {

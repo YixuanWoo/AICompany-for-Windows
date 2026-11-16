@@ -2213,7 +2213,7 @@ export function createEngine({
     deliver_deferred: '等对方程序关掉再落盘',
   };
   function holdReasons() {
-    const rows = db.prepare(`SELECT taskId, status, dependsOn, waitingChildren FROM tasks
+    const rows = db.prepare(`SELECT taskId, status, dependsOn, waitingChildren, assignee FROM tasks
       WHERE status IN ('todo','in_progress','in_review','blocked','paused','awaiting_decision')`).all();
     const out = {};
     for (const row of rows) {
@@ -2236,6 +2236,14 @@ export function createEngine({
       const unmet = unmetDependencies(row);
       if (unmet.length) {
         out[row.taskId] = `等前置卡 ${unmet.map((x) => String(x).replace(/^T-/, '')).join('、')} 做完`;
+        continue;
+      }
+      // 拉模式席位（人叫才醒）的卡停在 todo，不是在等系统，是在等**那个人**来领。
+      // 不说这一句，看板上只剩「排队中」三个字 —— 董事会会以为系统坏了（真机上踩过）。
+      if (cfgFor(row.assignee)?.dispatch === 'pull'
+        && (row.status === 'todo' || row.status === 'in_progress')) {
+        const post = cfgFor(row.assignee)?.postTitle ?? row.assignee;
+        out[row.taskId] = `等「${post}」来领：该席位人叫才醒，不叫不会自己动`;
         continue;
       }
       const last = db.prepare(`SELECT action, newValue FROM audit WHERE taskId = ?
@@ -2267,6 +2275,43 @@ export function createEngine({
   const doneMessageOf = new Map(); // taskId → msgId，落盘成功后回来补一句「放哪了」
   // 已经用别的形式说过话的卡（比如总经理只回话不派活）：卡照样转 done，但不再重复播报。
   const boardSilent = new Set();
+
+  /**
+   * 卡排进「人叫才醒」的席位手里时，必须主动说一句。
+   *
+   * 为什么：拉模式席位（工程岗）没有常驻进程，卡会一直停在 todo。以前这里只写一条审计，
+   * 董事会在看板上看到的只有「排队中」三个字 —— 他以为系统坏了，实际上在等他开口叫人。
+   * 一条消息讲清三件事：谁派的、为什么停着、怎么让它动。
+   */
+  function notePullWaiting(task, seat) {
+    try {
+      // 同一张卡只提醒一次：反复排队（打回重做、依赖放行）不该刷满消息区。
+      const dup = db.prepare(`SELECT 1 AS n FROM board_messages
+        WHERE taskId = ? AND kind = 'notice' AND title LIKE '等你领%' LIMIT 1`).get(task.taskId);
+      if (dup) return null;
+      const post = cfgFor(seat)?.postTitle ?? seat;
+      const assigner = task.assignerId ?? task.assignedBy;
+      const who = (!assigner || assigner === 'human' || assigner === 'board')
+        ? '你' : (cfgFor(assigner)?.postTitle ?? assigner);
+      const msg = recordMessage(db, {
+        from: 'system', kind: 'notice', taskId: task.taskId, project: task.project ?? null,
+        title: `等你领：${String(task.title ?? '(无标题)').slice(0, 50)}`,
+        body: [
+          `${who}把这张卡交给了「${post}」，现在停在队列里。`,
+          `它不是坏了——这个席位是「人叫才醒」的：没有常驻进程，不叫它这张卡不会自己动。`,
+          '',
+          '让它动：在对话框里说一句「领活」就行（或跑 npm run seat -- inbox）。',
+        ].join('\n'),
+      });
+      notifier.send({
+        title: `有活等「${post}」来领`,
+        body: `「${String(task.title ?? '').slice(0, 60)}」——说一句「领活」它就到手。`,
+        scene: 'pull', taskId: task.taskId,
+      });
+      return msg;
+    } catch { /* 提醒是旁路：写不进去不能让卡本身出问题 */ }
+    return null;
+  }
 
   function noteBoardMessage(taskId, to, actor = 'control-plane', runId = null) {
     try {
@@ -3392,6 +3437,8 @@ export function createEngine({
             // 带上 taskId：按卡追溯时这是唯一入口，漏了就得靠字符串搜 newValue。
             taskId: task.taskId,
           });
+          // 排队必须出声：拉模式席位不叫不动，静默排队等于把活扔进黑洞。
+          notePullWaiting(task, seat);
           return;
         }
       }
