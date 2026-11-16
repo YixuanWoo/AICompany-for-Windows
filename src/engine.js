@@ -22,6 +22,10 @@ import {
 } from './difficulty.js';
 import { createApproval, getApproval, listApprovals, closeApproval, pendingApprovals, stampRequestPayload } from './approvals.js';
 import { buildSnapshot } from './snapshot.js';
+import {
+  assertProject, buildProjectContext, buildMemoryRecord, appendMemory,
+  listProjects as listProjectEntries, memoryLimitOf,
+} from './projects.js';
 
 export function createNotifier(kind = 'web') {
   // P4-6：可传单个通道名或数组；web / noop / stdout 内置，im / webhook 需显式地址。
@@ -73,6 +77,7 @@ export function createEngine({
       .get(taskId, row.revision) ?? {};
     return {
       ...row,
+      project: row.project ?? null,
       instructions: payload.instructions,
       acceptance: JSON.parse(payload.acceptanceJson ?? '[]'),
       input: JSON.parse(payload.inputJson ?? '{}'),
@@ -86,7 +91,7 @@ export function createEngine({
     addressedTo = null, assignedBy = 'human', instructions = '按 brief 执行并写出完成报告。',
     acceptance = ['completion.json 通过 schema 校验且 status = success'],
     parentTaskId = null, taskId = `T-${shortId()}`, status = 'todo',
-    threadId = null, assignerId = null, difficulty = DEFAULT_DIFFICULTY,
+    threadId = null, assignerId = null, difficulty = DEFAULT_DIFFICULTY, project = null,
   }) {
     // P4-3：agent 之间派活只能派进自己的汇报子树；人是董事会，不受此限（§7.4）。
     if (assignerId && assignerId !== assignee) {
@@ -100,7 +105,8 @@ export function createEngine({
       cc: mode === 'direct' && assignee !== ceoId() ? [ceoId()] : [],
       assignedBy, threadId: threadId ?? null, assignee,
       reportsTo: cfgFor(assignee)?.reportsTo ?? null,
-      status, priority: 'normal', difficulty: normalizeDifficulty(difficulty), createdAt: nowIso(), lease: null,
+      status, priority: 'normal', difficulty: normalizeDifficulty(difficulty), project,
+      createdAt: nowIso(), lease: null,
       budget: { maxRuns: 3, maxMinutes: 30, quotaUnits: 1 },
       input: { files: [] }, instructions, acceptance,
       completionReportPath: 'output/completion.json',
@@ -113,12 +119,12 @@ export function createEngine({
     if (!checked.ok) throw new Error(`任务卡不合法：${checked.errors.join('; ')}`);
     db.prepare(`INSERT INTO tasks
       (taskId, requestId, parentTaskId, title, role, assignee, status, mode, addressedTo,
-       assignedBy, revision, threadId, attempt, priority, difficulty, createdAt, updatedAt, originJson)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`).run(
+       assignedBy, revision, threadId, attempt, priority, difficulty, project, createdAt, updatedAt, originJson)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`).run(
       card.taskId, card.requestId, card.parentTaskId, card.title, card.role,
       card.assignee, card.status, card.mode, card.addressedTo, card.assignedBy,
       card.revision, card.threadId, card.priority, normalizeDifficulty(card.difficulty),
-      card.createdAt, card.createdAt, JSON.stringify(card.origin ?? null),
+      card.project ?? null, card.createdAt, card.createdAt, JSON.stringify(card.origin ?? null),
     );
     db.prepare(`INSERT INTO task_payload
       (taskId, revision, instructions, acceptanceJson, completionReportPath, inputJson)
@@ -473,6 +479,10 @@ export function createEngine({
 
     // G3：难度是任务卡的属性；人给的原始需求默认 normal，非法值直接报错（不静默当 normal）。
     const difficulty = normalizeDifficulty(req.difficulty, { field: 'difficulty' });
+    // P7：配了项目就必选，而且规范文件必须在。**不靠 CEO 猜项目** ——
+    // 猜错的代价是产物落进别人工地，比让人多选一次贵得多。
+    const picked = assertProject({ config, workRoot: workDir, requested: req.project ?? null });
+    const project = picked.project;
 
     let target;
     let assignedBy = 'human';
@@ -503,9 +513,12 @@ export function createEngine({
       // （真机上第一次投产就踩到：产物内容跟需求无关）。
       instructions: req.instructions ?? (req.text ? String(req.text) : undefined),
       acceptance: req.acceptance ?? undefined, difficulty,
+      project,
     });
     insertCard(card, target);
-    return { requestId, taskId: card.taskId, mode, target, assignedBy, taskCreated: true, difficulty };
+    return {
+      requestId, taskId: card.taskId, mode, target, assignedBy, taskCreated: true, difficulty, project,
+    };
   }
 
   // 人工取消：契约里早有 POST /api/tasks/:id/cancel，服务器一直没实现。
@@ -684,6 +697,9 @@ export function createEngine({
   // 4 秒、8 秒、12 秒…… 单次最多 20 秒，试满 12 次（约 3 分钟）就交回维护心跳。
   const gateRetries = new Map();
   const GATE_RETRY_MAX = 12;
+  // P7：报告通过 schema 后先攒着，等这张卡**真的**到 done 才落记忆。
+  // （先落的话，CEO 打回重做的那次也会留一条「成功记忆」，等于把废稿写进教科书。）
+  const pendingMemory = new Map();
   // 只有「等一会儿就会好」的原因才自动重试。时段闸不算：差几个小时，重试没有意义。
   const TRANSIENT_GATE = new Set(['user-active', 'paused', 'session-locked']);
   let gateRetrySeq = 0;
@@ -829,13 +845,21 @@ export function createEngine({
     }
     // 真派下去了：之前排的「等会儿再试」就作废，否则等会儿会拿一张已经在跑的卡再投一次。
     clearGateRetry(taskId);
+    // P7：项目规范 + 最近记忆随 brief 一起下发。规范在派活前已校验过存在；
+    // 这里读盘失败也不阻断（brief 少一段总比整单派不出去好），但要在审计里看得见。
+    const projectContext = task?.project
+      ? buildProjectContext({ workRoot: workDir, config, id: task.project })
+      : null;
     const ctx = {
       runId, wakeReason, taskId,
       task: task ? {
         taskId: task.taskId, title: task.title, mode: task.mode, status: task.status,
         revision: task.revision, attempt: task.attempt, instructions: task.instructions,
         acceptance: task.acceptance, parentTaskId: task.parentTaskId,
+        project: task.project ?? null,
       } : null,
+      // 项目上下文单独给一份：adapter 拿它拼提示词，process/http 型也照此透传给真模型。
+      project: projectContext,
       agent: {
         id: agentId, isCEO: Boolean(agentRow?.isCEO),
         capabilities: JSON.parse(agentRow?.capabilities ?? '[]'),
@@ -932,7 +956,7 @@ export function createEngine({
       mode: 'delegate', assignedBy: 'ceo',
       instructions: result.instructions ?? undefined,
       acceptance: result.acceptance ?? undefined, parentTaskId: task.taskId,
-      difficulty,
+      difficulty, project: task.project ?? null,
     });
     insertCard(child, child.assignee);
     if (task.status === 'in_progress' || task.status === 'todo') {
@@ -1080,6 +1104,7 @@ export function createEngine({
         instructions: d.newInstructions ?? task.instructions,
         acceptance: d.newAcceptance ?? task.acceptance, parentTaskId: task.taskId,
         assignerId: cfgFor(d.decidedBy) ? d.decidedBy : null,
+        project: task.project ?? null,
       });
       insertCard(child, child.assignee);
       transition(db, task.taskId, 'cancelled', d.decidedBy);
@@ -1231,7 +1256,7 @@ export function createEngine({
             role: child.role ?? 'general', assignee: child.assignee, mode: 'delegate',
             assignedBy: 'ceo', parentTaskId: task.taskId,
             instructions: child.instructions, acceptance: child.acceptance,
-            assignerId: ceoId(),
+            assignerId: ceoId(), project: task.project ?? null,
           });
           insertCard(card, card.assignee);
         }
@@ -1349,6 +1374,39 @@ export function createEngine({
     });
   }
 
+  // P7：卡真的到 done 才落记忆。元数据由引擎补，员工只能影响「本次新增的这一条」。
+  function flushProjectMemory(task, runId) {
+    const report = pendingMemory.get(task?.taskId);
+    pendingMemory.delete(task?.taskId);
+    if (!task?.project) return null;
+    try {
+      const built = buildMemoryRecord({
+        task, report, agentId: task.assignee ?? null, at: clockIso(),
+      });
+      if (!built.ok) {
+        // 校验不过只留审计、不入库：记忆宁缺毋滥，写花了不污染库。
+        writeAudit(db, {
+          actor: task.assignee ?? 'control-plane', action: 'memory_rejected',
+          newValue: String(built.error).slice(0, 300), runId, taskId: task.taskId,
+        });
+        return null;
+      }
+      appendMemory(workDir, task.project, built.record);
+      writeAudit(db, {
+        actor: 'control-plane', action: 'memory_written',
+        newValue: `${task.project}|${built.record.lessons.length} 条教训 / ${built.record.nextHints.length} 条下次`.slice(0, 300),
+        runId, taskId: task.taskId,
+      });
+      return built.record;
+    } catch (error) {
+      writeAudit(db, {
+        actor: 'control-plane', action: 'memory_write_failed',
+        newValue: String(error.message).slice(0, 300), runId, taskId: task.taskId,
+      });
+      return null;
+    }
+  }
+
   async function handleResult(outcome, task, agentId, payload) {
     const result = outcome.result ?? {};
     // 卡在跑的过程中被人工取消：结果照样留档，但不再推进状态机。
@@ -1434,6 +1492,7 @@ export function createEngine({
         const child = buildCard({
           requestId: task.requestId, ...childSpec,
           mode: 'delegate', assignedBy: 'ceo', parentTaskId: task.taskId, assignerId: ceoId(),
+          project: task.project ?? null,
         });
         insertCard(child, child.assignee);
         transition(db, task.taskId, 'in_review', 'ceo', outcome.runId);
@@ -1441,6 +1500,8 @@ export function createEngine({
       } else if (result.type === 'review') {
         if (result.verdict === 'pass') {
           transition(db, task.taskId, 'done', 'ceo', outcome.runId);
+          // CEO 放行了才算这张卡真的收账，这时才把这次的经验写进项目记忆。
+          flushProjectMemory(task, outcome.runId);
         } else {
           transition(db, task.taskId, 'in_progress', 'ceo', outcome.runId);
           emitEvent({
@@ -1476,11 +1537,14 @@ export function createEngine({
       }
       return;
     }
+    // 报告合格：先攒下这份报告，等卡到 done 再落项目记忆（打回重做的不算数）。
+    pendingMemory.set(task.taskId, report);
     transition(db, task.taskId, 'in_review', 'control-plane', outcome.runId);
     if (task.mode === 'direct') {
       // 直投跳过 CEO：验收条件由人写清、机器判定，合格即完成，不产生 CEO 的 Run。
       transition(db, task.taskId, 'done', 'control-plane', outcome.runId);
       writeAudit(db, { actor: 'human', action: 'machine_acceptance', newValue: task.taskId, runId: outcome.runId });
+      flushProjectMemory(task, outcome.runId);
       return;
     }
     // 按 Run 去重：同一次执行的报告只请一次验收，但返工后的新 Run 可以再请一次。
@@ -1732,6 +1796,13 @@ export function createEngine({
     workRoot: workDir,
     threadById, postThreadMessage, acceptCompletion,
     bridgeOnline: (agentId) => isBridgeOnline(db, agentId),
+    // P7：项目层。项目清单由引擎给（规范在不在、记忆有几条），看板 / CLI 不用自己猜路径。
+    listProjects: () => listProjectEntries({ config, workRoot: workDir }),
+    projectFor: (id) => {
+      const found = listProjectEntries({ config, workRoot: workDir }).find((p) => p.id === id);
+      if (!found) return null;
+      return { ...found, memoryLimit: memoryLimitOf(config, id) };
+    },
     submit, pump, route, emitEvent, wake, submitChangeRequest, onProgressReport,
     cancelTask,
     reconcile,

@@ -4,6 +4,7 @@
 //   npm run task -- "写一份本周工作简报"
 //   npm run task -- "把 output 里的周报改成 200 字" --wait
 //   npm run task -- "这个难活" --difficulty hard --to doubao
+//   npm run task -- "把第三章译完" --project benny --wait
 //
 // 为什么要有它：控制面已经有 REST 接口，但「天天用」的门槛是**记不住 curl 和字段**。
 // 这里只做三件事：拼请求、打印任务号、可选地等到出结果并把产物摘要打出来。
@@ -16,6 +17,7 @@ function usage() {
     '用法：npm run task -- "一句话需求" [选项]',
     '',
     '选项：',
+    '  --project <项目>   项目 id（只配了一个项目时可省）；规范与经验跟着项目走',
     '  --to <席位>        指定的执行席位（只有一个执行席位时可省）',
     '  --mode <模式>      direct（默认）| delegate',
     '  --difficulty <档>  easy | normal（默认）| hard',
@@ -29,7 +31,7 @@ function usage() {
 
 function parseArgs(argv) {
   const opts = {
-    text: '', to: null, mode: null, difficulty: 'normal', title: null,
+    text: '', to: null, mode: null, difficulty: 'normal', title: null, project: null,
     wait: false, timeoutSec: 1800, port: DEFAULT_PORT, json: false,
   };
   const words = [];
@@ -42,6 +44,7 @@ function parseArgs(argv) {
       return value;
     };
     if (arg === '--help' || arg === '-h') { opts.help = true; continue; }
+    if (arg === '--project') { opts.project = next(); continue; }
     if (arg === '--to') { opts.to = next(); continue; }
     if (arg === '--mode') { opts.mode = next(); continue; }
     if (arg === '--difficulty') { opts.difficulty = next(); continue; }
@@ -101,6 +104,22 @@ async function main() {
   }
 
   const mode = opts.mode ?? meta.defaultMode ?? 'direct';
+  // P7：配了项目就必选。只配了一个时替人填上，但**打出来**——不然人会以为产物会落到别处。
+  const projects = Array.isArray(meta.projects) ? meta.projects : [];
+  let project = opts.project;
+  if (!project && projects.length === 1) project = projects[0].id;
+  if (!project && projects.length > 1) {
+    console.error(`有 ${projects.length} 个项目，请用 --project 指定：${projects.map((p) => `${p.id}（${p.displayName}）`).join(' / ')}`);
+    process.exit(2);
+  }
+  if (project && projects.length && !projects.some((p) => p.id === project)) {
+    console.error(`没有这个项目：${project}；可用：${projects.map((p) => p.id).join(', ')}`);
+    process.exit(2);
+  }
+  const projectLabel = project
+    ? (projects.find((p) => p.id === project)?.displayName ?? project)
+    : null;
+
   const execSeats = (meta.seats ?? []).filter((s) => !s.isCEO);
   let target = opts.to;
   if (!target && mode === 'direct') {
@@ -116,7 +135,8 @@ async function main() {
 
   if (!opts.json) {
     const paused = meta.guiPaused ? '（注意：GUI 席位当前是暂停状态，会在恢复后自动跑）' : '';
-    console.log(`下单 → ${mode}${target ? ' / ' + target : ''} 难度 ${opts.difficulty}${paused}`);
+    const where = projectLabel ? `项目 ${projectLabel}（${project}）` : '未配项目';
+    console.log(`下单 → ${where} · ${mode}${target ? ' / ' + target : ''} 难度 ${opts.difficulty}${paused}`);
   }
 
   const body = {
@@ -125,6 +145,7 @@ async function main() {
     mode,
     difficulty: opts.difficulty,
   };
+  if (project) body.project = project;
   if (target) body.addressedTo = target;
 
   let submitted;

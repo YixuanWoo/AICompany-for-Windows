@@ -123,6 +123,8 @@
         <input id="title" placeholder="例如：整理本周简报" autocomplete="off">
         <label for="text">需求内容</label>
         <textarea id="text" placeholder="一句话说清要什么">写一份本周工作简报</textarea>
+        <label for="project">项目（规范与经验跟着项目走，建卡必选）</label>
+        <select id="project"><option value="">（未配置项目）</option></select>
         <label for="mode">交互模式（§6C）</label>
         <select id="mode">
           <option value="delegate">delegate · 交给 CEO 统筹拆活</option>
@@ -752,6 +754,14 @@
     const mode = meta.defaultMode || 'delegate';
     if ($('mode').querySelector('option[value="' + mode + '"]')) $('mode').value = mode;
     const execSeats = (meta.seats || []).filter((s) => !s.isCEO && (s.capabilities || []).includes('execute'));
+    // P7：项目下拉。只有一个项目时直接选上，但字面留着——让人看得见这次归哪个项目。
+    const projects = meta.projects || [];
+    setOptions('project', projects.map((p) => '<option value="' + esc(p.id) + '">' +
+      esc(p.displayName) + '（' + esc(p.id) + '）' +
+      (p.memoryCount ? ' · 已记 ' + p.memoryCount + ' 条经验' : ' · 还没有经验') +
+      (p.specExists ? '' : ' · 缺规范') + '</option>').join(''),
+    projects.length ? '（必选一个项目）' : '（本公司未配置项目）');
+    if (projects.length === 1) $('project').value = projects[0].id;
     if (mode === 'direct' && execSeats.length === 1) {
       const only = execSeats[0].agentId;
       if ($('addressedTo').querySelector('option[value="' + only + '"]')) $('addressedTo').value = only;
@@ -847,6 +857,14 @@
       const mode = $('mode').value;
       const body = { title: $('title').value.trim() || undefined, text: $('text').value.trim() || '新需求', mode };
       if (mode !== 'cowork') body.difficulty = $('difficulty').value;
+      // P7：建卡必选项目。人在这一屏就能看见产物会归到哪个项目，不靠引擎猜。
+      if (mode !== 'cowork') {
+        const project = $('project') ? $('project').value : '';
+        if (!project && (state.meta?.projects || []).length) {
+          throw new Error('先在「项目」里选一个：产物归到项目，经验也记进这个项目。');
+        }
+        if (project) body.project = project;
+      }
       const target = $('addressedTo').value;
       if (mode === 'direct') {
         if (!target) throw new Error('direct 模式必须先在「交付给」里指名一个席位（cc 不能代替交付）。');

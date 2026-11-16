@@ -251,7 +251,11 @@ export function createGuiAdapter(options = {}) {
     }
 
     try {
-      const rendered = renderPrompt({ task: { ...(ctx.task ?? {}), taskId }, paths, config });
+      const rendered = renderPrompt({
+        task: { ...(ctx.task ?? {}), taskId }, paths, config,
+        // P7：项目规范 + 最近经验拼在硬性要求之前；没项目时是空串。
+        projectContext: ctx.project?.contextText ?? '',
+      });
       const steps = normalizeSteps(config);
       writeTaskBundle(paths, { task: { ...(ctx.task ?? {}), taskId, runId }, prompt: rendered.prompt });
 

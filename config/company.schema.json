@@ -65,6 +65,29 @@
         }
       }
     },
+    "projects": {
+      "type": "object",
+      "description": "P7 项目层：配了项目就「下单必选项目」。规范与记忆都落在 <workRoot>/projects/<id>/ 下，项目文件夹只出交付物。",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "archiveDir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "memoryLimit": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 50
+          }
+        }
+      }
+    },
     "company": {
       "type": "object",
       "properties": {

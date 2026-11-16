@@ -25,6 +25,8 @@ export const DEFAULT_PROMPT_TEMPLATE = [
   '任务说明：{{instructions}}',
   '验收条件：{{acceptance}}',
   '',
+  '{{projectContext}}',
+  '',
   '完成后必须把完成报告写到这个绝对路径：{{reportPath}}',
   '报告字段必须是 aicompany.completion/v1 的固定结构：schema / taskId / runId / agent /',
   'revision / status / summary / artifacts / checksum / acceptanceResults / usage / finishedAt。',
@@ -50,15 +52,21 @@ export const DRAFT_PROMPT_TEMPLATE = [
   '任务说明：{{instructions}}',
   '验收条件：{{acceptance}}',
   '',
+  '{{projectContext}}',
+  '',
   '【硬性要求，逐条照做】',
   '1. 所有产物只能写进这个目录（绝对路径）：{{outputDir}}',
   '2. {{noScreenOnly}}',
   '3. 写完后，把这份极简报告写到：{{taskDir}}\\report.draft.json',
-  '   只允许这三个字段，不要加别的：',
+  '   允许的字段如下（前两个必填，后两个可选），不要加别的：',
   '   {',
   '     "status": "success",',
-  '     "summary": "一句话说明你做了什么、产出是哪个文件"',
+  '     "summary": "一句话说明你做了什么、产出是哪个文件",',
+  '     "lessons": ["这次踩的坑 / 怎么绕过去的（最多 8 条，每条一句话）"],',
+  '     "nextHints": ["下一单同类活开工前该注意什么（最多 8 条）"]',
   '   }',
+  '   lessons / nextHints 会写进公司对该项目的长期记忆，下一单的同事开工前会读到；',
+  '   写具体、可操作的经验，不要写「做得不错」这类空话。',
   '   做不到就把 status 写成 failed 或 blocked，并加一个 "reason" 字段说明原因。',
   '4. 不要自己算校验和，也不要写 {{reportPath}} —— 那份正式报告由控制面根据你的产物自动生成。',
   '',
@@ -66,7 +74,7 @@ export const DRAFT_PROMPT_TEMPLATE = [
   '变更请求写到这个目录：{{changeRequestsDir}}',
 ].join('\n');
 
-export function promptSlotValues({ task = {}, paths = {}, config = {} }) {
+export function promptSlotValues({ task = {}, paths = {}, config = {}, projectContext = '' }) {
   return {
     taskId: task.taskId ?? '(缺 taskId)',
     taskDir: paths.taskDir ?? '(缺 taskDir)',
@@ -77,6 +85,8 @@ export function promptSlotValues({ task = {}, paths = {}, config = {} }) {
     reportsTo: task.reportsTo ?? config.reportsTo ?? '(沿汇报线)',
     instructions: task.instructions ?? '(见 brief.md)',
     acceptance: Array.isArray(task.acceptance) ? task.acceptance.join('；') : String(task.acceptance ?? ''),
+    // P7：项目规范 + 最近经验。没项目时是空串（模板里那一行会留白，不影响阅读）。
+    projectContext: String(projectContext ?? '').trim(),
     noScreenOnly: '不要只在屏幕上回复「已完成」，必须把报告写到指定文件',
     changeRequestHint: '发现方向不对 / 范围要改时，不要只在屏幕上说明，写 change-requests/<crId>.json',
   };
@@ -94,13 +104,18 @@ export function assertPromptComplete(prompt, values) {
   return { ok: true, slots: REQUIRED_PROMPT_SLOTS.length };
 }
 
-export function renderPrompt({ task = {}, paths = {}, config = {} } = {}) {
-  const values = promptSlotValues({ task, paths, config });
+export function renderPrompt({ task = {}, paths = {}, config = {}, projectContext = '' } = {}) {
+  const values = promptSlotValues({ task, paths, config, projectContext });
   // reportMode: 'draft' 时换成「只写 draft」的模板；默认仍是要求完整 completion.json 的那份。
   let prompt = config.promptTemplate
     ?? (config.reportMode === 'draft' ? DRAFT_PROMPT_TEMPLATE : DEFAULT_PROMPT_TEMPLATE);
+  const templateHasContextSlot = String(prompt).includes('{{projectContext}}');
   for (const [slot, value] of Object.entries(values)) {
     prompt = String(prompt).replaceAll(`{{${slot}}}`, String(value));
+  }
+  // 自定义模板没写这个槽位：不能因此把项目规范悄悄吞掉 —— 补在末尾，让人一眼看得见。
+  if (!templateHasContextSlot && values.projectContext) {
+    prompt = `${prompt}\n\n${values.projectContext}`;
   }
   // 模板里出现未渲染的槽位说明配置写错了，也要拒绝。
   const leftover = /\{\{([^}]+)\}\}/.exec(prompt);

@@ -101,6 +101,8 @@ export const API_ENDPOINTS = Object.freeze([
   { method: 'GET', path: '/api/gui/state', purpose: 'GUI 席位状态：暂停开关 / 闸门参数 / 跨进程锁占用', section: '§8.3 / P6' },
   { method: 'POST', path: '/api/gui/pause', purpose: '暂停或恢复 GUI 席位抢键鼠（不取消已排的卡）', section: '§8.3 / P6' },
   { method: 'GET', path: '/api/meta', purpose: '公司默认模式 / 席位清单 / GUI 暂停状态（看板初始化用）', section: '§6B.8 / P6' },
+  // P7 增量：项目层（规范与记忆都在公司文件夹内，项目文件夹只出交付物）。
+  { method: 'GET', path: '/api/projects', purpose: '项目清单：规范在不在、记忆几条、归档目录授权了没', section: 'P7 / P7-1' },
 ]);
 
 export const WEB_BOARD_P2_PANELS = Object.freeze([

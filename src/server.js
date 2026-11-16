@@ -317,21 +317,29 @@ export function createServer({
         const q = url.searchParams;
         const routes = {
           // P6：看板要知道「这家公司默认怎么派活、有哪些席位」，否则每次都得手选模式。
-          '/api/meta': () => ({
-            company: engine.config?.company?.name ?? null,
-            defaultMode: engine.config?.interaction?.defaultMode ?? 'delegate',
-            defaultTarget: engine.config?.interaction?.defaultTarget ?? null,
-            seats: (engine.config?.agents ?? []).map((a) => ({
-              agentId: a.id,
-              displayName: a.displayName ?? a.id,
-              isCEO: Boolean(a.isCEO),
-              capabilities: a.capabilities ?? [],
-              gui: a.adapter?.type === 'gui-template',
-              maxDifficulty: a.maxDifficulty ?? 'hard',
-            })),
-            guiPaused: readPauseFlag(pauseFile).paused,
-            guiSeats: guiSeats.map((s) => s.agentId),
-          }),
+          '/api/meta': () => {
+            const projects = engine.listProjects();
+            return {
+              company: engine.config?.company?.name ?? null,
+              defaultMode: engine.config?.interaction?.defaultMode ?? 'delegate',
+              defaultTarget: engine.config?.interaction?.defaultTarget ?? null,
+              seats: (engine.config?.agents ?? []).map((a) => ({
+                agentId: a.id,
+                displayName: a.displayName ?? a.id,
+                isCEO: Boolean(a.isCEO),
+                capabilities: a.capabilities ?? [],
+                gui: a.adapter?.type === 'gui-template',
+                maxDifficulty: a.maxDifficulty ?? 'hard',
+              })),
+              guiPaused: readPauseFlag(pauseFile).paused,
+              guiSeats: guiSeats.map((s) => s.agentId),
+              // P7：配了项目就「下单必选项目」，看板得知道有哪些、默认选哪个。
+              projects,
+              defaultProject: projects.length === 1 ? projects[0].id : null,
+            };
+          },
+          // P7：项目一览（规范在不在、记忆几条）——看板项目面板与 CLI 都读它。
+          '/api/projects': () => engine.listProjects(),
           '/api/agents': () => engine.getAgentCandidates(),
           '/api/quotas': () => engine.getQuotas(),
           '/api/tasks': () => engine.getTasks(),
@@ -413,7 +421,11 @@ export function createServer({
       }
       json(res, 404, { error: `没有这个端点：${method} ${pathname}` });
     } catch (error) {
-      json(res, 400, { error: String(error.message ?? error) });
+      // 项目相关的拒绝要能被前端识别（缺项目 / 未知项目 / 缺规范），所以带上 code 与可选列表。
+      const body = { error: String(error.message ?? error) };
+      if (error?.code) body.code = error.code;
+      if (Array.isArray(error?.available)) body.available = error.available;
+      json(res, Number.isInteger(error?.status) ? error.status : 400, body);
     }
   });
 

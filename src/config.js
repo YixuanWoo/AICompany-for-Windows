@@ -9,6 +9,7 @@ import { validateAgainstSchema } from './schema-validator.js';
 import { readOverrides, applyOverrides } from './tune.js';
 import { ADAPTER_TYPES, CLIENT_TYPES, NOTIFIER_TYPES, DEFAULTS, isPlainObject } from './enums.js';
 import { ceilingOf } from './difficulty.js';
+import { PROJECT_ID_RE, DEFAULT_MEMORY_LIMIT, projectSpecPath, readProjectSpec } from './projects.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -98,6 +99,33 @@ export function applyConfigRules(config) {
   for (const notifier of config.notifier || []) {
     if (!NOTIFIER_TYPES.includes(notifier)) errors.push(`未知 notifier 项：${notifier}`);
   }
+  // P7：项目 id 直接当目录名用，必须是安全文件名；archiveDir 要跨盘，必须绝对路径。
+  const projects = config.projects;
+  if (projects !== undefined) {
+    if (!isPlainObject(projects)) {
+      errors.push('projects 必须是「项目 id → 配置」的对象');
+    } else {
+      for (const [id, entry] of Object.entries(projects)) {
+        if (!PROJECT_ID_RE.test(id)) {
+          errors.push(`projects.${id}：项目 id 只能是小写字母 / 数字 / - / _，且以字母数字开头（它会被当成目录名）`);
+        }
+        if (entry !== null && entry !== undefined && !isPlainObject(entry)) {
+          errors.push(`projects.${id} 必须是对象或留空`);
+          continue;
+        }
+        const archiveDir = entry?.archiveDir;
+        if (archiveDir !== undefined && archiveDir !== null && archiveDir !== '') {
+          if (typeof archiveDir !== 'string' || !path.isAbsolute(archiveDir)) {
+            errors.push(`projects.${id}.archiveDir 必须是绝对路径（归档要写到公司文件夹之外）`);
+          }
+        }
+        const limit = entry?.memoryLimit;
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 0 || limit > 50)) {
+          errors.push(`projects.${id}.memoryLimit 必须是 0–50 的整数`);
+        }
+      }
+    }
+  }
   return errors;
 }
 
@@ -134,7 +162,13 @@ export function normalizeConfig(config) {
   const agents = (config.agents || []).map((agent) => ({
     ...agent, maxDifficulty: ceilingOf(agent),
   }));
-  return { ...config, agents, interaction, quota, gates, decision, runPolicy };
+  // P7：项目配置补默认值（显示名、记忆条数）；archiveDir 不填就是「还没有授权归档目录」。
+  const projects = Object.fromEntries(Object.entries(config.projects ?? {}).map(([id, entry]) => [id, {
+    displayName: entry?.displayName ?? id,
+    archiveDir: entry?.archiveDir ?? null,
+    memoryLimit: entry?.memoryLimit ?? DEFAULT_MEMORY_LIMIT,
+  }]));
+  return { ...config, agents, projects, interaction, quota, gates, decision, runPolicy };
 }
 
 export function doctor(config) {
@@ -162,6 +196,20 @@ export function doctor(config) {
     ok: (config.clients || []).includes('web') && (config.notifier || []).includes('noop'),
     detail: `clients=${(config.clients || []).join('+')} notifier=${(config.notifier || []).join('+')}`,
   });
+  // P7：配了项目就得有规范文件——没有规范的「项目」派活时会被拒，不如启动时就说清。
+  const projectIds = Object.keys(config.projects ?? {});
+  if (projectIds.length) {
+    const bad = config.workRoot
+      ? projectIds.filter((id) => !readProjectSpec(config.workRoot, id).ok)
+      : [];
+    checks.push({
+      name: '每个项目都有 project.yaml',
+      ok: bad.length === 0,
+      detail: config.workRoot
+        ? (bad.length ? `缺规范：${bad.join(', ')}` : `${projectIds.length} 个项目齐备（${projectIds.join(', ')}）`)
+        : `未配 workRoot，跳过文件检查（${projectIds.join(', ')}）`,
+    });
+  }
   return { ok: checks.every((c) => c.ok), checks };
 }
 

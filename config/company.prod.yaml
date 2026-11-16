@@ -16,6 +16,14 @@ company:
   timezone: Asia/Shanghai
 # 生产产物与演示实例（work/）分开，互不干扰。
 workRoot: D:/开源/AICompany/work-prod
+# P7 项目层：配了项目就「建卡必选项目」。
+# 规范与记忆都在 work-prod/projects/<id>/ 下（公司文件夹 = 大脑），
+# 你的项目文件夹（工地上）只放交付物，而且必须先授权 archiveDir 引擎才会往里写。
+projects:
+  benny:
+    displayName: Benny 翻译项目
+    memoryLimit: 10
+    # archiveDir: D:/benny      # P7-5 归档用；未经你授权不填，引擎就不往公司外写任何东西
 interaction:
   defaultMode: direct
   defaultTarget: ceo

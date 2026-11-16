@@ -196,6 +196,12 @@ export function buildCompletionFromDraft({
   const checksum = {};
   for (const f of files) checksum[f.artifact] = sha256File(f.abs);
 
+  // P7：员工在 draft 里附的经验原样搬进 usage（completion schema 是冻结的，不能新加字段）。
+  // 这里只做搬运，不做修补 —— 坏数据留给引擎按规矩拒掉，不在这层悄悄「洗干净」。
+  const memoryFeed = {};
+  if (draft.lessons !== undefined) memoryFeed.lessons = draft.lessons;
+  if (draft.nextHints !== undefined) memoryFeed.nextHints = draft.nextHints;
+
   const report = {
     schema: 'aicompany.completion/v1',
     taskId, runId, agent, revision,
@@ -209,7 +215,11 @@ export function buildCompletionFromDraft({
       detail: `${files.length} 个文件，共 ${files.reduce((n, f) => n + f.size, 0)} 字节`,
     }],
     // usage 是自由对象，把「这份报告是谁写的」记在这里，不污染固定字段。
-    usage: { quotaUnits: 1, reportSource: 'control-plane-draft' },
+    usage: {
+      quotaUnits: 1,
+      reportSource: 'control-plane-draft',
+      ...(Object.keys(memoryFeed).length ? { memoryFeed } : {}),
+    },
     finishedAt: now(),
   };
   const verified = verifyReport({ report, paths, taskId, runId });

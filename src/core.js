@@ -122,6 +122,8 @@ export function migrate(db) {
   addColumn('tasks', 'originJson', 'originJson TEXT');
   // G3：任务难度与席位难度上限。老库补列后旧任务一律按 normal 处理（不追溯改判）。
   addColumn('tasks', 'difficulty', "difficulty TEXT DEFAULT 'normal'");
+  // P7：任务归属项目。老库补列后旧卡为 NULL（= 不属于任何项目，行为与以前一致）。
+  addColumn('tasks', 'project', 'project TEXT');
   addColumn('agents', 'maxDifficulty', 'maxDifficulty TEXT');
   addColumn('task_payload', 'inputJson', "inputJson TEXT DEFAULT '{}'");
   // P4：审批单补请求内容与时间；审计补 taskId 以便按任务串时间线；配额补通知去重位。
