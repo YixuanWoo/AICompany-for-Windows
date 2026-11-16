@@ -69,8 +69,11 @@ repos:
 artifacts:
   # 受管代码默认交给工程岗审（审完由它提交推送）。
   defaultReviewer: engineering
-  # 卡上没写 handoff 时：ceo = 照旧请总经理验收（保守）；land = 直接落盘（省 CEO 额度）。
-  defaultHandoff: ceo
+  # 认不出发布者时（老数据 / 系统自动派单）怎么走：
+  #   byAssigner = 按发布者推导（董事会派的落盘、上级派的回审）—— 日常都走这条，不看这个字段
+  #   ceo = 一律请总经理验收（最保守，费 CEO 额度）
+  #   land = 一律直接落盘（最省，但没人把关）
+  defaultHandoff: byAssigner
   # 判成受管代码却没写 repo → 打回。代码流到没人管的地方比没写更糟。
   requireRepoForManagedCode: true
 interaction:

@@ -4,33 +4,102 @@
   "title": "CompletionReport",
   "description": "完成报告。写完即终态；cancelled 是控制面的任务状态，不是报告里的值（任务书 §6.6 / §6D.5）。",
   "type": "object",
-  "required": ["schema", "taskId", "runId", "agent", "revision", "status", "summary", "artifacts", "checksum", "acceptanceResults", "usage", "finishedAt"],
+  "required": [
+    "schema",
+    "taskId",
+    "runId",
+    "agent",
+    "revision",
+    "status",
+    "summary",
+    "artifacts",
+    "checksum",
+    "acceptanceResults",
+    "usage",
+    "finishedAt"
+  ],
   "additionalProperties": false,
   "properties": {
-    "schema": { "const": "aicompany.completion/v1" },
-    "taskId": { "type": "string", "minLength": 1 },
-    "runId": { "type": "string", "minLength": 1 },
-    "agent": { "type": "string", "minLength": 1 },
-    "revision": { "type": "integer", "minimum": 1 },
-    "status": { "enum": ["success", "failed", "blocked"] },
-    "summary": { "type": "string" },
-    "artifacts": { "type": "array", "items": { "type": "string" } },
-    "checksum": { "type": "object" },
-    "acceptanceResults": { "type": "array", "items": { "type": "object" } },
-    "usage": { "type": "object" },
-    "reason": { "type": "string" },
+    "schema": {
+      "const": "aicompany.completion/v1"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "enum": [
+        "success",
+        "failed",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "checksum": {
+      "type": "object"
+    },
+    "acceptanceResults": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "usage": {
+      "type": "object"
+    },
+    "reason": {
+      "type": "string"
+    },
     "artifactKind": {
-      "enum": ["managed-code", "scratch-code", "document", "data", "media"],
+      "enum": [
+        "managed-code",
+        "scratch-code",
+        "document",
+        "data",
+        "media"
+      ],
       "description": "产物分类。受管代码要进仓库并走审查；一次性脚本只归档当资料。不写 = 由引擎按卡内容推断。"
     },
     "handoff": {
-      "enum": ["land", "review", "escalate"],
-      "description": "交付路由。land=直接落盘；review=交人审；escalate=上报（方向不对 / 超权限），此时 status 应为 blocked。"
+      "enum": [
+        "land",
+        "review",
+        "escalate",
+        "ceo"
+      ],
+      "description": "交付路由。land=直接落盘；review=交人审；escalate=上报（方向不对 / 超权限），此时 status 应为 blocked。写 ceo 等同 review。上级派的活自报 land 会被拦下（除非发布者授权）。"
     },
     "reviewNote": {
       "type": "string",
       "description": "给审查人的话：重点看哪里、哪里还没底。"
     },
-    "finishedAt": { "type": "string", "minLength": 1 }
+    "finishedAt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewBy": {
+      "type": "string",
+      "description": "建议由谁验收（岗位 / 担任者 id）。只能指自己汇报链上的上级或默认审查人，引擎会校验；越权的会被忽略并留痕。"
+    }
   }
 }

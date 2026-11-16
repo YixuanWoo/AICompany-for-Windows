@@ -794,6 +794,34 @@
       '</div></div>';
   }
 
+  // 待董事会亲审（reviewBy: human）：人只看结果——干了什么、产出在哪、验收条件过没过。
+  // 不给状态机术语：看不懂的东西不可能被认真审。
+  function taskReviewRow(a, p) {
+    const arts = Array.isArray(p.artifacts) ? p.artifacts : [];
+    const checks = Array.isArray(p.acceptanceResults) ? p.acceptanceResults : [];
+    const artHtml = arts.length
+      ? arts.map((f) => '· ' + esc(f)).join('<br>')
+      : '（没有文件产物，结果写在下面的总结里）';
+    const checkHtml = checks.length
+      ? checks.map((c) => (c.pass === false ? '✗ ' : '✓ ') + esc(String(c.rule || ''))).join('<br>')
+      : '（执行人没有逐条回执）';
+    return '<div class="row"><b>' + esc(p.title || a.request?.title || a.approvalId) + '</b> ' +
+      '<span class="tag">董事会亲审</span><span class="tag">' + esc(p.kind || '产物') + '</span>' +
+      '<div class="meta">谁干的：' + esc(p.assignee || '（未知）') +
+        (p.project ? '　归属项目：' + esc(p.project) : '　一次性任务（不归项目）') + '</div>' +
+      '<div class="meta">干了什么：' + esc(String(p.summary || '（未写总结）').slice(0, 800)) + '</div>' +
+      '<div class="meta">产出：<br>' + artHtml + '</div>' +
+      '<div class="meta">验收条件：<br>' + checkHtml + '</div>' +
+      (p.workDir ? '<div class="meta">文件在这儿：<code>' + esc(p.workDir) + '</code></div>' : '') +
+      '<textarea data-comment="' + esc(a.approvalId) + '" rows="2" ' +
+        'style="width:100%;margin-top:6px;padding:6px;border:1px solid #B4B2A9;border-radius:6px;font:inherit" ' +
+        'placeholder="审批意见（通过可留空；打回要写清哪里不行，执行人只看这一句）"></textarea>' +
+      '<div class="btnrow">' +
+      '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过</button>' +
+      '<button type="button" class="danger" data-approve="rejected" data-id="' + esc(a.approvalId) + '">打回重做</button>' +
+      '</div></div>';
+  }
+
   // P4：审批卡分「待办」和「已处理」两段：待办给按钮，已处理只留结论。
   function renderApprovals() {
     const pend = state.approvals.filter((a) => a.status === 'pending');
@@ -803,11 +831,15 @@
       const p = (a.request && a.request.payload) || {};
       if (a.kind === 'project_create') { rows.push(projectApprovalRow(a, p.project || {})); continue; }
       if (a.kind === 'recurring_create') { rows.push(recurringApprovalRow(a, p)); continue; }
+      if (a.kind === 'task_review') { rows.push(taskReviewRow(a, p)); continue; }
       rows.push('<div class="row"><b>' + esc(a.request?.title || a.approvalId) + '</b> ' +
         '<span class="tag">' + esc(a.kind) + '</span>' +
         '<div class="meta">' + esc(a.request?.body || '') + '</div>' +
         '<div class="meta">审批单 ' + esc(a.approvalId) + (a.taskId ? ' · 卡 ' + esc(short(a.taskId)) : '') +
         (p.decisionMaker ? ' · 建议由 ' + esc(p.decisionMaker) + ' 先看' : '') + '</div>' +
+        '<textarea data-comment="' + esc(a.approvalId) + '" rows="2" ' +
+          'style="width:100%;margin-top:6px;padding:6px;border:1px solid #B4B2A9;border-radius:6px;font:inherit" ' +
+          'placeholder="审批意见（可留空）"></textarea>' +
         '<div class="btnrow">' +
         '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过</button>' +
         '<button type="button" class="ghost" data-approve="rewrite" data-id="' + esc(a.approvalId) + '">要求重写 / 换人</button>' +

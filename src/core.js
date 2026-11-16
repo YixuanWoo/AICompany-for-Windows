@@ -131,6 +131,14 @@ export function migrate(db) {
   addColumn('tasks', 'repo', 'repo TEXT');
   // 验收人：不写就是总经理。代码类活写工程岗，审完才收账。
   addColumn('tasks', 'reviewBy', 'reviewBy TEXT');
+  // 发布者：谁下的这张卡（'human' = 董事会；其余为真 agent id）。
+  // 「谁发布谁负责」：交付路由与验收人默认跟着它走，不再靠全局一刀切。
+  // 老库补列后为空，回落到 assignedBy（human / policy / ceo / seat）判断。
+  addColumn('tasks', 'assignerId', 'assignerId TEXT');
+  // 发布者指定的交付路由（land / review / escalate）。空 = 按发布者推导。
+  addColumn('tasks', 'handoff', 'handoff TEXT');
+  // 是否授权执行者自己判「干完直接落盘」。默认 0：上级派的活，员工无权替上级免审。
+  addColumn('tasks', 'allowSelfLand', 'allowSelfLand INTEGER DEFAULT 0');
   addColumn('agents', 'maxDifficulty', 'maxDifficulty TEXT');
   // 席位模型：岗位（postTitle）与担任者（holderName）分开记，老库补列后为空，下次启动由 seedAgents 回填。
   addColumn('agents', 'postTitle', 'postTitle TEXT');

@@ -194,6 +194,30 @@
         "object",
         "null"
       ]
+    },
+    "assignerId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "发布者：谁下的这张卡（'human' = 董事会，其余为 agent id）。交付路由与验收人默认跟着它走。"
+    },
+    "handoff": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "land",
+        "review",
+        "escalate",
+        null
+      ],
+      "description": "发布者指定的交付路由：land=直接落盘、review=交人审、escalate=上报。null = 按发布者推导（董事会派的落盘、上级派的回审）。"
+    },
+    "allowSelfLand": {
+      "type": "boolean",
+      "description": "是否授权执行者自己判「干完直接落盘」。默认 false：上级派的活，员工无权替上级免审。"
     }
   }
 }

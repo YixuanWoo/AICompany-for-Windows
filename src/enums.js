@@ -55,7 +55,7 @@ export const ARTIFACT_KINDS = ['managed-code', 'scratch-code', 'document', 'data
 export const HANDOFF_TARGETS = ['land', 'review', 'escalate'];
 
 // P4：三道常规人审门禁 + 两类按需事件型人审（replan / 循环模板改版）。
-export const APPROVAL_KINDS = ['strategy', 'hiring_budget', 'review_reject', 'replan', 'recurring_change', 'recurring_create', 'project_create'];
+export const APPROVAL_KINDS = ['strategy', 'hiring_budget', 'review_reject', 'replan', 'recurring_change', 'recurring_create', 'project_create', 'task_review'];
 export const APPROVAL_STATUSES = ['pending', 'approved', 'rewrite', 'rejected', 'expired'];
 export const APPROVAL_DECISIONS = ['approved', 'rewrite', 'rejected'];
 

@@ -166,9 +166,11 @@ test('R4 · 受管代码 + 仓库 + 工程审：卡停在 in_review，审过才 
   assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(card.taskId).status, 'done');
 });
 
-test('R5 · 一次性脚本（scratch-code）走直接落盘：不建审查、不叫 CEO', async (t) => {
+test('R5 · 一次性脚本（scratch-code）+ 发布者授权：走直接落盘，不建审查、不叫 CEO', async (t) => {
   const { db, engine } = setup(t, {
     report: { artifactKind: 'scratch-code', handoff: 'land' },
+    // 发布者（CEO）在卡上授权：这类一次性脚本干完就归档，不用回来审。
+    tasks: [{ title: '渲染一段视频', assignee: 'doubao', allowSelfLand: true }],
   });
   await engine.submit({ text: '渲染一段视频' });
   await pumpAll(engine);
@@ -177,6 +179,23 @@ test('R5 · 一次性脚本（scratch-code）走直接落盘：不建审查、�
   assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'handoff_land' AND taskId = ?").get(card.taskId));
   const ceoRuns = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE agentId = 'ceo' AND wakeReason = 'review_requested'").get().n;
   assert.equal(ceoRuns, 0, '落盘结案不该再烧一次 CEO 的额度');
+});
+
+test('R5b · 上级派活：执行者自报 land 一律被拦，改交上级审并留痕', async (t) => {
+  const { db, engine } = setup(t, {
+    report: { artifactKind: 'scratch-code', handoff: 'land' },
+  });
+  await engine.submit({ text: '渲染一段视频' });
+  await pumpAll(engine);
+  const card = childOf(db);
+  // 谁发布谁审：CEO 派的活，豆包无权替 CEO 免审 —— 自报的 land 被拦，改走 CEO 验收。
+  const hit = db.prepare("SELECT * FROM audit WHERE action = 'handoff_downgraded' AND taskId = ?").get(card.taskId);
+  assert.ok(hit, '拦下私自落盘必须留痕，董事会要看得见');
+  assert.match(hit.newValue, /agent-card-cannot-self-land/);
+  assert.ok(!db.prepare("SELECT 1 FROM audit WHERE action = 'handoff_land' AND taskId = ?").get(card.taskId),
+    '不能既拦下又当落盘结案');
+  const ceoReview = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE agentId = 'ceo' AND wakeReason = 'review_requested'").get().n;
+  assert.ok(ceoReview > 0, '降级后必须真的请发布者来审');
 });
 
 test('R6 · 主动上报：卡转 blocked、不重试，并给上级建一张「处理升级」的卡', async (t) => {
@@ -235,4 +254,94 @@ test('R8 · 打回必须写原因；写成 pass 才收账', async (t) => {
   const rework = db.prepare("SELECT * FROM events WHERE taskId = ? AND processed = 0 AND type = 'issue_assigned'")
     .get(card.taskId);
   assert.ok(rework, '打回要重投给执行人');
+});
+
+// ── 谁发布谁负责：交付路由按发布者推导，董事会可以自己审 ──────────────
+
+test('R9 · 董事会直投：默认直接落盘，不惊动总经理', async (t) => {
+  const { db, engine } = setup(t);
+  const out = await engine.submit({ mode: 'direct', addressedTo: 'doubao', text: '整理一份术语表' });
+  await pumpAll(engine);
+  const row = db.prepare('SELECT * FROM tasks WHERE taskId = ?').get(out.taskId);
+  assert.equal(row.status, 'done');
+  assert.equal(row.assignerId, 'human', '发布者要落库：路由与验收人全靠它');
+  const ceoReview = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE agentId = 'ceo' AND wakeReason = 'review_requested'").get().n;
+  assert.equal(ceoReview, 0, '直投只对董事会负责，不该花 CEO 的额度');
+});
+
+test('R10 · 董事会指定「给我审」：出待拍板单，通过后才落盘', async (t) => {
+  const { db, engine } = setup(t);
+  const out = await engine.submit({
+    mode: 'direct', addressedTo: 'doubao', text: '写份译稿', reviewBy: 'human',
+  });
+  await pumpAll(engine);
+  const row = db.prepare('SELECT * FROM tasks WHERE taskId = ?').get(out.taskId);
+  assert.equal(row.status, 'in_review', '指定了要审就不能自己结案');
+  assert.equal(row.reviewBy, 'human');
+
+  const ap = db.prepare("SELECT * FROM approvals WHERE kind = 'task_review' AND status = 'pending'").get();
+  assert.ok(ap, '董事会亲审必须变成一张待拍板单，否则人根本不知道有活等他');
+  const payload = JSON.parse(ap.requestJson).payload;
+  assert.equal(payload.assignee, 'doubao');
+  assert.match(payload.summary, /完成：写份译稿/);
+  assert.ok(Array.isArray(payload.artifacts) && payload.artifacts.length, '审批单里要能看到产物清单');
+
+  engine.decideApproval(ap.approvalId, { decision: 'approved', decidedBy: 'board', reason: '可以' });
+  assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(out.taskId).status, 'done');
+});
+
+test('R11 · 待拍板打回：退回执行人重做，人的意见原样带过去', async (t) => {
+  const { db, engine } = setup(t);
+  const out = await engine.submit({
+    mode: 'direct', addressedTo: 'doubao', text: '写份译稿', reviewBy: 'human',
+  });
+  await pumpAll(engine);
+  const ap = db.prepare("SELECT * FROM approvals WHERE kind = 'task_review' AND status = 'pending'").get();
+  engine.decideApproval(ap.approvalId, { decision: 'rejected', decidedBy: 'board', reason: '第二段漏译' });
+
+  assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(out.taskId).status, 'in_progress');
+  const rework = db.prepare("SELECT * FROM events WHERE taskId = ? AND processed = 0 AND type = 'issue_assigned'")
+    .get(out.taskId);
+  assert.ok(rework, '打回要重新叫醒执行人');
+  assert.match(rework.payloadJson, /第二段漏译/);
+});
+
+test('R12 · 执行者不能把审查人换成自己；换成上级可以并留痕', async (t) => {
+  const { db, engine } = setup(t, {
+    tasks: [{ title: '写文档', assignee: 'doubao' }],
+    report: { handoff: 'review', reviewBy: 'doubao' },
+  });
+  await engine.submit({ text: '写文档' });
+  await pumpAll(engine);
+  const card = childOf(db);
+  assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'review_by_rejected' AND taskId = ?").get(card.taskId),
+    '自己审自己必须被拒并留痕');
+
+  const { db: db2, engine: engine2 } = setup(t, {
+    tasks: [{ title: '写文档', assignee: 'doubao' }],
+    report: { handoff: 'review', reviewBy: 'engineering' },
+  });
+  await engine2.submit({ text: '写文档' });
+  await pumpAll(engine2);
+  const card2 = childOf(db2);
+  assert.equal(db2.prepare('SELECT reviewBy FROM tasks WHERE taskId = ?').get(card2.taskId).reviewBy, 'engineering');
+  assert.ok(db2.prepare("SELECT 1 FROM audit WHERE action = 'review_by_set' AND taskId = ?").get(card2.taskId));
+});
+
+test('R13 · 董事会原话里说「给我审」：自动转成董事会亲审（否定说法不算）', async (t) => {
+  const { db, engine } = setup(t);
+  const out = await engine.submit({
+    mode: 'direct', addressedTo: 'doubao', text: '翻译这一段，给我审一下再落盘',
+  });
+  await pumpAll(engine);
+  assert.equal(db.prepare('SELECT reviewBy FROM tasks WHERE taskId = ?').get(out.taskId).reviewBy, 'human');
+  assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'review_intent_detected'").get());
+
+  const out2 = await engine.submit({
+    mode: 'direct', addressedTo: 'doubao', text: '整理一份术语表，不用给我看',
+  });
+  await pumpAll(engine);
+  const row2 = db.prepare('SELECT * FROM tasks WHERE taskId = ?').get(out2.taskId);
+  assert.equal(row2.reviewBy, null, '「不用给我看」不能被认成「给我看」');
+  assert.equal(row2.status, 'done');
 });

@@ -277,8 +277,14 @@ export function normalizeConfig(config) {
   const artifacts = {
     // 受管代码默认交给谁审（岗位 id）。
     defaultReviewer: config.artifacts?.defaultReviewer ?? 'engineering',
-    // 卡上没写 handoff 时怎么走：ceo = 照旧请总经理验收；land = 直接落盘结案（省 CEO 额度）。
-    defaultHandoff: config.artifacts?.defaultHandoff === 'land' ? 'land' : 'ceo',
+    // 认不出发布者时（老数据 / policy）怎么走。
+    // 正常卡不看这个：董事会派的 → 落盘；上级 agent 派的 → 回上级审。这是「谁发布谁负责」。
+    //   byAssigner = 按发布者推导（默认，推荐）
+    //   ceo        = 一律请总经理验收（最保守，费 CEO 额度）
+    //   land       = 一律直接落盘（最省，但没人把关）
+    defaultHandoff: ['byAssigner', 'ceo', 'land'].includes(config.artifacts?.defaultHandoff)
+      ? config.artifacts.defaultHandoff
+      : 'byAssigner',
     // 判成受管代码却没写 repo：默认拒绝交活（宁肯打回，也不让代码流到没人管的地方）。
     requireRepoForManagedCode: config.artifacts?.requireRepoForManagedCode !== false,
     // 哪些扩展名算「代码」：执行岗没写 artifactKind 时用来兜底判断。

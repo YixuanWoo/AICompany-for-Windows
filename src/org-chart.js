@@ -123,6 +123,11 @@ export function ceoRoutingBriefing(config = {}) {
   lines.push('');
   lines.push('拆卡粒度：一张卡一个交付物。跨工种才拆两张，并在后一张写 after 指向前一张。');
   lines.push('代码类活：在卡上写 repo（仓库 id），并把 reviewBy 写成工程岗 —— 代码由工程岗审完再收账。');
+  lines.push('');
+  lines.push('【交付路由：谁发布谁负责】');
+  lines.push('- 你派出去的卡，默认**回你审**：员工交活时卡会停在待审，你看到结果再放行。这是你的责任，不能甩给董事会。');
+  lines.push('- 确实不需要再看的一次性活（纯归档、跑完就没用的产物），可以在卡上写 handoff: land，或写 allowSelfLand: true 让它自己判。');
+  lines.push('- 董事会自己下的单不归你审：那是他直接派给员工的，干完直接落盘，不会来打扰你。');
   return lines.join('\n');
 }
 
@@ -133,6 +138,12 @@ export function looksLikeCode(task = {}, artifacts = {}) {
     task.title, task.instructions,
     ...(Array.isArray(task.acceptance) ? task.acceptance : []),
   ].filter(Boolean).join(' ').toLowerCase();
-  if (exts.some((ext) => haystack.includes(ext))) return true;
+  // 扩展名要带边界再比：否则默认验收条件里的「completion.json」会被 ".js" 命中，
+  // 每张卡都被判成代码活（真机上踩过：连「整理术语表」都要 repo + 审）。
+  const hitExt = exts.some((ext) => {
+    const safe = String(ext).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`${safe}(?![a-z0-9])`, 'i').test(haystack);
+  });
+  if (hitExt) return true;
   return /代码|脚本|程序|函数|接口|重构|修 ?bug|commit|git|仓库/.test(haystack);
 }

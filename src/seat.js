@@ -158,7 +158,7 @@ export function createSeat({
   async function complete({
     taskId, leaseToken, runId, status = 'success', summary,
     artifacts = null, acceptanceResults = [], usage = {}, reason,
-    artifactKind = null, handoff = null, reviewNote = null,
+    artifactKind = null, handoff = null, reviewNote = null, reviewBy = null,
   } = {}) {
     const held = holding();
     const id = taskId ?? held?.taskId;
@@ -184,6 +184,8 @@ export function createSeat({
       // 产物分类与交付路由：执行岗自己判，控制面按它决定「落盘 / 送审 / 上报」。
       ...(artifactKind ? { artifactKind } : {}),
       ...(handoff ? { handoff } : {}),
+      // 审查人：只能指自己汇报链上的上级（引擎会校验，越权忽略并留痕）。
+      ...(reviewBy ? { reviewBy } : {}),
       ...(reviewNote ? { reviewNote: String(reviewNote).slice(0, 1000) } : {}),
       finishedAt: new Date().toISOString(),
     };

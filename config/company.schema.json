@@ -592,10 +592,11 @@
         },
         "defaultHandoff": {
           "enum": [
+            "byAssigner",
             "ceo",
-            "review",
             "land"
-          ]
+          ],
+          "description": "认不出发布者时的兜底：byAssigner=按发布者推导（默认）、ceo=一律交总经理验收、land=一律直接落盘。"
         },
         "requireRepoForManagedCode": {
           "type": "boolean"

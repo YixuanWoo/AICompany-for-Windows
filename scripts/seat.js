@@ -140,12 +140,14 @@ async function main() {
       reason: args.reason === true ? undefined : args.reason,
       artifactKind: args.kind === true ? null : args.kind,
       handoff: args.handoff === true ? null : args.handoff,
+      reviewBy: args['review-by'] === true ? null : args['review-by'],
       reviewNote: args['review-note'] === true ? null : args['review-note'],
     });
     if (!out.ok) { line(`交活失败：${out.reason}`); process.exit(1); }
     line(`已交：${out.report.taskId}｜${out.report.status}`);
     line(`  产物   ${out.report.artifacts.length ? out.report.artifacts.join(', ') : '(无文件产物)'}`);
     line(`  分类   ${out.report.artifactKind ?? '(未写，引擎推断)'}｜去向 ${out.report.handoff ?? '(未写，引擎推断)'}`);
+    if (out.report.reviewBy) line(`  审查人 ${out.report.reviewBy}（引擎会校验是否在汇报链上）`);
     line(`  控制面 ${JSON.stringify(out)}`.slice(0, 400));
     return;
   }
@@ -195,10 +197,13 @@ async function main() {
       assignee: String(args.assignee),
       repo: args.repo === true ? undefined : args.repo,
       reviewBy: args['review-by'] === true ? undefined : args['review-by'],
+      handoff: args.handoff === true ? undefined : args.handoff,
+      allowSelfLand: args['allow-self-land'] === true,
       difficulty: args.difficulty === true ? undefined : args.difficulty,
     });
     line(`已派子卡：${out.taskId} → ${out.assignee}`);
     line(`  父卡 ${out.parentTaskId}｜项目 ${out.project ?? '—'}｜仓库 ${out.repo ?? '—'}`);
+    line('  这张子卡的回执归你：交活默认回你审（谁发布谁审）；写 --handoff land 才是干完直接落盘。');
     line('  你的卡还在手里：子卡是另一件活，你交自己这张时说明「已拆出一张给谁」即可。');
     return;
   }

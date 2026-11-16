@@ -15,7 +15,7 @@ import { isBridgeOnline } from './lease.js';
 import { DEFAULTS, CAPABILITIES, CEO_OUTPUT_KINDS, RECURRING_KINDS, ARTIFACT_KINDS, HANDOFF_TARGETS } from './enums.js';
 import { createChannels } from './channels.js';
 import { ensureAllQuotas, checkQuota, consumeQuota, quotaState, resetQuota } from './quota.js';
-import { assertMayAssign, resolveDecisionMaker, rankCandidates, ceoOf, isInSubtree } from './org.js';
+import { assertMayAssign, resolveDecisionMaker, rankCandidates, ceoOf, isInSubtree, ancestors } from './org.js';
 import {
   normalizeDifficulty, canTake, ceilingOf, describeSeat, describeDifficulty,
   DEFAULT_DIFFICULTY, NO_CEILING, DIFFICULTIES,
@@ -40,6 +40,9 @@ export function createNotifier(kind = 'web') {
 }
 
 const shortId = () => randomUUID().slice(0, 8);
+
+// 「交给董事会自己看」的各种写法：人不必记字段值，写哪个都认。
+const BOARD_ALIASES = new Set(['human', 'board', 'me', 'self', '我', '董事会', '本人']);
 
 // 按协议声明裁剪外部来源的字段（adapter 返回值常带内部标记，不能直接当业务单据用）。
 function pickSchemaFields(kind, data) {
@@ -113,6 +116,57 @@ export function createEngine({
     };
   }
 
+  /**
+   * 董事会原话里有没有明确说「这活我要亲自看」。
+   * 宁可漏认也不误判：误判会把卡莫名卡在人这里等拍板；漏认最多回到默认（董事会直投本来就是落盘）。
+   * 否定说法先排除——「不用给我看」不能被认成「给我看」。
+   */
+  function detectBoardReview(text) {
+    const s = String(text ?? '');
+    if (!s) return false;
+    if (/(不用|不要|无需|不必|别|甭)(给我|我)?\s*(审|看|批|过目|确认)/.test(s)) return false;
+    return /(给我审|交我审|我来审|我亲自审|我自己审|我自己看|让我审|我先看|我先过目|等我审|等我批|等我过目|给我过目|我过目|给我看一眼|给我看结果|董事会审)/.test(s);
+  }
+
+  /** 下单时写的交付路由：认不出就报错，绝不静默当没写（写错了要当场知道）。 */
+  function assertHandoff(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw || raw === 'auto') return null;
+    const normalized = normalizeHandoff(raw);
+    if (!normalized) throw new Error(`handoff 只能是 land / review / escalate（写 ceo 等同 review）：${raw}`);
+    return normalized;
+  }
+
+  /**
+   * 指定的审查人必须是真实存在的岗位 / 担任者，并归一成 agent id（认人不认位子）。
+   * 'human'（董事会自己审）是合法值：董事会是最高权力，可以要自己看。
+   */
+  function assertReviewSeat(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw || raw === 'auto') return null;
+    if (BOARD_ALIASES.has(raw.toLowerCase())) return 'human';
+    const hit = (config.agents ?? []).find((a) => a.id === raw || a.postTitle === raw);
+    if (!hit) {
+      const seats = (config.agents ?? []).map((a) => a.postTitle ?? a.id).join(', ');
+      throw new Error(`reviewBy 指向不存在的岗位：${raw}（现有：${seats}；要董事会自己审写 human）`);
+    }
+    return hit.id;
+  }
+
+  /** 派活人写错了路由参数：不炸整单，留痕后当没写（走默认推导）。 */
+  function softRoute(fn, { action, who, taskId, field, value }) {
+    try {
+      return fn();
+    } catch (error) {
+      writeAudit(db, {
+        actor: who ?? 'control-plane', action,
+        newValue: `${field}=${String(value ?? '').slice(0, 60)}|${String(error.message).slice(0, 200)}`.slice(0, 300),
+        taskId,
+      });
+      return null;
+    }
+  }
+
   function buildCard({
     requestId, title, role = 'general', assignee, mode = 'delegate',
     addressedTo = null, assignedBy = 'human', instructions = '按 brief 执行并写出完成报告。',
@@ -120,6 +174,7 @@ export function createEngine({
     parentTaskId = null, taskId = `T-${shortId()}`, status = 'todo',
     threadId = null, assignerId = null, difficulty = DEFAULT_DIFFICULTY, project = null,
     origin = null, dependsOn = [], repo = null, reviewBy = null,
+    handoff = null, allowSelfLand = false,
   }) {
     // P4-3：agent 之间派活只能派进自己的汇报子树；人是董事会，不受此限（§7.4）。
     if (assignerId && assignerId !== assignee) {
@@ -144,6 +199,13 @@ export function createEngine({
       // 仓库（代码在哪、推哪）与验收人：与项目解耦，都是可选。
       repo: repo ?? null,
       reviewBy: reviewBy ?? null,
+      // 发布者：谁下的这张卡。交付路由默认按它算（发布者=董事会 → 落盘；= agent → 回发布者审）。
+      // 'human' 是董事会；有真 agent id 就记 id（岗位与担任者分开，认人不认位子）。
+      assignerId: assignerId ?? (assignedBy === 'human' ? 'human' : null),
+      // 发布者显式指定的交付路由（land / review / escalate）。空 = 按发布者推导。
+      handoff: handoff ?? null,
+      // 发布者授权「执行者可以自己判落盘」。默认关：上级派的活，员工无权替上级免审。
+      allowSelfLand: allowSelfLand === true,
       // 卡间依赖：前置卡的 taskId。空数组 = 没依赖（默认并行）。
       dependsOn: Array.isArray(dependsOn) ? dependsOn.filter((x) => typeof x === 'string' && x) : [],
     };
@@ -154,11 +216,13 @@ export function createEngine({
     if (!checked.ok) throw new Error(`任务卡不合法：${checked.errors.join('; ')}`);
     db.prepare(`INSERT INTO tasks
       (taskId, requestId, parentTaskId, title, role, assignee, status, mode, addressedTo,
-       assignedBy, revision, threadId, attempt, priority, difficulty, project, repo, reviewBy,
+       assignedBy, assignerId, handoff, allowSelfLand, revision, threadId, attempt, priority,
+       difficulty, project, repo, reviewBy,
        createdAt, updatedAt, originJson, dependsOn)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       card.taskId, card.requestId, card.parentTaskId, card.title, card.role,
       card.assignee, card.status, card.mode, card.addressedTo, card.assignedBy,
+      card.assignerId ?? null, card.handoff ?? null, card.allowSelfLand === true ? 1 : 0,
       card.revision, card.threadId, card.priority, normalizeDifficulty(card.difficulty),
       card.project ?? null, card.repo ?? null, card.reviewBy ?? null,
       card.createdAt, card.createdAt, JSON.stringify(card.origin ?? null),
@@ -558,6 +622,17 @@ export function createEngine({
     } else {
       target = ceoId();
     }
+    // 董事会原话里说「给我审 / 等我批」：不用记字段名，认出来就按「董事会亲审」走。
+    // 只在没显式写 reviewBy 时生效；否定说法（不用给我看）先排除。
+    const explicitReview = assertReviewSeat(req.reviewBy);
+    const autoReview = !explicitReview && assignedBy === 'human'
+      && detectBoardReview(req.instructions ?? req.text) ? 'human' : null;
+    if (autoReview) {
+      writeAudit(db, {
+        actor: 'human', action: 'review_intent_detected',
+        newValue: '原话里明确要求董事会亲自审 → reviewBy=human', taskId: null,
+      });
+    }
     const card = buildCard({
       requestId, title: req.title ?? String(req.text ?? '新需求').slice(0, 60),
       role: req.role ?? 'general', assignee: target, mode,
@@ -569,6 +644,11 @@ export function createEngine({
       instructions: req.instructions ?? (req.text ? String(req.text) : undefined),
       acceptance: req.acceptance ?? undefined, difficulty,
       project,
+      // 董事会下单时可以直接定：交不交审（handoff）、交给谁审（reviewBy）。
+      // 人越权跳过 CEO 是合法的，所以这里不套员工的那些闸。
+      handoff: assertHandoff(req.handoff),
+      reviewBy: explicitReview ?? autoReview,
+      allowSelfLand: req.allowSelfLand === true,
     });
     insertCard(card, target);
     return {
@@ -584,6 +664,7 @@ export function createEngine({
   function spawnChild({
     parentTaskId, assignerId, title, instructions, acceptance = [],
     assignee, difficulty = null, repo = undefined, reviewBy = undefined, project = undefined,
+    handoff = undefined, allowSelfLand = false,
   } = {}) {
     const parent = taskById(parentTaskId);
     if (!parent) throw new Error(`父卡不存在：${parentTaskId}`);
@@ -613,7 +694,10 @@ export function createEngine({
       difficulty: level,
       project: project === undefined ? parent.project : project,
       repo: repo === undefined ? parent.repo : repo,
-      reviewBy: reviewBy === undefined ? null : reviewBy,
+      reviewBy: reviewBy === undefined || reviewBy === null ? null : assertReviewSeat(reviewBy),
+      // 拆活的人就是发布者：默认「谁派谁审」（issuerOf 认 assignerId）；显式写就按写明。
+      handoff: handoff === undefined ? null : assertHandoff(handoff),
+      allowSelfLand: allowSelfLand === true,
     });
     insertCard(child, child.assignee);
     writeAudit(db, {
@@ -981,6 +1065,10 @@ export function createEngine({
         acceptance: task.acceptance, parentTaskId: task.parentTaskId,
         project: task.project ?? null, repo: task.repo ?? null, reviewBy: task.reviewBy ?? null,
         difficulty: task.difficulty ?? DEFAULT_DIFFICULTY,
+        // 这张卡的交付路由：谁发布的、默认交给谁、能不能自己判落盘。
+        // 提示词据此讲清「这活是董事会下的单，还是你上级派的」——不写清，
+        // 员工会把上级派的活当自己的事，干完自己结案，发布者永远看不到结果。
+        handoffPolicy: handoffPolicyOf(task),
       } : null,
       // 项目上下文单独给一份：adapter 拿它拼提示词，process/http 型也照此透传给真模型。
       project: projectContext,
@@ -1631,6 +1719,54 @@ export function createEngine({
       }
     }
 
+    // 董事会亲自验收（reviewBy: human）：通过就收账落盘，打回就带意见退回执行人。
+    // 人只看结果：批不批不需要懂卡的状态机。
+    if (approval.kind === 'task_review') {
+      if (!task) {
+        return { approvalId, decision, applied: false, error: '这张卡已经不在了（可能被取消）' };
+      }
+      const fresh = taskById(task.taskId);
+      if (decision === 'approved') {
+        if (fresh?.status !== 'in_review') {
+          return { approvalId, decision, applied: false, status: fresh?.status, error: '卡已经不在待审状态，可能已处理过' };
+        }
+        // 服务可能中途重启过，内存里的报告没了：用审批单里存的快照补回去，
+        // 否则记忆不写、审计上只剩「通过了」却查不到这次学到了什么。
+        if (!pendingMemory.has(task.taskId)) {
+          pendingMemory.set(task.taskId, {
+            status: 'success',
+            summary: String(payload.summary ?? ''),
+            artifacts: Array.isArray(payload.artifacts) ? payload.artifacts : [],
+            acceptanceResults: Array.isArray(payload.acceptanceResults) ? payload.acceptanceResults : [],
+          });
+        }
+        transition(db, task.taskId, 'done', decidedBy, null);
+        writeAudit(db, {
+          actor: decidedBy, action: 'board_accepted',
+          newValue: `${approvalId}|${String(reason ?? '').slice(0, 200) || '无意见'}`, taskId: task.taskId,
+        });
+        flushProjectMemory(fresh ?? task, null);
+        deliverAccepted(fresh ?? task, null);
+        return { approvalId, decision, applied: true, taskId: task.taskId, status: 'done' };
+      }
+      // 打回：退回执行人重做，人的话原样带过去（这是它下一次唯一的依据）。
+      if (fresh?.status !== 'in_review') {
+        return { approvalId, decision, applied: false, status: fresh?.status, error: '卡已经不在待审状态' };
+      }
+      const note = String(reason ?? '').trim() || '董事会打回，但没写具体意见：按验收条件逐条自查后重交。';
+      transition(db, task.taskId, 'in_progress', decidedBy, null);
+      writeAudit(db, {
+        actor: decidedBy, action: 'board_rework',
+        newValue: `${approvalId}|${note.slice(0, 300)}`, taskId: task.taskId,
+      });
+      emitEvent({
+        type: 'issue_assigned', taskId: task.taskId, agentId: task.assignee,
+        payload: { wakeReason: 'rework', reviewNote: note },
+        dedupeKey: `board-rework:${task.taskId}:${Date.now()}`,
+      });
+      return { approvalId, decision, applied: true, taskId: task.taskId, status: 'in_progress' };
+    }
+
     if (approval.kind === 'project_create') {
       // 被项目闸拦下、正在等这张单的父卡：批或拒都要把它放出来，不能永远停在挂起态。
       const releaseGatedTask = (note) => {
@@ -1998,6 +2134,14 @@ export function createEngine({
     const out = {};
     for (const row of rows) {
       if (row.status === 'awaiting_decision') { out[row.taskId] = '等你拍板'; continue; }
+      // 董事会亲审：卡停在 in_review，要让人看出这是「等他」而不是「等员工」。
+      if (row.status === 'in_review') {
+        const card = taskById(row.taskId);
+        if (card && reviewerOf(card) === 'human') {
+          out[row.taskId] = '等你拍板（审批区里能看到结果）';
+          continue;
+        }
+      }
       const unmet = unmetDependencies(row);
       if (unmet.length) {
         out[row.taskId] = `等前置卡 ${unmet.map((x) => String(x).replace(/^T-/, '')).join('、')} 做完`;
@@ -2052,14 +2196,89 @@ export function createEngine({
     return { kind: 'document', inferred: true };
   }
 
+  /**
+   * 发布者：这张卡是谁下的。
+   * 「谁发布谁负责」是整条交付路由的地基：
+   *   董事会（人）派的 → 只对董事会负责，干完直接落盘，不惊动 CEO；
+   *   上级 agent 派的 → 回上级审，发布者必须看到结果；
+   *   认不出（老数据）→ unknown，走全局兜底（保守：交审）。
+   */
+  function issuerOf(task) {
+    const raw = String(task?.assignerId ?? '').trim();
+    if (raw && raw !== 'human') {
+      // 存的可能是岗位 id（ceo）也可能是担任者 id，两种都认。
+      const hit = (config.agents ?? []).find((a) => a.id === raw || a.postTitle === raw);
+      return { kind: 'agent', id: hit?.id ?? raw };
+    }
+    if (raw === 'human') return { kind: 'board', id: null };
+    const by = String(task?.assignedBy ?? '').trim();
+    // policy = 人提需求、系统按规则挑的人：责任还在董事会这一侧。
+    if (by === 'human' || by === 'policy') return { kind: 'board', id: null };
+    if (by === 'ceo') return { kind: 'agent', id: ceoId() };
+    // 'seat' 但没记 assignerId 的老数据：认不出发布者，不能拿它当免审理由。
+    return { kind: 'unknown', id: null };
+  }
+
+  /** 口头写法归一：'ceo' 就是「交总经理验收」；认不出的返回 null（当没写）。 */
+  function normalizeHandoff(value) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    if (raw === 'ceo') return 'review';
+    return HANDOFF_TARGETS.includes(raw) ? raw : null;
+  }
+
   function resolveHandoff(task, kind, report = {}) {
-    const declared = String(report.handoff ?? '').trim();
-    // 兼容口头写法：handoff=ceo 就是「交总经理验收」。
-    if (declared === 'ceo') return { handoff: 'review', inferred: false };
-    if (HANDOFF_TARGETS.includes(declared)) return { handoff: declared, inferred: false };
-    if (kind === 'managed-code') return { handoff: 'review', inferred: true };
-    const fallback = config.artifacts?.defaultHandoff === 'land' ? 'land' : 'review';
-    return { handoff: fallback, inferred: true };
+    const issuer = issuerOf(task);
+    // ① 发布者建卡时就写死的路由：最权威。
+    const pinned = normalizeHandoff(task.handoff);
+    // ② 执行者交活时自报的路由：只能往「更严」的方向改。
+    const declared = normalizeHandoff(report.handoff);
+    const out = { issuer, source: 'derived', downgraded: null, inferred: true };
+
+    if (pinned) {
+      out.source = 'card';
+      out.inferred = false;
+      // 发布者定了「落盘」，执行者发现不对要交审 / 上报：允许（往上调是负责，不是越权）。
+      if (pinned === 'land' && (declared === 'review' || declared === 'escalate')) {
+        out.handoff = declared;
+        out.source = 'worker-upgraded';
+        return out;
+      }
+      // 发布者定了「要审 / 要上报」，执行者想改成直接落盘：只有发布者明确授权才行。
+      if (pinned !== 'land' && declared === 'land' && !task.allowSelfLand) {
+        out.downgraded = 'self-land-ignored';
+      }
+      out.handoff = pinned;
+      return out;
+    }
+
+    if (declared) {
+      // ③ 上级派的活，员工无权替上级免审：自报 land 一律降级为交审（除非发布者授权）。
+      if (declared === 'land' && issuer.kind === 'agent' && !task.allowSelfLand) {
+        out.downgraded = 'agent-card-cannot-self-land';
+        out.handoff = 'review';
+      } else {
+        out.handoff = declared;
+        out.source = 'report';
+        out.inferred = false;
+      }
+    } else {
+      // ④ 都没写：按发布者推。这是本轮改动的核心——不再全局一刀切。
+      // 但卡上写明了「谁来审」，那就是要审的意思，别再猜成落盘。
+      if (task.reviewBy) {
+        out.handoff = 'review';
+        out.source = 'review-by';
+      } else if (issuer.kind === 'board') out.handoff = 'land';
+      else if (issuer.kind === 'agent') out.handoff = 'review';
+      else out.handoff = config.artifacts?.defaultHandoff === 'land' ? 'land' : 'review';
+    }
+
+    // ⑤ 受管代码永远要审：这是「以后还要改的东西」，不能靠谁的一句话免掉。
+    if (kind === 'managed-code' && out.handoff !== 'review') {
+      out.handoff = 'review';
+      out.codeForced = true;
+    }
+    return out;
   }
 
   function reviewerOf(task, kind = null) {
@@ -2071,7 +2290,51 @@ export function createEngine({
       if (repo?.reviewer) return repo.reviewer;
       if (config.artifacts?.defaultReviewer) return config.artifacts.defaultReviewer;
     }
+    // 「谁发布谁审」：上级派的活回上级，不再一律丢给总经理。
+    const issuer = issuerOf(task);
+    if (issuer.kind === 'agent') return issuer.id;
     return ceoId();
+  }
+
+  /** 一张卡的交付路由快照：给提示词用，也给看板用（不用前端再啃一遍规则）。 */
+  function handoffPolicyOf(task) {
+    const issuer = issuerOf(task);
+    const kind = inferArtifactKind(task, {}).kind;
+    const reviewer = reviewerOf(task, kind);
+    return {
+      issuerKind: issuer.kind,
+      issuerId: issuer.id,
+      issuerLabel: issuer.kind === 'board' ? '董事会' : (issuer.id ?? '未知'),
+      pinned: normalizeHandoff(task.handoff),
+      defaultHandoff: resolveHandoff(task, kind, {}).handoff,
+      reviewer,
+      reviewerIsCeo: reviewer === ceoId(),
+      allowSelfLand: task.allowSelfLand === true,
+    };
+  }
+
+  /** 执行者想在报告里指定「交给谁审」，必须过这道闸：
+   * 只能指自己汇报链上的上级（或配置里的默认审查人）。
+   * 不加这道闸，员工就能把审查人换成自己人，甚至换成自己——审查形同虚设。
+   */
+  function checkReviewBy(task, wanted) {
+    const target = String(wanted ?? '').trim();
+    if (!target) return { ok: true, reviewer: null };
+    // 请董事会自己看：永远合法（他是最高权力，谈不上「越权指定上级」）。
+    if (BOARD_ALIASES.has(target.toLowerCase())) return { ok: true, reviewer: 'human' };
+    if (target === task.assignee) return { ok: false, reason: '不能指定自己审自己' };
+    if (!(config.agents ?? []).some((a) => a.id === target || a.postTitle === target)) {
+      return { ok: false, reason: `没有这个岗位：${target}` };
+    }
+    const norm = (config.agents ?? []).find((a) => a.id === target || a.postTitle === target)?.id ?? target;
+    const allow = new Set(ancestors(config, task.assignee));
+    if (config.artifacts?.defaultReviewer) allow.add(config.artifacts.defaultReviewer);
+    // 董事会点名的审查人可以放宽（人自己定的责任链，引擎不替他改）。
+    if (issuerOf(task).kind === 'agent') allow.add(issuerOf(task).id);
+    if (!allow.has(norm)) {
+      return { ok: false, reason: `${target} 不在 ${task.assignee} 的汇报链上，不能当审查人` };
+    }
+    return { ok: true, reviewer: norm };
   }
 
   /** 执行岗主动上报：卡转 blocked，不重试；给上级建一张「处理升级」的卡，让他带着证据决定。 */
@@ -2160,6 +2423,46 @@ export function createEngine({
       escalateToRescue(task, '验收连续多次打回');
     }
     return { taskId, status: 'in_progress', verdict: 'reject' };
+  }
+
+  /**
+   * 董事会自己审：把结果摊成一张待拍板单。
+   * 人看到的必须是「结果」而不是「一张卡的元数据」：干了什么、产出哪些文件、验收条件过没过。
+   * 通过 → 卡自动 done 并落盘；打回 → 卡退回执行人，附上人写的意见。
+   */
+  function requestTaskReview(task, report, kind, runId = null) {
+    const pending = db.prepare(`SELECT approvalId FROM approvals
+      WHERE kind = 'task_review' AND taskId = ? AND status = 'pending'`).get(task.taskId);
+    if (pending) return { approvalId: pending.approvalId, reused: true };
+    const artifacts = Array.isArray(report.artifacts) ? report.artifacts : [];
+    const checks = Array.isArray(report.acceptanceResults) ? report.acceptanceResults : [];
+    const taskRow = taskById(task.taskId) ?? task;
+    const body = [
+      `谁干的：${task.assignee}`,
+      `干了什么：${String(report.summary ?? '(未写总结)').slice(0, 600)}`,
+      artifacts.length ? `产出：${artifacts.join('、')}` : '产出：没有文件（结果写在报告里）',
+      `产物类型：${kind}`,
+      checks.length
+        ? `验收条件：${checks.map((c) => `${c.pass === false ? '✗' : '✓'} ${c.rule}`).join('；')}`
+        : '验收条件：未逐条回执',
+      taskRow?.project ? `归属项目：${taskRow.project}` : '归属项目：无（一次性任务）',
+    ].join('\n');
+    return requestApproval({
+      kind: 'task_review',
+      taskId: task.taskId,
+      title: `待拍板：${task.title}`,
+      body,
+      payload: {
+        taskId: task.taskId, title: task.title, assignee: task.assignee,
+        summary: String(report.summary ?? ''), artifacts, kind,
+        acceptanceResults: checks, runId,
+        project: taskRow?.project ?? null,
+        repo: taskRow?.repo ?? null,
+        // 产物在磁盘上的位置（看板直接给人点）
+        workDir: workDir ? path.join(workDir, 'tasks', task.taskId, 'output') : null,
+      },
+      requestedBy: task.assignee,
+    });
   }
 
   async function handleResult(outcome, task, agentId, payload) {
@@ -2375,7 +2678,16 @@ export function createEngine({
             after: Array.isArray(c.after) ? c.after : (c.after === undefined || c.after === null ? [] : [c.after]),
             // 代码类活：CEO 可以指定仓库和验收人；没指定就走引擎的默认（受管代码默认工程岗审）。
             repo: c.repo ? String(c.repo) : null,
-            reviewBy: c.reviewBy ? String(c.reviewBy) : null,
+            // 写错了不炸整单：留痕后当没写，走默认推导（拆卡不能因为一个字段名写错就全废）。
+            reviewBy: softRoute(() => assertReviewSeat(c.reviewBy), {
+              action: 'route_field_rejected', who: 'ceo', taskId: task.taskId, field: 'reviewBy', value: c.reviewBy,
+            }),
+            // 交付路由：CEO 可以在派活时就定死（land = 干完直接落盘、不用回来看）。
+            handoff: softRoute(() => assertHandoff(c.handoff), {
+              action: 'route_field_rejected', who: 'ceo', taskId: task.taskId, field: 'handoff', value: c.handoff,
+            }),
+            // 授权执行者自己判落盘。默认不给：上级派的活，员工无权替上级免审。
+            allowSelfLand: c.allowSelfLand === true,
           });
         }
         // P4-2 战略门禁：开着就必须人点头才派活；任务停在 in_progress 等审批，不额外烧额度。
@@ -2530,34 +2842,88 @@ export function createEngine({
 
     // 报告合格：先攒下这份报告，等卡到 done 再落项目记忆（打回重做的不算数）。
     pendingMemory.set(task.taskId, report);
+
+    // 执行者自己指定了审查人：先过闸（只能指汇报链上的上级 / 默认审查人）。
+    // 过了就写回卡上，审计才查得出「这活当初是谁说要交给谁审的」。
+    const wantedReviewer = checkReviewBy(task, report.reviewBy);
+    if (wantedReviewer.reviewer) {
+      db.prepare('UPDATE tasks SET reviewBy = ?, updatedAt = ? WHERE taskId = ?')
+        .run(wantedReviewer.reviewer, nowIso(), task.taskId);
+      Object.assign(task, { reviewBy: wantedReviewer.reviewer });
+      writeAudit(db, {
+        actor: agentId, action: 'review_by_set',
+        newValue: `${wantedReviewer.reviewer}（执行者指定）`, runId: outcome.runId, taskId: task.taskId,
+      });
+    } else if (!wantedReviewer.ok) {
+      writeAudit(db, {
+        actor: agentId, action: 'review_by_rejected',
+        newValue: `${String(report.reviewBy).slice(0, 40)}|${wantedReviewer.reason}`.slice(0, 300),
+        runId: outcome.runId, taskId: task.taskId,
+      });
+    }
+
     transition(db, task.taskId, 'in_review', 'control-plane', outcome.runId);
-    if (task.mode === 'direct') {
+    if (task.mode === 'direct' && handoff !== 'review') {
       // 直投跳过 CEO：验收条件由人写清、机器判定，合格即完成，不产生 CEO 的 Run。
+      // 只对董事会负责——这就是「直投不上报」的落地。执行者要求审时走下一条。
       transition(db, task.taskId, 'done', 'control-plane', outcome.runId);
       writeAudit(db, { actor: 'human', action: 'machine_acceptance', newValue: task.taskId, runId: outcome.runId });
       flushProjectMemory(task, outcome.runId);
       deliverAccepted(task, outcome.runId);
       return;
     }
-    // ③ 直接落盘：执行岗判断「这活不需要第二个人再看」，就不叫 CEO 跑一轮（省一次按量计费的 Run）。
+    // ③ 直接落盘：发布者（或获授权的执行者）判断「这活不需要第二个人再看」，
+    //    就不叫任何人跑一轮验收（省一次按量计费的 Run）。
     if (handoff === 'land') {
       transition(db, task.taskId, 'done', 'control-plane', outcome.runId);
+      const issuer = handoffInfo.issuer;
       writeAudit(db, {
         actor: agentId, action: 'handoff_land',
-        newValue: `${kind}|${kindInfo.inferred ? '推断' : '自报'}`, runId: outcome.runId, taskId: task.taskId,
+        newValue: [
+          `产物 ${kind}${kindInfo.inferred ? '(推断)' : '(自报)'}`,
+          `发布者 ${issuer.kind === 'board' ? '董事会' : (issuer.id ?? '未知')}`,
+          `路由来源 ${handoffInfo.source}`,
+          handoffInfo.codeForced ? '代码强制改审' : null,
+          handoffInfo.downgraded ? `已拦下降级：${handoffInfo.downgraded}` : null,
+        ].filter(Boolean).join('｜').slice(0, 400),
+        runId: outcome.runId, taskId: task.taskId,
       });
       flushProjectMemory(task, outcome.runId);
       deliverAccepted(task, outcome.runId);
       return;
     }
-    // ④ 交审：代码类默认工程岗；其余默认总经理。
+    // ④ 交审：谁发布谁审（上级派的活回上级）；代码类仍走工程岗。
     const reviewer = reviewerOf(task, kind);
+    // 被拦下过「私自落盘」的，留一条痕：这不是错误，但董事会该看得见谁想跳过审。
+    if (handoffInfo.downgraded) {
+      writeAudit(db, {
+        actor: agentId, action: 'handoff_downgraded',
+        newValue: `${handoffInfo.downgraded}｜改交 ${reviewer} 审`.slice(0, 300),
+        runId: outcome.runId, taskId: task.taskId,
+      });
+    }
     if (reviewer === ceoId()) {
       // 按 Run 去重：同一次执行的报告只请一次验收，但返工后的新 Run 可以再请一次。
       emitEvent({
         type: 'review_requested', taskId: task.taskId, agentId: ceoId(),
         payload: { wakeReason: 'review_requested', kind },
         dedupeKey: `review:${task.taskId}:${outcome.runId}`,
+      });
+      return;
+    }
+    // 董事会自己审：不叫醒任何 agent，出一张「待我拍板」单。
+    // 人从看板点进去就能看到结果（summary + 产物清单 + 验收条件），通过即自动走下一步。
+    if (reviewer === 'human') {
+      const approval = requestTaskReview(task, report, kind, outcome.runId);
+      writeAudit(db, {
+        actor: 'control-plane', action: 'task_review_waiting',
+        newValue: `${approval.approvalId}|${kind}|产物 ${(report.artifacts ?? []).length} 个`,
+        runId: outcome.runId, taskId: task.taskId,
+      });
+      notifier.send({
+        title: `待你拍板：${task.title}`,
+        body: `「${task.assignee}」说干完了：${String(report.summary ?? '').slice(0, 120)}`,
+        scene: 'review', taskId: task.taskId,
       });
       return;
     }

@@ -157,6 +157,40 @@ function buildPrompt(ctx) {
     lines.push(repo ? describeRepo(repo) : `仓库 id：${task.repo}（台账里没找到，先别动 git）`);
     lines.push('改代码就在这个目录里改；不要提交、不要推送 —— 提交与推送由审查人在审完之后做。');
   }
+  // 交付路由：讲清「谁发布的、默认交给谁」。不讲清，员工会把上级派的活自己结案，
+  // 发布者永远看不到结果；或者反过来，把董事会直投的活层层上报，白烧一次总经理的额度。
+  const route = task.handoffPolicy;
+  if (route) {
+    lines.push('', '【这张卡该往哪走】');
+    if (route.pinned) {
+      const where = route.pinned === 'land' ? '干完直接落盘（不用惊动任何人）'
+        : route.pinned === 'escalate' ? '中途发现方向不对就上报'
+          : `交 ${route.reviewer} 审`;
+      lines.push(`- 发布者发布时已经定好：${route.pinned} —— ${where}。`);
+      lines.push('- 这个不用你重新判断：按发布者定的走。发现不对可以往上调（改成 review / escalate），不许往下调。');
+    } else if (route.issuerKind === 'board') {
+      lines.push('- 发布者：董事会（人）—— 这活只对他负责，**不用上报总经理**。');
+      lines.push('- 默认去向：干完直接落盘（handoff=land）。产物就是结果，写清 summary 收工。');
+      if (route.allowSelfLand === false) {
+        lines.push('- 你觉得需要有人再看一眼，可以写 handoff=review：引擎会转给该审的人（这会多烧一次对方的额度，别滥用）。');
+      }
+      lines.push('- 董事会原话里要求「给我看 / 等我批」时，卡上已经带上 reviewBy=human：'
+        + '那就照常交活，引擎会生成一张待拍板单，董事会点通过才落盘——你不用去催。');
+    } else if (route.issuerKind === 'agent') {
+      lines.push(`- 发布者：${route.issuerLabel} —— 这是他派的活，结果必须回给他看。`);
+      lines.push(`- 默认去向：交回 ${route.reviewer} 审（handoff=review）。`);
+      if (route.allowSelfLand === true) {
+        lines.push('- 发布者已授权你可以自己判落盘：确属一次性产物就写 handoff=land，不用回他。');
+      } else {
+        lines.push('- **不要自己写 handoff=land 绕过验收**：上级派的活，员工无权替上级免审。'
+          + '引擎会拦下并改成交审，还会记一条痕。');
+      }
+    } else {
+      lines.push('- 发布者不明（老卡 / 系统代派）：按最稳的走，交人审，别自己结案。');
+    }
+    lines.push('- 想指定谁来审，写 reviewBy（岗位或担任者 id）。只能指自己汇报链上的上级或默认审查人，'
+      + '引擎会校验；越权的会被忽略并留痕。');
+  }
   lines.push(
     '',
     '【交付要求】',
