@@ -14,9 +14,47 @@ import { createEngine, createNotifier } from './engine.js';
 import { openDb, seedAgents } from './core.js';
 import { buildObservation, renderObservationMarkdown, detectDirty } from './observe.js';
 import { nowIso } from './ids.js';
+import { GuiError } from './gui-driver.js';
 
-// 四个席位：CEO / 组长 / 执行 / 救火。与 P4 测试同构，便于复用既有断言口径。
+// GUI 席位的六种工况。soak 每步切一种，让闸门 / 剪贴板 / deferred / 失败都进样本。
+// 不是随机撒：固定循环，出问题能对着场景号复现。
+export const SOAK_GUI_MODES = Object.freeze(['ok', 'busy', 'locked', 'focus', 'bad']);
+
+// 模拟对面那个 agent：收到提示词后往 output/ 写真产物，再写三字段 draft。
+// 控制面扫 output/ 自己算校验和 —— 和真机豆包走的是同一条路径，不是假成功。
+//
+// 工况从**任务卡标题**解析（[gui-ok] / [gui-busy] / ...），不从全局状态读：
+// 一张卡被闸门拦下后会在后续某轮重投，那时全局工况早就切走了；如果把行为绑在全局状态上，
+// 「你正用电脑」的卡重投时会按当时的工况乱跑，样本归因全错。绑在卡上才对得起来。
+// 首次触发故意出一次错（deferred / failed），重投即成功 —— 模拟「临时挡一下，稍后自己好了」。
+function makeSoakGuiOnSend() {
+  return async ({ paths, taskId, runId, ctx }) => {
+    const title = String(ctx?.task?.title ?? '');
+    const matched = /^\[gui-(ok|busy|locked|focus|bad)\]/.exec(title);
+    const mode = matched?.[1] ?? 'ok';
+    const attempt = Number(ctx?.task?.attempt ?? 0);
+    if (mode === 'focus' && attempt === 0) {
+      throw new GuiError('focus', '模拟：前台窗口被抢，稍后再试');
+    }
+    fs.mkdirSync(paths.outputDir, { recursive: true });
+    if (mode !== 'bad' || attempt > 0) {
+      fs.writeFileSync(
+        path.join(paths.outputDir, 'result.md'),
+        `# soak 产物\n\n- taskId: ${taskId}\n- runId: ${runId}\n- 工况: ${mode}\n- 第 ${attempt + 1} 次\n`,
+        'utf8',
+      );
+    }
+    fs.writeFileSync(path.join(paths.taskDir, 'report.draft.json'), `${JSON.stringify({
+      schema: 'aicompany.draft/v1', status: 'success',
+      summary: `soak GUI 席位（${mode}）完成`,
+    }, null, 2)}\n`, 'utf8');
+  };
+}
+
+// 五个席位：CEO / 组长 / 执行 / 救火 / 模拟驱动 GUI。
+// GUI 那席用 simulation driver，不碰真实键鼠、不抢前台；只有文件和状态机是真的。
 export function buildSoakSeats({ quotaDaily = 30, workRoot = null } = {}) {
+  const guiState = { mode: 'ok' };
   return [
     {
       id: 'ceo', displayName: '总经理', isCEO: true,
@@ -39,6 +77,38 @@ export function buildSoakSeats({ quotaDaily = 30, workRoot = null } = {}) {
       id: 'worker-02', displayName: '救火席位', isCEO: false, capabilities: ['execute'],
       status: 'active', quotaDaily, reportsTo: 'ceo',
       adapter: { type: 'mock', config: { result: makeSoakWorkerResult(workRoot) } },
+    },
+    // G-P5 / B：把 GUI 路径也拉进 72 小时样本。
+    // 之前四席全是 mock，guiFailure 永远「样本不足」，闸门 / 剪贴板 / deferred 一行都没跑到。
+    {
+      id: 'gui-worker', displayName: 'GUI 执行席（模拟驱动）', isCEO: false, capabilities: ['execute'],
+      status: 'active', quotaDaily, reportsTo: 'lead',
+      adapter: {
+        type: 'gui-template',
+        config: {
+          workRoot,
+          windowTitle: 'Soak Assistant（模拟）',
+          driver: 'simulation',
+          reportMode: 'draft',
+          pollIntervalMs: 10,
+          maxPolls: 1,
+          // 四道闸只开两道：静置与锁屏。busy / locked 两种工况靠改 simulation 的读数触发，
+          // 而不是改闸配置 —— 配置在 72 小时里必须冻结，否则样本口径会漂。
+          gate: { requireIdleSec: 60, requireUnlocked: true },
+          steps: [
+            { action: 'activate' },
+            { action: 'paste' },
+            { action: 'press', key: 'enter' },
+          ],
+          simulation: {
+            initialTitle: 'Soak Assistant（模拟）',
+            idleSec: 999, locked: false, clipChars: 0,
+            onSend: makeSoakGuiOnSend(),
+            // 给 runner 找到这个状态对象用；createSimulationDriver 展开时忽略未知字段。
+            _modeState: guiState,
+          },
+        },
+      },
     },
   ];
 }
@@ -102,7 +172,10 @@ function makeSoakWorkerResult(workRoot) {
   };
 }
 
-export function buildSoakConfig({ workRoot = null, cooldownSec = 0, maxConcurrent = 3, periodHours = 24, quotaDaily = 30 } = {}) {
+// 配额默认给足：GUI 卡被闸门拦下 / deferred / 返工都会重试，一张卡能累积好几个 run。
+// 配额触顶会让引擎拒绝派活并记一条 error，把「状态机不脏」的长跑结论污染成报错。
+// 试运行是压力测试，配额治理不是它的观测对象。
+export function buildSoakConfig({ workRoot = null, cooldownSec = 0, maxConcurrent = 3, periodHours = 24, quotaDaily = 500 } = {}) {
   return {
     version: 1,
     workRoot,
@@ -131,6 +204,12 @@ export const SOAK_SCENARIOS = Object.freeze([
   { kind: 'cowork', title: '[ok] 一起改材料', mode: 'cowork', addressedTo: 'worker-01' },
   { kind: 'meeting', title: '[ok] 点名同步进度', mode: 'meeting', addressedTo: null },
   { kind: 'direct-ok', title: '[ok] 巡检日志', mode: 'direct', addressedTo: 'lead' },
+  // G-P5 / B：五种 GUI 工况各一张卡，点名给模拟 GUI 席位。
+  { kind: 'gui-ok', title: '[gui-ok] GUI 席位整理材料', mode: 'direct', addressedTo: 'gui-worker', guiMode: 'ok' },
+  { kind: 'gui-busy', title: '[gui-busy] 你正用电脑时来的 GUI 活', mode: 'direct', addressedTo: 'gui-worker', guiMode: 'busy' },
+  { kind: 'gui-locked', title: '[gui-locked] 锁屏时来的 GUI 活', mode: 'direct', addressedTo: 'gui-worker', guiMode: 'locked' },
+  { kind: 'gui-focus', title: '[gui-focus] 前台被抢的 GUI 活', mode: 'direct', addressedTo: 'gui-worker', guiMode: 'focus' },
+  { kind: 'gui-bad', title: '[gui-bad] GUI 席位交了空报告', mode: 'direct', addressedTo: 'gui-worker', guiMode: 'bad' },
 ]);
 
 export function scenarioFor(index) {
@@ -151,18 +230,36 @@ function ensureDir(dir) {
  */
 export function createSoakRunner({
   workRoot, dbPath = ':memory:', config = null, startAt = new Date('2026-03-01T00:00:00.000Z'),
-  stepMinutes = 60, sampleEvery = 1,
+  stepMinutes = 60, sampleEvery = 1, realClock = false,
 } = {}) {
   ensureDir(workRoot);
   const db = openDb(dbPath);
   const cfg = config ?? buildSoakConfig({ workRoot });
   seedAgents(db, cfg);
   let virtualNow = new Date(startAt.getTime());
-  const clock = () => new Date(virtualNow);
+  // real 模式用真实墙钟：脏检测的「Run 挂了多久 / 事件积压多久」必须按真时间算，
+  // 否则虚拟时钟停在起点，72 小时里所有超时检查都会失效。
+  const clock = realClock ? () => new Date() : () => new Date(virtualNow);
   const engine = createEngine({
     db, config: cfg, notifier: createNotifier('noop'),
     workRoot, now: clock, dispatchMode: 'inline', maxSteps: 200,
   });
+
+  // G-P5 / B：找到 GUI 席位的状态对象，每步切工况。配置本身冻结，只改模拟探针的读数。
+  const guiSeat = (cfg.agents ?? []).find((a) => a.id === 'gui-worker') ?? null;
+  const guiState = guiSeat?.adapter?.config?.simulation?._modeState ?? null;
+  const guiSimulation = guiSeat?.adapter?.config?.simulation ?? null;
+  function setGuiMode(mode = 'ok') {
+    if (!guiState) return;
+    const safe = SOAK_GUI_MODES.includes(mode) ? mode : 'ok';
+    guiState.mode = safe;
+    if (guiSimulation) {
+      // requireIdleSec=60：busy 给 0 秒；其余给 999 秒，绝不会误拦。
+      guiSimulation.idleSec = safe === 'busy' ? 0 : 999;
+      guiSimulation.locked = safe === 'locked';
+      guiSimulation.clipChars = 0;
+    }
+  }
 
   const samples = [];
   let stepIndex = 0;
@@ -212,6 +309,7 @@ export function createSoakRunner({
       pendingEvents: db.prepare('SELECT COUNT(*) AS n FROM events WHERE processed = 0').get().n,
       dirtyCount: dirty.count,
       dirtyCodes: dirty.counts,
+      guiMode: guiState?.mode ?? null,
     };
     samples.push(sampled);
     return sampled;
@@ -246,6 +344,8 @@ export function createSoakRunner({
       stepIndex += 1;
       advance();
       const scenario = scenarioFor(stepIndex);
+      // 先切工况再维护：上一轮被闸门退回的卡，重投时要用这一轮的读数。
+      setGuiMode(scenario.guiMode ?? 'ok');
       try {
         maintain();
         await submitScenario(scenario);
@@ -261,14 +361,41 @@ export function createSoakRunner({
     return { steps, hours, samples, errors };
   }
 
+  /**
+   * 真实墙钟模式走一步：只投一张卡，不推进虚拟时钟（时钟是真实墙钟）。
+   * 由 scripts/soak.js 每个 interval 调一次。跟 drive() 的单步逻辑一致，
+   * 区别仅在「不 advance」——否则 72 小时会把虚拟时钟推到天荒地老，脏检测全乱。
+   */
+  async function realtimeStep() {
+    stepIndex += 1;
+    const scenario = scenarioFor(stepIndex);
+    setGuiMode(scenario.guiMode ?? 'ok');
+    let error = null;
+    try {
+      maintain();
+      await submitScenario(scenario);
+      await engine.pump();
+      if (stepIndex % 8 === 0) await probeTerminalWake();
+    } catch (e) {
+      error = String(e.message ?? e);
+    }
+    sample(scenario.kind);
+    return { step: stepIndex, scenario: scenario.kind, at: clock().toISOString(), error };
+  }
+
   function observation({ mode = 'compressed', hours = 0, startedAt = null } = {}) {
     return buildObservation({
       db, config: cfg, workRoot, now: clock(),
       window: {
         mode, hours, stepMinutes, startedAt, endedAt: clock().toISOString(),
-        notes: probeCount > 0
-          ? [`含 ${probeCount} 次「对已完成卡再派一次」的主动探针，用于验证终态拦截；探针单独计数，不计入误唤醒率的分母。`]
-          : [],
+        notes: [
+          ...(probeCount > 0
+            ? [`含 ${probeCount} 次「对已完成卡再派一次」的主动探针，用于验证终态拦截；探针单独计数，不计入误唤醒率的分母。`]
+            : []),
+          guiState
+            ? '含模拟驱动 GUI 席位（simulation driver，不碰真实键鼠），按 ok/busy/locked/focus/bad 五种工况循环，闸门、剪贴板、deferred、失败率均进样本。'
+            : '本次未启用模拟 GUI 席位。',
+        ],
       },
     });
   }
@@ -278,7 +405,8 @@ export function createSoakRunner({
     get now() { return clock(); },
     get samples() { return samples; },
     get probeCount() { return probeCount; },
-    advance, maintain, sample, submitScenario, probeTerminalWake, drive, observation,
+    advance, maintain, sample, submitScenario, probeTerminalWake, drive, realtimeStep, observation, setGuiMode,
+    get guiMode() { return guiState?.mode ?? null; },
     close: () => db.close(),
   };
 }

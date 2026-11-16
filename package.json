@@ -24,6 +24,8 @@
         "task": "node scripts/new-task.js",
         "soak": "node scripts/soak.js",
         "soak:real": "node scripts/soak.js --hours 72 --mode real --interval 60",
+        "prod-watch": "node scripts/prod-watch.js",
+        "prod-watch:72h": "node scripts/prod-watch.js --hours 72 --interval 60",
         "win:install": "powershell -ExecutionPolicy Bypass -File scripts/win/install.ps1",
         "win:uninstall": "powershell -ExecutionPolicy Bypass -File scripts/win/install.ps1 -Uninstall",
         "win:start": "powershell -ExecutionPolicy Bypass -File scripts/win/start.ps1",

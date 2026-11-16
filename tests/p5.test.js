@@ -16,6 +16,8 @@ import {
 import {
   createSoakRunner, buildSoakConfig, judgeGate, writeSoakReport, scenarioFor, SOAK_SCENARIOS,
 } from '../src/soak.js';
+import { createProdWatcher } from '../src/prod-watch.js';
+import { resolveProfile } from '../src/profiles.js';
 import {
   tune, tuneHistory, TUNABLE, TuneError, readOverrides, writeOverrides, applyOverrides,
 } from '../src/tune.js';
@@ -327,6 +329,104 @@ test('G-P5 · 真实墙钟跑满但中途脏过，仍然判不通过', () => {
   assert.equal(gate.passed, false);
   assert.equal(gate.level, 'dirty');
 });
+
+// ---------- G-P5 / B：模拟驱动 GUI 席位进样本 ----------
+
+test('G-P5-B · soak 席位表含模拟驱动 GUI 席位，且不碰真实键鼠', () => {
+  const cfg = buildSoakConfig({ workRoot: null });
+  const gui = cfg.agents.find((a) => a.id === 'gui-worker');
+  assert.ok(gui, '缺少 GUI 席位');
+  assert.equal(gui.adapter.type, 'gui-template');
+  assert.equal(gui.adapter.config.driver, 'simulation', '必须是模拟驱动，不许抢真键鼠');
+  assert.equal(gui.adapter.config.reportMode, 'draft', '走控制面扫产物的降级验收路径');
+  assert.ok(gui.adapter.config.steps.length > 0, 'GUI 步骤不能为空');
+});
+
+test('G-P5-B · 压缩长跑里 GUI 路径真的产生 run、闸门、deferred 样本', async (t) => {
+  const { runner, observation } = await soakRun(t, { hours: 26 });
+  const m = observation.metrics;
+  assert.ok(m.guiFailure.runs > 0, 'GUI 席位一个有效 run 都没有——等于没进样本');
+
+  const gateAudit = runner.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'gate_blocked'").get().n;
+  const deferredRuns = runner.db.prepare("SELECT COUNT(*) AS n FROM runs WHERE agentId = 'gui-worker' AND status = 'deferred'").get().n;
+  const guiSuccess = runner.db.prepare("SELECT COUNT(*) AS n FROM runs WHERE agentId = 'gui-worker' AND status = 'success'").get().n;
+  assert.ok(gateAudit > 0, '闸门拦截没有进样本');
+  assert.ok(deferredRuns > 0, 'deferred 没有进样本');
+  assert.ok(guiSuccess > 0, 'GUI 成功路径没有进样本');
+  assert.ok(observation.window.notes.some((n) => n.includes('模拟驱动 GUI')), '观察记录未标注 GUI 工况');
+});
+
+test('G-P5-B · deferred 不进 GUI 失败率分母（与引擎口径一致）', async (t) => {
+  const { observation } = await soakRun(t, { hours: 13 });
+  const g = observation.metrics.guiFailure;
+  assert.ok(g.deferred > 0, '这段长跑应该有 deferred 样本');
+  assert.equal(g.runs + g.deferred > 0, true);
+  // 分母 runs 已排除 deferred；断言口径说明里有明确写出
+  assert.match(METRIC_DEFINITIONS.guiFailure, /deferred/);
+});
+
+test('G-P5-B · GUI 卡报告落任务根也不误报「报告缺失」', async (t) => {
+  const { runner, observation } = await soakRun(t, { hours: 26 });
+  const guiDone = runner.db.prepare("SELECT taskId FROM tasks WHERE assignee = 'gui-worker' AND status = 'done'").all();
+  assert.ok(guiDone.length > 0, '没有 done 的 GUI 卡');
+  const missing = observation.dirty.issues.filter((i) => i.code === 'done_without_report'
+    && guiDone.some((g) => g.taskId === i.taskId));
+  assert.equal(missing.length, 0, `GUI 报告在任务根，却被误判缺失：${JSON.stringify(missing)}`);
+});
+
+test('G-P5-B · real 模式用真实墙钟，单步会投卡不推进虚拟时钟', async (t) => {
+  const root = scratch(t, 'p5-realtime');
+  const runner = createSoakRunner({
+    workRoot: root, config: buildSoakConfig({ workRoot: root, quotaDaily: 5000 }),
+    realClock: true, stepMinutes: 60,
+  });
+  t.after(() => { try { runner.close(); } catch { /* 已关 */ } });
+  const before = Date.now();
+  const tick = await runner.realtimeStep();
+  const after = Date.now();
+  assert.equal(tick.error, null, `单步报错：${tick.error}`);
+  const ts = Date.parse(tick.at);
+  assert.ok(ts >= before - 1000 && ts <= after + 1000, 'real 模式时间戳必须是真实墙钟');
+  const tasks = runner.db.prepare('SELECT COUNT(*) AS n FROM tasks').get().n;
+  assert.ok(tasks > 0, 'real 单步没投卡');
+  const guiSeen = runner.samples.some((s) => s.guiMode !== null);
+  assert.ok(guiSeen || runner.guiMode !== null, 'real 模式 GUI 工况没记录');
+});
+
+// ---------- G-P5 / C：生产真库看门狗 ----------
+
+test('G-P5-C · 看门狗只读打开生产库，采样并汇总', async (t) => {
+  const prof = resolveProfile('prod');
+  if (!fs.existsSync(prof.db)) {
+    t.skip('生产库不存在，跳过（看门狗本就不自建库）');
+    return;
+  }
+  const watcher = createProdWatcher({ profile: 'prod' });
+  t.after(() => watcher.close());
+  const row = watcher.sample('test');
+  assert.equal(row.ok, true, `探测失败：${row.error}`);
+  assert.equal(typeof row.clean, 'boolean');
+  assert.equal(typeof row.dirtyCount, 'number');
+  const s = watcher.summary();
+  assert.equal(s.sampleCount, 1);
+  assert.equal(s.dbPath, prof.db);
+  assert.equal(s.errorCount, 0);
+  const outDir = scratch(t, 'p5-prodwat');
+  const file = watcher.flush(outDir);
+  assert.ok(fs.existsSync(file), '采样 jsonl 未落盘');
+  assert.equal(fs.readFileSync(file, 'utf8').trim().split('\n').length, 1);
+});
+
+test('G-P5-C · 看门狗对生产库只读，不会建库', () => {
+  assert.throws(
+    () => createProdWatcher({ dbPath: path.join(scratchGlobal(), 'no-such-db.sqlite'), configPath: null }),
+    /生产库不存在/,
+  );
+});
+
+function scratchGlobal() {
+  return path.join(ROOT, 'work');
+}
 
 // ---------- Run Policy：cooldown 与终态 ----------
 

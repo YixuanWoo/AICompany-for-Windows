@@ -11,7 +11,7 @@ export const METRIC_DEFINITIONS = Object.freeze({
   falseWake: '误唤醒率 = 对「已挂起等决策 / 已终态」的任务发起的唤醒次数 ÷ 全部被拒唤醒次数。配额、并发、bridge 离线属于正常延迟，不计入误唤醒。主动探针单独计数，不进分子分母。',
   idleRun: '空转率 = 跑完但没带来任何进展的 Run 数 ÷ 成功的 Run 数。进展指状态迁移、建卡、返工、验收、决策、改版、升级、改派。',
   reportReject: '报告不合格率 = 验收打回次数 ÷（验收通过 + 验收打回）。等于返工率。',
-  guiFailure: 'GUI 失败率 = GUI 席位（adapter.type=gui-template）非成功 Run 数 ÷ 该席位 Run 总数；含环境检查不过与超时。',
+  guiFailure: 'GUI 失败率 = GUI 席位（adapter.type=gui-template）非成功 Run 数 ÷ 有效 Run 数；deferred（你正在用电脑 / 前台被抢）是临时条件，不扣额度、不算失败，单独列出不计入分母。含环境检查不过与超时。',
   quotaBurn: '额度消耗 = 本周期各席位已用 ÷ 上限，合计给出总消耗率。',
 });
 
@@ -81,7 +81,11 @@ export function computeMetrics({ db, config }) {
   // ④ GUI 失败率
   const guiAgents = new Set(agents.filter((a) => a.adapter?.type === 'gui-template').map((a) => a.id));
   const guiRuns = runs.filter((r) => guiAgents.has(r.agentId));
-  const guiBad = guiRuns.filter((r) => r.status !== 'success' && r.status !== 'done');
+  // deferred = 临时条件（你在用电脑 / 前台被抢），引擎明确不扣额度、不算失败、不累加重试。
+  // 指标口径必须跟引擎一致：它既不是成功也不是失败，单独列出，不进失败率分母（同 falseWake 的处理）。
+  const guiDeferred = guiRuns.filter((r) => r.status === 'deferred');
+  const guiEffective = guiRuns.filter((r) => r.status !== 'deferred');
+  const guiBad = guiEffective.filter((r) => r.status !== 'success' && r.status !== 'done');
   const envFailed = audit.filter((a) => a.action === 'env_check_failed').length;
 
   // ⑤ 额度消耗
@@ -117,10 +121,11 @@ export function computeMetrics({ db, config }) {
       rate: ratio(rejectedReports, rejectedReports + acceptedReports),
     },
     guiFailure: {
-      runs: guiRuns.length,
+      runs: guiEffective.length,
       failed: guiBad.length,
+      deferred: guiDeferred.length,
       envCheckFailed: envFailed,
-      rate: ratio(guiBad.length, guiRuns.length),
+      rate: ratio(guiBad.length, guiEffective.length),
     },
     quotaBurn: {
       used,
@@ -291,7 +296,15 @@ export function detectDirty({ db, config, workRoot = null, now = new Date() }) {
       // completionReportPath 是相对「任务目录」的（如 output/completion.json），不是相对 workRoot。
       if (rel) {
         const abs = path.isAbsolute(rel) ? rel : path.join(workRoot, 'tasks', t.taskId, rel);
-        if (!fs.existsSync(abs)) add('done_without_report', `任务 ${t.taskId} 标 done，但报告缺失：${abs}`, { taskId: t.taskId });
+        // GUI 型 adapter 的 reportPath 默认是任务根的 completion.json（见 buildTaskPaths），
+        // 而建卡时元数据统一写 output/completion.json。两个都是合法落点：
+        // 验收阶段 verifyReport 已逐字段校验过 checksum，这里只问「报告文件还在不在」。
+        // 只认元数据那一处会把所有 GUI 卡误判成脏（生产库 11/11 全中），属于假阳性。
+        const rootReport = path.join(workRoot, 'tasks', t.taskId, 'completion.json');
+        const legacyReport = abs === rootReport ? null : rootReport;
+        if (!fs.existsSync(abs) && !(legacyReport && fs.existsSync(legacyReport))) {
+          add('done_without_report', `任务 ${t.taskId} 标 done，但报告缺失：${abs}`, { taskId: t.taskId });
+        }
       }
     }
   }
@@ -390,7 +403,7 @@ export function renderObservationMarkdown(obs) {
     `| 误唤醒率 | ${fwText} | ${METRIC_DEFINITIONS.falseWake} |`,
     `| 空转 Run 率 | ${pct(m.idleRun.rate)}（${m.idleRun.total}/${m.idleRun.successRuns}） | ${METRIC_DEFINITIONS.idleRun} |`,
     `| 报告不合格率 | ${pct(m.reportReject.rate)}（${m.reportReject.rejected}/${m.reportReject.rejected + m.reportReject.accepted}） | ${METRIC_DEFINITIONS.reportReject} |`,
-    `| GUI 失败率 | ${pct(m.guiFailure.rate)}（${m.guiFailure.failed}/${m.guiFailure.runs}，环境检查不过 ${m.guiFailure.envCheckFailed} 次） | ${METRIC_DEFINITIONS.guiFailure} |`,
+    `| GUI 失败率 | ${pct(m.guiFailure.rate)}（${m.guiFailure.failed}/${m.guiFailure.runs}，deferred ${m.guiFailure.deferred} 次不计分母，环境检查不过 ${m.guiFailure.envCheckFailed} 次） | ${METRIC_DEFINITIONS.guiFailure} |`,
     `| 额度消耗 | ${pct(m.quotaBurn.rate)}（${m.quotaBurn.used}/${m.quotaBurn.limit}） | ${METRIC_DEFINITIONS.quotaBurn} |`,
     '',
     '## §6C / §6D 四项结论（P5-3）',

@@ -50,10 +50,17 @@ async function main() {
   fs.mkdirSync(workRoot, { recursive: true });
 
   const startedAt = new Date().toISOString();
+  // real 模式每 interval 投一张卡：72h / 60s = 4320 张。配额给足，
+  // 否则额度耗尽后引擎拒绝派活，GUI 样本在头几个小时就断档了。
+  // 这是压力试运行，额度消耗指标本就不作门禁条件。
+  const soakQuota = args.mode === 'real' ? 5000 : 30;
   const runner = createSoakRunner({
     workRoot, dbPath,
-    config: buildSoakConfig({ workRoot }),
+    // 真实模式：每个 interval 投一张卡（含 GUI 席位），时钟用真实墙钟。
+    // 之前 real 只 maintain 不投单，GUI 路径 72 小时零样本，五项指标全是空的。
+    config: buildSoakConfig({ workRoot, quotaDaily: soakQuota }),
     stepMinutes: args.mode === 'real' ? 60 : args.stepMin,
+    realClock: args.mode === 'real',
   });
 
   const log = (...line) => { if (!args.quiet) console.log(...line); };
@@ -92,17 +99,18 @@ async function main() {
     process.exit(gate.level === 'simulated' ? 0 : 1);
   }
 
-  // 真实墙钟：真等，按 interval 秒做维护与采样。跑到 hours 满或人工中断。
+  // 真实墙钟：每个 interval 投一张卡（含 GUI 工况轮换）+ 维护 + 采样。
+  // 跑到 hours 满或人工中断。采样用真实时钟，脏检测的超时判定才有意义。
   const deadline = Date.now() + args.hours * 3_600_000;
+  const errors = [];
   let lastLog = 0;
   while (Date.now() < deadline && !interrupted) {
-    runner.maintain();
-    await runner.engine.pump();
-    runner.sample('real-tick');
+    const tick = await runner.realtimeStep();
+    if (tick.error) errors.push({ step: tick.step, at: tick.at, error: tick.error });
     if (Date.now() - lastLog > 60_000) {
       lastLog = Date.now();
       const left = ((deadline - Date.now()) / 3_600_000).toFixed(2);
-      log(`  ${new Date().toISOString()} | 还剩 ${left} 小时 | 采样 ${runner.samples.length}`);
+      log(`  ${new Date().toISOString()} | 还剩 ${left} 小时 | 步 ${tick.step} | 采样 ${runner.samples.length}`);
     }
     await sleep(Math.max(1, args.interval) * 1000);
   }
@@ -117,10 +125,10 @@ async function main() {
   });
   const { dir } = writeSoakReport(reportDir, {
     runId, mode: 'real', hours: args.hours, stepMinutes: 60,
-    startedAt, endedAt, samples: runner.samples, observation, gate, errors: [],
+    startedAt, endedAt, samples: runner.samples, observation, gate, errors,
   });
   runner.close();
-  printSummary({ observation, gate, dir, errors: [] });
+  printSummary({ observation, gate, dir, errors });
   process.exit(gate.passed ? 0 : 1);
 }
 
@@ -136,7 +144,7 @@ function printSummary({ observation, gate, dir, errors }) {
   console.log(`  误唤醒率      ${fwText}`);
   console.log(`  空转 Run 率   ${pct(m.idleRun.rate)}  (${m.idleRun.total}/${m.idleRun.successRuns})`);
   console.log(`  报告不合格率  ${pct(m.reportReject.rate)}  (${m.reportReject.rejected}/${m.reportReject.rejected + m.reportReject.accepted})`);
-  console.log(`  GUI 失败率    ${pct(m.guiFailure.rate)}  (${m.guiFailure.failed}/${m.guiFailure.runs})`);
+  console.log(`  GUI 失败率    ${pct(m.guiFailure.rate)}  (${m.guiFailure.failed}/${m.guiFailure.runs}，deferred ${m.guiFailure.deferred} 次不计分母)`);
   console.log(`  额度消耗      ${pct(m.quotaBurn.rate)}  (${m.quotaBurn.used}/${m.quotaBurn.limit})`);
   console.log('=== §6C / §6D 四项结论 ===');
   for (const [key, value] of Object.entries(observation.findings)) {
