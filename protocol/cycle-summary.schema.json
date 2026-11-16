@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aicompany.cycle-summary/v1",
+  "title": "CycleSummary",
+  "description": "每轮收账，只追加。carryOver 注入下一轮任务卡，提供结构化趋势而非模型写的复盘（任务书 §6A.4 / §7.7）。",
+  "type": "object",
+  "required": ["schema", "jobId", "jobVersion", "cycleNo", "taskId", "status", "metrics", "runIds"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "aicompany.cycle-summary/v1" },
+    "jobId": { "type": "string", "minLength": 1 },
+    "jobVersion": { "type": "integer", "minimum": 1 },
+    "cycleNo": { "type": "integer", "minimum": 1 },
+    "periodStart": { "type": "string" },
+    "periodEnd": { "type": "string" },
+    "taskId": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["done", "failed", "cancelled", "skipped"] },
+    "metrics": { "type": "object" },
+    "deltaVsPrev": { "type": "object" },
+    "findings": { "type": "array", "items": { "type": "object" } },
+    "carryOver": { "type": "array", "items": { "type": "object" } },
+    "derivedTasks": { "type": "array", "items": { "type": "string" } },
+    "humanDecision": { "type": ["string", "null"] },
+    "runIds": { "type": "array", "items": { "type": "string" } },
+    "transcriptPath": { "type": ["string", "null"] }
+  }
+}

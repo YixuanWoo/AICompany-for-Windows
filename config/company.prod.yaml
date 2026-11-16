@@ -1,0 +1,123 @@
+# 生产实例配置：一句话下单 → 豆包工作直接干 → 产物回看板。
+#
+# 用法：
+#   npm run win:install            # 注册常驻（登入自启 + 每 5 分钟巡检）
+#   http://127.0.0.1:3100/         # 打开看板，写一句话，点提交
+#   或命令行：npm run task -- "写一份本周工作简报"
+#
+# 三条约定：
+# 1. defaultMode 是 direct：一句话直投执行席位，不经过 CEO 拆解，最快闭环。
+#    delegate 也能用，此时 CEO 由 scripts/router-ceo.js 当「确定性派单器」代班（不调模型、不烧额度）。
+# 2. 窗口标题只写「豆包工作」这个稳定片段（完整标题前面还挂着会话名，会变）。
+# 3. GUI 席位全局只能有一份：本配置带 GUI 席位，第二个带 GUI 席位的实例会被启动时拒绝。
+version: 1
+company:
+  name: aicompany-prod
+  timezone: Asia/Shanghai
+# 生产产物与演示实例（work/）分开，互不干扰。
+workRoot: D:/开源/AICompany/work-prod
+interaction:
+  defaultMode: direct
+  defaultTarget: ceo
+  allowDirectTo: [execute]
+  autoAssign: false
+  modes:
+    delegate:
+      createTask: true
+      wake: [defaultTarget]
+      ceoVisibility: decide
+    direct:
+      createTask: true
+      wake: [addressedTo]
+      ceoVisibility: cc
+    cowork:
+      createTask: false
+      wake: [addressedTo]
+      ceoVisibility: none
+      container: workThread
+    meeting:
+      createTask: false
+      wake: [rollCall]
+      ceoVisibility: cc
+      container: workThread
+quota:
+  warnRatio: 0.8
+  stopRatio: 1
+  periodHours: 24
+runPolicy:
+  # GUI 席位天然串行（一把键鼠），并发给 2 是为了 CEO 和工位不互相堵。
+  maxConcurrent: 2
+  cooldownSec: 0
+  maxRunHours: 2
+agents:
+  - id: ceo
+    displayName: 总经理
+    isCEO: true
+    capabilities: [plan, delegate, review, escalate]
+    status: active
+    quotaDaily: 20
+    reportsTo: null
+    adapter:
+      type: process
+      config:
+        # 确定性派单器：继承指令、派给第一个执行席位。接上真模型后只改这一行。
+        command: node scripts/router-ceo.js
+  - id: doubao
+    displayName: 豆包工作
+    isCEO: false
+    capabilities: [execute]
+    status: active
+    quotaDaily: 20
+    # 不写 maxDifficulty = 什么难度都能接（G3 的上限语义）。
+    reportsTo: ceo
+    adapter:
+      type: gui-template
+      config:
+        windowTitle: 豆包工作
+        windowTitleMatch: contains
+        driver: command
+        reportMode: draft
+        # 跨实例互斥：同一台机器上第二个 GUI 任务会拿到「正被占用」而不是一起抢键盘。
+        lockPath: D:/开源/AICompany/work/gui-seat.lock
+        # 抢完键鼠把剪贴板原样还回去（提示词几百字，不能把你正在复制的东西顶掉）。
+        restoreClipboard: true
+        steps:
+          - action: activate
+          # 新会话：ctrl+n 只是手段，判据是标题变回纯产品名。核对不上照旧发，报告里标 reused。
+          - action: newSession
+          - action: paste
+          - action: press
+            key: enter
+          # 提示词发出后立刻把焦点还给用户——后面是等文件，不需要再占着屏幕。
+          - action: restoreFocus
+        freshTitle: 豆包工作
+        newSessionAttempts: 2
+        newSessionPolls: 4
+        newSessionPollMs: 400
+        onNewSessionMismatch: continue
+        # 「现在该不该抢键鼠」的四道闸。全部可关：删掉 gate 段就回到旧行为。
+        gate:
+          # 看板上的「暂停 GUI」按钮改的就是这个文件；文件不存在 = 正常跑。
+          pauseFile: D:/开源/AICompany/work/gui-pause.json
+          # 你 3 秒内动过键盘鼠标就不抢：稍等一会儿，维护心跳会自动重投这张卡。
+          requireIdleSec: 3
+          # 锁屏时按键会落到登录界面，一律不跑。
+          requireUnlocked: true
+          # 想只在半夜跑就打开这一行（示例：23 点到次日 7 点）：
+          # allowedHours: [23, 7]
+        commands:
+          activate: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action activate -WindowTitle "{{windowTitle}}"'
+          newSession: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action hotkey -Keys "ctrl+n"'
+          hotkey: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action hotkey -Keys "{{keys}}"'
+          setClipboard: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action setclip -TextFile "{{textFile}}"'
+          paste: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action paste'
+          press: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action press -Key "{{key}}"'
+          foregroundTitle: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action foreground'
+          # 一次调用拿齐：闲了多久、锁没锁屏、剪贴板原来是什么（顺带落盘供稍后还原）。
+          preflight: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action preflight -OutputFile "{{outputFile}}"'
+          restoreFocus: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action restorefocus'
+          screenshot: 'powershell -ExecutionPolicy Bypass -File scripts/win/kb.ps1 -Action shot -OutputFile "{{outputFile}}"'
+        pollIntervalMs: 5000
+        maxMinutes: 20
+clients: [web]
+notifier: [noop]

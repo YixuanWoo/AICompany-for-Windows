@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aicompany.completion/v1",
+  "title": "CompletionReport",
+  "description": "完成报告。写完即终态；cancelled 是控制面的任务状态，不是报告里的值（任务书 §6.6 / §6D.5）。",
+  "type": "object",
+  "required": ["schema", "taskId", "runId", "agent", "revision", "status", "summary", "artifacts", "checksum", "acceptanceResults", "usage", "finishedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "aicompany.completion/v1" },
+    "taskId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "agent": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["success", "failed", "blocked"] },
+    "summary": { "type": "string" },
+    "artifacts": { "type": "array", "items": { "type": "string" } },
+    "checksum": { "type": "object" },
+    "acceptanceResults": { "type": "array", "items": { "type": "object" } },
+    "usage": { "type": "object" },
+    "reason": { "type": "string" },
+    "finishedAt": { "type": "string", "minLength": 1 }
+  }
+}

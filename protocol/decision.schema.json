@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aicompany.decision/v1",
+  "title": "Decision",
+  "description": "CEO / 拍板席位对 ChangeRequest 的结论。只是建议，状态流转与 revision+1 由控制面在人审通过后执行（任务书 §6D.4 / §6.7）。",
+  "type": "object",
+  "required": ["schema", "changeRequestId", "taskId", "decidedBy", "decision", "needsHumanApproval", "reason", "createdAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "aicompany.decision/v1" },
+    "changeRequestId": { "type": "string", "minLength": 1 },
+    "taskId": { "type": "string", "minLength": 1 },
+    "decidedBy": { "type": "string", "minLength": 1 },
+    "decision": { "enum": ["resume", "redo", "derive", "cancel"] },
+    "chosenOption": { "type": ["string", "null"] },
+    "newInstructions": { "type": ["string", "null"] },
+    "newAcceptance": { "type": ["array", "null"], "items": { "type": "string" } },
+    "deriveAssignee": { "type": ["string", "null"], "description": "decision=derive 时新卡承接人；缺省沿用原承接人（§6D.5）" },
+    "deriveTitle": { "type": ["string", "null"], "description": "decision=derive 时新卡标题；缺省由原卡标题派生" },
+    "needsHumanApproval": { "type": "boolean" },
+    "approvalId": { "type": ["string", "null"] },
+    "reason": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "minLength": 1 }
+  }
+}

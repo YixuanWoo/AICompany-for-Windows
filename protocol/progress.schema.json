@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aicompany.progress/v1",
+  "title": "ProgressReport",
+  "description": "进度报告。覆盖写，不触发任何事件；需要被接住的反馈必须写 change-request（任务书 §6.5）。",
+  "type": "object",
+  "required": ["schema", "taskId", "runId", "percent", "text", "updatedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "aicompany.progress/v1" },
+    "taskId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "text": { "type": "string" },
+    "updatedAt": { "type": "string", "minLength": 1 }
+  }
+}

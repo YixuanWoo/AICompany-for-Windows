@@ -1,0 +1,23 @@
+{
+  "prod": {
+    "description": "真活实例：带 GUI 席位（豆包工作），看板 http://127.0.0.1:3100/",
+    "port": 3100,
+    "config": "config/company.prod.yaml",
+    "db": "work-prod/aicompany.db",
+    "workDir": "work-prod",
+    "taskName": "AICompany-ControlPlane",
+    "maintenanceSec": 60,
+    "requestAsync": true,
+    "guiSeatFile": "work/gui-seat.json",
+    "guiPauseFile": "work/gui-pause.json"
+  },
+  "demo": {
+    "description": "演示 / 试功能实例：假员工，不抢键鼠，端口 3199",
+    "port": 3199,
+    "config": "config/company.example.yaml",
+    "db": "work/aicompany.db",
+    "workDir": "work",
+    "taskName": "AICompany-Demo",
+    "maintenanceSec": 0
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aicompany.recurring/v1",
+  "title": "RecurringJob",
+  "description": "循环任务模板，永不 done；每轮由实例化器生成一张新卡，不 reopen 旧卡（任务书 §6A.3）。",
+  "type": "object",
+  "required": ["schema", "jobId", "jobVersion", "title", "kind", "owner", "assignee", "status", "trigger", "misfirePolicy", "overlapPolicy", "termination", "requiresHumanEachCycle", "taskTemplate", "dedupeWindowMin"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "aicompany.recurring/v1" },
+    "jobId": { "type": "string", "minLength": 1 },
+    "jobVersion": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string" },
+    "kind": { "enum": ["brief", "inspection", "cleanup", "maintenance"] },
+    "owner": { "type": "string" },
+    "assignee": { "type": "string" },
+    "reportsTo": { "type": ["string", "null"] },
+    "status": { "enum": ["active", "paused", "ended"] },
+    "trigger": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["cron", "event"] },
+        "rrule": { "type": ["string", "null"] },
+        "timezone": { "type": "string" },
+        "eventTrigger": { "type": ["string", "null"] }
+      }
+    },
+    "misfirePolicy": { "enum": ["run_once", "skip", "catch_up"] },
+    "misfireGraceMin": { "type": "integer", "minimum": 0 },
+    "overlapPolicy": { "enum": ["skip", "queue", "parallel"] },
+    "concurrencyKey": { "type": "string" },
+    "termination": {
+      "type": "object",
+      "required": ["pauseOnConsecutiveFailures"],
+      "properties": {
+        "validUntil": { "type": ["string", "null"] },
+        "maxCycles": { "type": ["integer", "null"] },
+        "pauseOnConsecutiveFailures": { "type": "integer", "minimum": 1 },
+        "budgetTotal": { "type": "object" }
+      }
+    },
+    "budgetPerCycle": { "type": "object" },
+    "retention": { "type": "object" },
+    "review": { "type": "object" },
+    "requiresHumanEachCycle": { "type": "boolean" },
+    "taskTemplate": {
+      "type": "object",
+      "required": ["role", "instructions", "acceptance"],
+      "properties": {
+        "role": { "type": "string" },
+        "instructions": { "type": "string" },
+        "acceptance": { "type": "array", "items": { "type": "string" } },
+        "completionReportPath": { "type": "string" }
+      }
+    },
+    "carryOver": { "type": "object" },
+    "dedupeWindowMin": { "type": "integer", "minimum": 1 },
+    "lastCycleNo": { "type": "integer", "minimum": 0 },
+    "nextFireAt": { "type": ["string", "null"] }
+  }
+}

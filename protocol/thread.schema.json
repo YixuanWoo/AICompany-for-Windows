@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aicompany.thread/v1",
+  "title": "WorkThread",
+  "description": "cowork 与 meeting 共用的协作空间。不进任务状态机，唯一出口是单向 promote（任务书 §6C.5）。",
+  "type": "object",
+  "required": ["schema", "threadId", "mode", "title", "participants", "wakePolicy", "ceoVisibility", "ttlDays", "state", "createdAt", "lastActiveAt"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "aicompany.thread/v1" },
+    "threadId": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["cowork", "meeting"] },
+    "title": { "type": "string" },
+    "sourceTaskId": { "type": ["string", "null"] },
+    "participants": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+    "wakePolicy": { "enum": ["never", "onRollCall", "onMessage"] },
+    "ceoVisibility": { "enum": ["none", "cc", "decide"] },
+    "sharedFiles": { "type": "array", "items": { "type": "string" } },
+    "ttlDays": { "type": "integer", "minimum": 1 },
+    "state": { "enum": ["active", "archived"] },
+    "createdAt": { "type": "string", "minLength": 1 },
+    "lastActiveAt": { "type": "string", "minLength": 1 },
+    "archivedAt": { "type": ["string", "null"] },
+    "promotedTo": { "type": ["string", "null"] }
+  }
+}

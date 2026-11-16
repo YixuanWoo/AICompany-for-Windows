@@ -1,0 +1,287 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "aicompany.company-config/v1",
+  "title": "CompanyConfig",
+  "description": "用户填的公司配置。引擎零产品名：agents 只认能力标签与通用 adapter type（任务书 §6B.4 / §6C.7）。",
+  "type": "object",
+  "required": [
+    "version",
+    "agents",
+    "clients",
+    "notifier"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "workRoot": {
+      "type": "string"
+    },
+    "quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "warnRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "stopRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "periodHours": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "type": "boolean"
+        },
+        "hiringBudget": {
+          "type": "boolean"
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "remindAfterHours": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxPendingHours": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "company": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        }
+      }
+    },
+    "interaction": {
+      "type": "object",
+      "properties": {
+        "defaultMode": {
+          "enum": [
+            "delegate",
+            "direct",
+            "cowork",
+            "meeting"
+          ]
+        },
+        "defaultTarget": {
+          "type": "string"
+        },
+        "allowDirectTo": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "plan",
+              "delegate",
+              "review",
+              "execute",
+              "escalate",
+              "readOnly"
+            ]
+          }
+        },
+        "autoAssign": {
+          "type": "boolean"
+        },
+        "modes": {
+          "type": "object"
+        },
+        "meeting": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "defaultStyle": {
+              "enum": [
+                "readonly",
+                "rollCall",
+                "full"
+              ]
+            },
+            "fullRequiresConfirm": {
+              "type": "boolean"
+            }
+          }
+        },
+        "thread": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ttlDays": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "promoteRequiresExplicit": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "isCEO",
+          "capabilities",
+          "status",
+          "adapter"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "isCEO": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "plan",
+                "delegate",
+                "review",
+                "execute",
+                "escalate",
+                "readOnly"
+              ]
+            }
+          },
+          "status": {
+            "enum": [
+              "active",
+              "setup",
+              "paused",
+              "pending_approval",
+              "error"
+            ]
+          },
+          "quotaDaily": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxDifficulty": {
+            "description": "这个岗位最多能接的难度。不写 = 不设限（hard）。",
+            "enum": [
+              "easy",
+              "normal",
+              "hard"
+            ]
+          },
+          "reportsTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "escalationTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "adapter": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "process",
+                  "http",
+                  "cli-acp",
+                  "gui-template",
+                  "polling"
+                ]
+              },
+              "config": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "clients": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "web",
+          "im",
+          "cli",
+          "noop"
+        ]
+      }
+    },
+    "notifier": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "web",
+          "im",
+          "webhook",
+          "stdout",
+          "noop"
+        ]
+      }
+    },
+    "defaults": {
+      "type": "object"
+    },
+    "runPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Run Policy 第 4 条：并发上限与冷却（P5 起可配、可调、可观测）",
+      "properties": {
+        "maxConcurrent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        },
+        "cooldownSec": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxRunHours": {
+          "type": "number",
+          "minimum": 0.1
+        },
+        "staleEventMinutes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

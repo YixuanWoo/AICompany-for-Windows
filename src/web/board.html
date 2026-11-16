@@ -1,0 +1,1092 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AICompany · Web Board</title>
+<style>
+  :root {
+    --bg: #F1EFE8; --card: #FFFFFF; --line: #B4B2A9; --ink: #2C2C2A;
+    --muted: #5F5E5A; --accent: #185FA5; --accent-bg: #E6F1FB;
+    --ok: #1E7A45; --warn: #B45309; --bad: #B42318;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 20px 48px; background: var(--bg); color: var(--ink);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    max-width: 1440px; margin: 0 auto; padding: 22px 0 16px;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  }
+  h1 { margin: 0; font-size: 21px; letter-spacing: .5px; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .conn { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); display: inline-block; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(30,122,69,.14); }
+  .dot.off { background: var(--bad); }
+  button, select, input, textarea { font: inherit; color: var(--ink); }
+  input, select, textarea {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+    background: #fff; outline: none;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(24,95,165,.12); }
+  textarea { resize: vertical; min-height: 68px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  button {
+    padding: 8px 14px; border: 1px solid var(--accent); border-radius: 6px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.ghost { background: #fff; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .layout { max-width: 1440px; margin: 0 auto; display: grid; grid-template-columns: 330px 1fr; gap: 16px; align-items: start; }
+  .col { display: grid; gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card h2 { margin: 0 0 10px; font-size: 15px; }
+  .hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 auto 16px; max-width: 1440px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px; min-width: 108px; }
+  .stat b { display: block; font-size: 19px; line-height: 1.2; }
+  .stat span { font-size: 11px; color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+  @media (max-width: 980px) { .layout, .grid2 { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #EAE8E0; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+  tr:last-child td { border-bottom: none; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); }
+  .s-done { color: var(--ok); border-color: #A7D3B8; background: #EFF8F2; }
+  .s-in_progress, .s-in_review { color: var(--accent); border-color: #A9C9E8; background: var(--accent-bg); }
+  .s-blocked { color: var(--bad); border-color: #E9B4AE; background: #FDF1EF; }
+  .s-awaiting_decision, .s-paused { color: var(--warn); border-color: #E4C79A; background: #FDF6EA; }
+  .s-cancelled, .s-todo, .s-backlog { color: var(--muted); background: #F5F4EF; }
+  .msg { font-size: 12px; padding: 7px 10px; border-radius: 6px; margin-top: 10px; display: none; }
+  .msg.ok { display: block; background: #EFF8F2; border: 1px solid #A7D3B8; color: var(--ok); }
+  .msg.err { display: block; background: #FDF1EF; border: 1px solid #E9B4AE; color: var(--bad); }
+  .list { max-height: 230px; overflow: auto; font-size: 12.5px; }
+  .row { padding: 6px 0; border-bottom: 1px dashed #EAE8E0; }
+  .row:last-child { border-bottom: none; }
+  .row .meta { color: var(--muted); font-size: 11px; }
+  pre.brief { white-space: pre-wrap; margin: 0; font: 12px/1.65 ui-monospace, Consolas, monospace; }
+  .empty { color: var(--muted); font-size: 12px; padding: 6px 0; }
+  .inline { display: flex; gap: 8px; align-items: center; }
+  .inline > * { flex: 1; }
+  .tag { font-size: 11px; color: var(--accent); background: var(--accent-bg); border-radius: 4px; padding: 1px 6px; }
+  .bar { height: 6px; border-radius: 4px; background: #EAE8E0; overflow: hidden; margin-top: 5px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar.warn > i { background: var(--warn); }
+  .bar.stop > i { background: var(--bad); }
+  .btnrow { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .btnrow button { padding: 3px 9px; font-size: 11.5px; border-radius: 5px; }
+  .btnrow button.danger { background: #fff; color: var(--bad); border-color: #E9B4AE; }
+  .tl { font-size: 12px; }
+  .tl .t { color: var(--muted); font-size: 11px; margin-right: 6px; }
+  /* P6：结果弹窗 —— 产物就在眼前，不用去翻资源管理器 */
+  .modal { position: fixed; inset: 0; background: rgba(44,44,42,.45); display: none; z-index: 60; padding: 24px; }
+  .modal.on { display: block; }
+  .modal-box { background: #fff; border: 1px solid var(--line); border-radius: 10px; max-width: 1040px; margin: 0 auto; padding: 16px 18px; max-height: 88vh; overflow: auto; }
+  .modal-box h3 { margin: 0; font-size: 15px; }
+  .filelist { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+  .filelist button { padding: 4px 10px; font-size: 12px; background: #fff; color: var(--accent); }
+  .filelist button.active { background: var(--accent); color: #fff; }
+  .outtext { white-space: pre-wrap; word-break: break-word; background: #FAF9F5; border: 1px solid #EAE8E0; border-radius: 8px; padding: 12px; font: 12.5px/1.65 ui-monospace, Consolas, monospace; max-height: 52vh; overflow: auto; margin: 0; }
+  /* P6：GUI 席位状态条 —— 「会不会抢我键盘」必须一眼看得见 */
+  .gui-bar { display: flex; align-items: center; gap: 10px; justify-content: space-between; background: var(--accent-bg); border: 1px solid #A9C9E8; border-radius: 8px; padding: 7px 10px; font-size: 12px; margin-bottom: 10px; }
+  .gui-bar.paused { background: #FDF6EA; border-color: #E4C79A; }
+  .gui-bar button { padding: 3px 10px; font-size: 12px; flex: 0 0 auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>AICompany · Web Board</h1>
+    <div class="sub">统一 API 的默认客户端 · 提需求 / 看板 / 协作 / 验收 · 不依赖任何外部服务</div>
+  </div>
+  <div class="conn">
+    <span class="dot" id="sse-dot"></span><span id="sse-text">连接中…</span>
+    <button class="ghost" id="refresh-btn" type="button">刷新</button>
+  </div>
+</header>
+
+<div class="stats" id="stats"></div>
+
+<div class="layout">
+  <div class="col">
+    <section class="card">
+      <h2>提一条需求</h2>
+      <p class="hint">提交后引擎自动连续推进：拆活 → 执行 → 回收 → 验收 → 简报，不需要第二条命令。</p>
+      <div class="gui-bar" id="gui-bar" style="display:none"></div>
+      <form id="request-form">
+        <label for="title">标题</label>
+        <input id="title" placeholder="例如：整理本周简报" autocomplete="off">
+        <label for="text">需求内容</label>
+        <textarea id="text" placeholder="一句话说清要什么">写一份本周工作简报</textarea>
+        <label for="mode">交互模式（§6C）</label>
+        <select id="mode">
+          <option value="delegate">delegate · 交给 CEO 统筹拆活</option>
+          <option value="direct">direct · 指名直投，跳过 CEO 决策</option>
+          <option value="cowork">cowork · 协作空间，不建任务卡</option>
+        </select>
+        <label for="difficulty">难度（按岗位上限分流，不填＝normal）</label>
+        <select id="difficulty">
+          <option value="normal" selected>normal · 普通</option>
+          <option value="easy">easy · 简单（先给轻活席位）</option>
+          <option value="hard">hard · 困难（只派给接得住的席位）</option>
+        </select>
+        <label for="addressedTo">交付给 / 参与席位（direct 必填）</label>
+        <select id="addressedTo"><option value="">（由 CEO 决定）</option></select>
+        <div style="margin-top:14px"><button type="submit" id="submit-btn">提交需求</button></div>
+        <div class="msg" id="request-msg"></div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>协作空间 · WorkThread</h2>
+      <p class="hint">cowork / meeting 的消息只留痕，<b>不建卡</b>。会议三档：readonly 零唤醒 / rollCall 点 2 位 / full 全员+汇总（要二次确认）。</p>
+      <form id="thread-form">
+        <label for="thread-title">新建空间（标题）</label>
+        <input id="thread-title" placeholder="例如：一起改方案" autocomplete="off">
+        <label for="thread-style">会议档位（仅 meeting 用）</label>
+        <select id="thread-style">
+          <option value="readonly">readonly · 公告，零唤醒</option>
+          <option value="rollCall" selected>rollCall · 点名最多 2 位</option>
+          <option value="full">full · 全员议事 + CEO 汇总</option>
+        </select>
+        <div style="margin-top:10px"><button type="submit" class="ghost">新建协作空间</button></div>
+      </form>
+      <label for="thread-select">往已有空间发消息</label>
+      <select id="thread-select"><option value="">（暂无空间）</option></select>
+      <div class="inline" style="margin-top:8px">
+        <input id="thread-text" placeholder="说点什么…" autocomplete="off">
+        <button type="button" id="thread-send" style="flex:0 0 auto">发送</button>
+      </div>
+      <div class="inline" style="margin-top:8px">
+        <button type="button" class="ghost" id="thread-rollcall">点名发言</button>
+        <button type="button" class="ghost" id="thread-promote">提升为任务卡</button>
+        <button type="button" class="ghost" id="thread-archive">归档</button>
+      </div>
+      <div class="msg" id="thread-msg"></div>
+      <div class="list" id="thread-messages" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <h2>中途变更 · ChangeRequest（§6D 最小档）</h2>
+      <p class="hint">对一张未完成的任务卡「刹车」：唤醒 CEO → 派生新卡 → 原卡 cancelled，历史仍可查。</p>
+      <form id="change-form">
+        <label for="cr-task">目标任务卡</label>
+        <select id="cr-task"><option value="">（暂无可变更的卡）</option></select>
+        <label for="cr-kind">变更类型</label>
+        <select id="cr-kind">
+          <option value="direction">direction · 方向变了</option>
+          <option value="clarify">clarify · 需要澄清</option>
+          <option value="scope">scope · 范围调整</option>
+          <option value="blocked">blocked · 遇到阻塞</option>
+        </select>
+        <label for="cr-reason">原因</label>
+        <input id="cr-reason" placeholder="例如：前提变了，原目标作废" autocomplete="off">
+        <div style="margin-top:12px"><button type="submit" class="ghost">上报变更请求</button></div>
+        <div class="msg" id="change-msg"></div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>清理扫描 · Cleanup（只出报告）</h2>
+      <p class="hint">宁可不删，也不误删：只扫描、只写报告，<b>deletedCount 恒为 0</b>。
+        Desktop / Downloads / Documents / AppData / 系统盘 / .ssh 一律拒绝，且一个文件都不写。</p>
+      <label for="cleanup-targets">扫描目标（逗号或换行分隔）</label>
+      <textarea id="cleanup-targets" placeholder="例如：work/cache, work/output/tmp"></textarea>
+      <label for="cleanup-whitelist">白名单根目录</label>
+      <input id="cleanup-whitelist" placeholder="留空 = 用 workRoot" autocomplete="off">
+      <div style="margin-top:12px"><button type="button" class="ghost" id="cleanup-scan">扫描出报告</button></div>
+      <div class="msg" id="cleanup-msg"></div>
+    </section>
+  </div>
+
+  <div class="col">
+    <div class="grid2">
+      <section class="card">
+        <h2>任务卡 · Tasks</h2>
+        <div class="list" id="tasks-list"></div>
+      </section>
+      <section class="card">
+        <h2>席位 · Agents</h2>
+        <div class="list" id="agents-list"></div>
+      </section>
+      <section class="card">
+        <h2>审批 · Approvals</h2>
+        <p class="hint">三道常规门禁（strategy / hiring_budget / review_reject）＋两类按需人审（replan / 循环改版）。
+          看完直接点：通过 / 要求重写 / 驳回。</p>
+        <div class="list" id="approvals-list"></div>
+        <div class="msg" id="approval-msg"></div>
+      </section>
+      <section class="card">
+        <h2>挂起待决策 · Decisions（§6D）</h2>
+        <p class="hint">卡在 <b>awaiting_decision</b> 的任务：挂起期间不烧额度、不被补偿扫描重跑。四种出口任选其一。</p>
+        <div class="list" id="decisions-list"></div>
+        <div class="inline" style="margin-top:8px">
+          <input id="derive-assignee" placeholder="derive 承接人（可空=原承接人）" autocomplete="off">
+        </div>
+        <div class="msg" id="decision-msg"></div>
+      </section>
+      <section class="card">
+        <h2>配额 · Quotas</h2>
+        <p class="hint">按周期记账：用到 80% 预警一次，到 100% 停派新活；换人 or 重置可恢复。</p>
+        <div class="list" id="quotas-list"></div>
+        <div class="msg" id="quota-msg"></div>
+      </section>
+      <section class="card">
+        <h2>运行与审计 · Activity</h2>
+        <p class="hint">选一张卡，把它的状态流转 / Run / 变更 / 决策 / 审批 / 版本 / 现场快照按时间串起来看。</p>
+        <select id="activity-task"><option value="">（选一张卡）</option></select>
+        <div class="list" id="activity-list" style="margin-top:10px"></div>
+      </section>
+      <section class="card">
+        <h2>试运行观测 · Observe（P5）</h2>
+        <p class="hint">五项指标 + 四项结论 + 脏状态，全部从控制面自己的记录算出来。注意：<b>压缩跑不能代替真实 72 小时</b>，
+          门禁结论只认 <code>npm run soak:real</code> 出的报告。</p>
+        <div class="list" id="observe-metrics"></div>
+        <div class="list" id="observe-findings" style="margin-top:10px"></div>
+        <div class="list" id="observe-dirty" style="margin-top:10px"></div>
+        <div style="margin-top:10px">
+          <a href="/api/observe/report" target="_blank" rel="noopener">查看观察记录（Markdown，新窗口打开）</a>
+        </div>
+        <label for="tune-key" style="margin-top:16px">调参（改完立刻生效，旧值新值都进审计）</label>
+        <select id="tune-key"></select>
+        <p class="hint" id="tune-desc" style="margin:6px 0 0"></p>
+        <div class="inline" style="margin-top:8px">
+          <input id="tune-value" placeholder="新值（数字，或 true / false）" autocomplete="off">
+          <button type="button" id="tune-submit" style="flex:0 0 auto">提交</button>
+        </div>
+        <input id="tune-reason" placeholder="为什么调（会写进审计，别留空）" autocomplete="off" style="margin-top:8px">
+        <div class="msg" id="tune-msg"></div>
+        <div class="list" id="tune-history" style="margin-top:10px"></div>
+      </section>
+      <section class="card">
+        <h2>收件箱 · Inbox</h2>
+        <div class="list" id="inbox-list"></div>
+      </section>
+      <section class="card">
+        <h2>最近唤醒 · Runs</h2>
+        <div class="list" id="runs-list"></div>
+      </section>
+      <section class="card">
+        <h2>审计 · Audit</h2>
+        <div class="list" id="audit-list"></div>
+      </section>
+      <section class="card">
+        <h2>Bridge · 拉模式（P2）</h2>
+        <p class="hint">默认 inline 单机直调；切到 bridge 后任务排队，等本机 bridge 来领。本地没服务器也能跑。</p>
+        <div class="list" id="bridge-list"></div>
+      </section>
+      <section class="card">
+        <h2>循环任务 · RecurringJobs（P2）</h2>
+        <div class="list" id="recurring-list"></div>
+        <div class="inline" style="margin-top:8px">
+          <input id="job-id" placeholder="jobId（留空用第一个）" autocomplete="off">
+          <button type="button" id="job-fire" style="flex:0 0 auto">触发一轮</button>
+        </div>
+        <div style="margin-top:8px"><button type="button" class="ghost" id="job-register">注册示例巡检任务</button></div>
+        <div class="msg" id="job-msg"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="result-modal">
+  <div class="modal-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <h3 id="result-title">任务产物</h3>
+      <button class="ghost" type="button" id="result-close">关闭</button>
+    </div>
+    <div id="result-meta" style="color:var(--muted);font-size:12px;margin-top:4px"></div>
+    <div class="filelist" id="result-files"></div>
+    <pre class="outtext" id="result-text">选一个产物文件看看内容。</pre>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+  const short = (s) => String(s ?? '').replace(/^(T|R|TH|CR|REQ)-/, '');
+
+  async function api(path, options) {
+    const res = await fetch(path, options);
+    let data;
+    try { data = await res.json(); } catch { data = {}; }
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    return data;
+  }
+  const post = (path, body) => api(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  let state = {
+    agents: [], tasks: [], runs: [], threads: [], approvals: [], audit: [],
+    briefs: [], notes: [], dashboard: {}, bridge: {}, recurring: [],
+    quotas: [], changeRequests: [],
+    observe: null, tuning: null,
+    // P6：公司默认模式 / 席位清单 / GUI 席位闸门状态
+    meta: null, gui: null,
+  };
+  let selectedThread = '';
+  let metaApplied = false;
+  let resultTaskId = '';
+
+  function say(id, ok, text) {
+    const el = $(id);
+    el.className = 'msg ' + (ok ? 'ok' : 'err');
+    el.textContent = text;
+  }
+  function setSse(on) {
+    $('sse-dot').className = 'dot ' + (on ? 'on' : 'off');
+    $('sse-text').textContent = on ? 'SSE 已连接 · 状态自动刷新' : 'SSE 断开 · 每 10 秒兜底刷新';
+  }
+  // 状态码是给机器看的，看板是给人看的。只翻标签，样式类仍用原始码，别动 CSS。
+  const STATUS_LABELS = {
+    todo: '排队中', in_progress: '干活中', in_review: '待验收', done: '已完成',
+    blocked: '卡住了', cancelled: '已取消', awaiting_decision: '等你拍板',
+  };
+  function statusPill(s) { return '<span class="pill s-' + esc(s) + '">' + esc(STATUS_LABELS[s] || s) + '</span>'; }
+
+  // 重填下拉框但保住当前选中项。
+  // 每次刷新都重建 option，不保住选择的话用户刚选的席位会被冲回默认值。
+  // 必须在顶层：之前它被写在某个渲染函数里面，另一个函数调用它就报了 keep is not defined。
+  function setOptions(id, options, placeholder) {
+    const el = $(id);
+    if (!el) return;
+    const prev = el.value;
+    el.innerHTML = '<option value="">' + esc(placeholder) + '</option>' + options;
+    if (prev && el.querySelector('option[value="' + CSS.escape(prev) + '"]')) el.value = prev;
+  }
+
+  function renderStats() {
+    const d = state.dashboard;
+    const t = d.tasks || {};
+    const pendingAp = state.approvals.filter((a) => a.status === 'pending').length;
+    const stuck = state.tasks.filter((x) => x.status === 'awaiting_decision').length;
+    const tight = (state.quotas || []).filter((q) => (q.quotaUsed || 0) >= (q.quotaLimit || 1)).length;
+    const items = [
+      ['任务卡', Object.values(t).reduce((a, b) => a + b, 0)],
+      ['已完成', t.done || 0],
+      ['进行中', (t.in_progress || 0) + (t.in_review || 0)],
+      ['阻塞', t.blocked || 0],
+      ['已取消', t.cancelled || 0],
+      ['待我拍板', pendingAp],
+      ['挂起待决策', stuck],
+      ['配额触顶', tight],
+      ['唤醒次数', d.runs || 0],
+      ['协作空间', d.threads || 0],
+    ];
+    $('stats').innerHTML = items.map(([k, v]) =>
+      '<div class="stat"><b>' + esc(v) + '</b><span>' + esc(k) + '</span></div>').join('');
+  }
+
+  function difficultyTag(d) {
+    const key = d || 'normal';
+    const label = key === 'easy' ? '简单' : (key === 'hard' ? '困难' : '普通');
+    return '<span class="tag">' + label + '</span>';
+  }
+
+  function renderTasks() {
+    const rows = [...state.tasks].reverse();
+    $('tasks-list').innerHTML = rows.length ?
+      '<table><thead><tr><th>卡号</th><th>标题</th><th>难度</th><th>状态</th><th>交付给</th><th>模式</th><th></th></tr></thead><tbody>' +
+      rows.map((t) => '<tr><td>' + esc(short(t.taskId)) + '</td><td>' + esc(t.title) +
+        '</td><td>' + difficultyTag(t.difficulty) + '</td><td>' + statusPill(t.status) + '</td><td>' + esc(t.assignee) +
+        '</td><td><span class="tag">' + esc(t.mode) + '</span></td>' +
+        '<td style="white-space:nowrap"><button type="button" class="ghost" data-result="' + esc(t.taskId) + '">看结果</button>' +
+        ((t.status === 'done' || t.status === 'cancelled') ? ''
+          : ' <button type="button" class="danger" data-cancel="' + esc(t.taskId) + '">取消</button>') +
+        '</td></tr>').join('') +
+      '</tbody></table>' : '<div class="empty">还没有任务卡，左边提一条需求试试。</div>';
+  }
+
+  // P6：GUI 席位状态条。「会不会抢我键盘」必须一眼看得见，而且能立刻叫停。
+  function renderGui() {
+    const gui = state.gui;
+    const bar = $('gui-bar');
+    if (!gui || !gui.seats || gui.seats.length === 0) { bar.style.display = 'none'; return; }
+    bar.style.display = 'flex';
+    bar.className = 'gui-bar' + (gui.paused ? ' paused' : '');
+    const gate = (gui.seats[0].gate || {});
+    const bits = [];
+    if (gate.requireIdleSec) bits.push('你静置 ' + gate.requireIdleSec + ' 秒才动手');
+    if (gate.requireUnlocked) bits.push('锁屏不跑');
+    if (Array.isArray(gate.allowedHours)) bits.push('时段 ' + gate.allowedHours.join(' - '));
+    const head = gui.paused
+      ? '<b>GUI 席位已暂停</b>：' + esc(gui.pauseReason || '排着的卡不会丢，恢复后自动重投')
+      : '<b>GUI 席位：' + esc(gui.seats.map((s) => s.displayName).join(' / ')) + ' 待命</b>：下单后它会抢 40 秒～1 分钟键鼠；你刚动过键盘的话，它会等几秒再自己开工';
+    bar.innerHTML = '<span>' + head + (bits.length ? '<br><span style="color:var(--muted)">' + esc(bits.join(' · ')) + '</span>' : '') + '</span>' +
+      '<button type="button" class="' + (gui.paused ? '' : 'ghost') + '" data-gui-toggle="1">' + (gui.paused ? '恢复 GUI' : '暂停 GUI') + '</button>';
+  }
+
+  // P6：产物查看。只读，安全性由服务端把关（越界 / 软链接 / 超大一律拒）。
+  async function openResult(taskId) {
+    resultTaskId = taskId;
+    $('result-modal').classList.add('on');
+    $('result-title').textContent = '任务 ' + short(taskId) + ' 的产物';
+    $('result-meta').textContent = '加载中…';
+    $('result-files').innerHTML = '';
+    $('result-text').textContent = '';
+    try {
+      const data = await api('/api/tasks/' + encodeURIComponent(taskId) + '/outputs');
+      $('result-meta').textContent = data.exists
+        ? ('共 ' + data.files.length + ' 个文件，合计 ' + Math.round(data.totalBytes / 1024) + ' KB · ' + data.dir)
+        : ('还没有产物目录（' + data.dir + '）');
+      if (!data.files.length) {
+        $('result-text').textContent = '这个任务还没有产物文件。卡还没跑完，或者席位只写了完成报告。';
+        return;
+      }
+      $('result-files').innerHTML = data.files.map((f, i) =>
+        '<button type="button" class="' + (i === 0 ? 'active' : '') + '" data-file="' + esc(f.name) + '">' +
+        esc(f.name) + ' · ' + esc(f.size) + 'B' + (f.empty ? '（空）' : '') + '</button>').join('');
+      $('result-text').textContent = '正在读 ' + data.files[0].name + ' …';
+      await loadResultFile(data.files[0].name);
+    } catch (e) {
+      $('result-meta').textContent = '';
+      $('result-text').textContent = '读不到产物：' + e.message;
+    }
+  }
+
+  async function loadResultFile(name) {
+    const buttons = $('result-files').querySelectorAll('button[data-file]');
+    buttons.forEach((b) => b.classList.toggle('active', b.dataset.file === name));
+    try {
+      const one = await api('/api/tasks/' + encodeURIComponent(resultTaskId) + '/output?file=' + encodeURIComponent(name));
+      $('result-text').textContent = (one.text || '（空文件）') + (one.truncated ? '\n\n…（文件太大，只显示前一部分）' : '');
+    } catch (e) {
+      $('result-text').textContent = '读不到这个文件：' + e.message;
+    }
+  }
+
+  function renderAgents() {
+    $('agents-list').innerHTML = state.agents.length ? state.agents.map((a) =>
+      '<div class="row"><b>' + esc(a.displayName) + '</b> <span class="tag">' + esc(a.agentId) + '</span> ' +
+      (a.isCEO ? '<span class="tag">CEO</span>' : '') +
+      '<div class="meta">' + esc(a.capabilities.join(' / ')) + ' · ' + esc(a.status) +
+      ' · 额度 ' + esc(a.quotaUsed) + '/' + esc(a.quotaLimit) +
+      ' · 最多接 ' + esc(a.maxDifficulty || 'hard') + '</div></div>').join('')
+      : '<div class="empty">没有席位。</div>';
+  }
+
+  function renderSimple(id, items, emptyText) {
+    $(id).innerHTML = items.length ? items.map((x) => x).join('') : '<div class="empty">' + esc(emptyText) + '</div>';
+  }
+
+  // P4：审批卡分「待办」和「已处理」两段：待办给按钮，已处理只留结论。
+  function renderApprovals() {
+    const pend = state.approvals.filter((a) => a.status === 'pending');
+    const done = state.approvals.filter((a) => a.status !== 'pending').slice(-6).reverse();
+    const rows = [];
+    for (const a of pend) {
+      const p = (a.request && a.request.payload) || {};
+      rows.push('<div class="row"><b>' + esc(a.request?.title || a.approvalId) + '</b> ' +
+        '<span class="tag">' + esc(a.kind) + '</span>' +
+        '<div class="meta">' + esc(a.request?.body || '') + '</div>' +
+        '<div class="meta">审批单 ' + esc(a.approvalId) + (a.taskId ? ' · 卡 ' + esc(short(a.taskId)) : '') +
+        (p.decisionMaker ? ' · 建议由 ' + esc(p.decisionMaker) + ' 先看' : '') + '</div>' +
+        '<div class="btnrow">' +
+        '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过</button>' +
+        '<button type="button" class="ghost" data-approve="rewrite" data-id="' + esc(a.approvalId) + '">要求重写 / 换人</button>' +
+        '<button type="button" class="danger" data-approve="rejected" data-id="' + esc(a.approvalId) + '">驳回</button>' +
+        '</div></div>');
+    }
+    for (const a of done) {
+      rows.push('<div class="row"><b>' + esc(a.request?.title || a.approvalId) + '</b> ' + statusPill(a.status) +
+        '<div class="meta">' + esc(a.kind) + ' · ' + esc(a.decidedBy || '') + ' · ' + esc(a.reason || '无附言') + '</div></div>');
+    }
+    renderSimple('approvals-list', rows, '暂无审批（没开门禁或都已处理完）。');
+  }
+
+  // P4：挂起待决策区 —— 四种出口。
+  function renderDecisions() {
+    const stuck = state.tasks.filter((t) => t.status === 'awaiting_decision');
+    const rows = stuck.map((t) => {
+      const cr = state.changeRequests.find((c) => c.taskId === t.taskId);
+      return '<div class="row"><b>' + esc(short(t.taskId)) + '</b> ' + esc(t.title) +
+        '<div class="meta">' + esc(t.assignee) + ' 停在 in_progress 撞墙；' +
+        (cr ? '变更请求 ' + esc(cr.changeRequestId) + '（' + esc(cr.kind) + '）：' + esc(cr.reason || '') : '缺变更请求') +
+        '</div><div class="btnrow">' +
+        '<button type="button" data-decide="resume" data-id="' + esc(cr ? cr.changeRequestId : '') + '" data-task="' + esc(t.taskId) + '">续做（原 runId）</button>' +
+        '<button type="button" class="ghost" data-decide="redo" data-id="' + esc(cr ? cr.changeRequestId : '') + '" data-task="' + esc(t.taskId) + '">重做（新 runId）</button>' +
+        '<button type="button" class="ghost" data-decide="derive" data-id="' + esc(cr ? cr.changeRequestId : '') + '" data-task="' + esc(t.taskId) + '">另起一件</button>' +
+        '<button type="button" class="danger" data-decide="cancel" data-id="' + esc(cr ? cr.changeRequestId : '') + '" data-task="' + esc(t.taskId) + '">取消</button>' +
+        '</div></div>';
+    });
+    renderSimple('decisions-list', rows, '没有挂起待决策的卡。');
+  }
+
+  // P4：配额进度条（80% 黄、100% 红）。
+  function renderQuotas() {
+    const rows = (state.quotas || []).map((q) => {
+      const lim = q.quotaLimit || 1;
+      const pct = Math.min(100, Math.round(((q.quotaUsed || 0) / lim) * 100));
+      const cls = pct >= 100 ? 'bar stop' : (pct >= 80 ? 'bar warn' : 'bar');
+      return '<div class="row"><b>' + esc(q.displayName || q.agentId) + '</b> <span class="tag">' + esc(q.agentId) + '</span>' +
+        '<div class="meta">' + esc(q.quotaUsed) + ' / ' + esc(q.quotaLimit) + '（' + pct + '%）' +
+        (q.isBusy ? ' · 在跑' : '') + '</div>' +
+        '<div class="' + cls + '"><i style="width:' + pct + '%"></i></div>' +
+        '<div class="btnrow"><button type="button" class="ghost" data-quota-reset="' + esc(q.agentId) + '">重置本周期</button></div>' +
+        '</div>';
+    });
+    renderSimple('quotas-list', rows, '还没有配额账本。');
+  }
+
+  // P4：Activity 时间线。
+  async function loadActivity() {
+    const taskId = $('activity-task').value;
+    if (!taskId) {
+      $('activity-list').innerHTML = '<div class="empty">选一张卡，看它从头到尾发生了什么。</div>';
+      return;
+    }
+    try {
+      const a = await api('/api/activity?taskId=' + encodeURIComponent(taskId));
+      const rows = [];
+      rows.push('<div class="row tl"><b>' + esc(a.task.title) + '</b> ' + statusPill(a.task.status) +
+        '<div class="meta">' + esc(a.task.taskId) + ' · 承接 ' + esc(a.task.assignee) +
+        ' · revision ' + esc(a.task.revision) + ' · attempt ' + esc(a.task.attempt) + '</div></div>');
+      for (const r of a.runs || []) {
+        rows.push('<div class="row tl"><span class="t">Run</span><b>' + esc(r.wakeReason) + '</b> ' +
+          statusPill(r.status) + '<div class="meta">' + esc(r.runId) + ' · ' + esc(r.agentId) +
+          ' · rev' + esc(r.revision) + '</div></div>');
+      }
+      for (const c of a.changeRequests || []) {
+        rows.push('<div class="row tl"><span class="t">变更</span><b>' + esc(c.kind) + '</b> ' + esc(c.severity) +
+          '<div class="meta">' + esc(c.changeRequestId) + '：' + esc(c.reason || '') + '</div></div>');
+      }
+      for (const d of a.decisions || []) {
+        rows.push('<div class="row tl"><span class="t">决策</span><b>' + esc(d.decision) + '</b> ' +
+          '<div class="meta">' + esc(d.decidedBy) + ' · ' + esc(d.decisionId) + '</div></div>');
+      }
+      for (const p of a.approvals || []) {
+        rows.push('<div class="row tl"><span class="t">审批</span><b>' + esc(p.kind) + '</b> ' + statusPill(p.status) +
+          '<div class="meta">' + esc(p.approvalId) + '</div></div>');
+      }
+      for (const v of a.revisions || []) {
+        rows.push('<div class="row tl"><span class="t">版本</span><b>rev' + esc(v.revision) + '</b>' +
+          '<div class="meta">批准人 ' + esc(v.approvedBy) + ' · ' + esc(v.createdAt) + '</div></div>');
+      }
+      for (const s of a.snapshots || []) {
+        rows.push('<div class="row tl"><span class="t">快照</span><b>' + esc(s.crId) + '</b>' +
+          '<div class="meta">只读现场：' + esc((s.artifacts || []).length) + ' 个产物 · ' +
+          (s.immutable ? '不可改' : '异常') + '</div></div>');
+      }
+      for (const x of (a.audit || []).slice(-20)) {
+        rows.push('<div class="row tl"><span class="t">审计</span><b>' + esc(x.action) + '</b> ' +
+          '<div class="meta">' + esc(x.actor) + '：' + esc(x.oldValue || '') + (x.oldValue ? ' → ' : '') +
+          esc(x.newValue || '') + '</div></div>');
+      }
+      renderSimple('activity-list', rows, '这张卡还没有可追的记录。');
+    } catch (e) {
+      $('activity-list').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+    }
+  }
+
+  const pct = (v) => (v === null || v === undefined ? '样本不足' : (v * 100).toFixed(1) + '%');
+
+  function renderObserve() {
+    const o = state.observe;
+    if (!o) {
+      renderSimple('observe-metrics', [], '观测数据暂时取不到（看服务端日志）。');
+      renderSimple('observe-findings', [], '');
+      renderSimple('observe-dirty', [], '');
+      return;
+    }
+    const m = o.metrics || {};
+    const fw = m.falseWake || {};
+    const fwText = fw.attempts === 0
+      ? ('真实流量零被拒唤醒；另有 ' + (fw.probeRejected || 0) + ' 次探针被终态拦截挡住')
+      : (pct(fw.rate) + '（' + fw.miswake + '/' + fw.attempts + '，另有 ' + (fw.probeRejected || 0) + ' 次探针）');
+    const rejected = m.reportReject?.rejected || 0;
+    const accepted = m.reportReject?.accepted || 0;
+    const metricRows = [
+      ['误唤醒率', fwText],
+      ['空转 Run 率', pct(m.idleRun?.rate) + '（' + (m.idleRun?.total || 0) + '/' + (m.idleRun?.successRuns || 0) + '）'],
+      ['报告不合格率', pct(m.reportReject?.rate) + '（' + rejected + '/' + (rejected + accepted) + '）'],
+      ['GUI 失败率', pct(m.guiFailure?.rate) + '（' + (m.guiFailure?.failed || 0) + '/' + (m.guiFailure?.runs || 0) + '）'],
+      ['额度消耗', pct(m.quotaBurn?.rate) + '（' + (m.quotaBurn?.used || 0) + '/' + (m.quotaBurn?.limit || 0) + '）'],
+    ];
+    $('observe-metrics').innerHTML = metricRows.map(([k, v]) =>
+      '<div class="row"><b>' + esc(k) + '</b><div class="meta">' + esc(v) + '</div></div>').join('');
+
+    const f = o.findings || {};
+    const card = (label, node) => {
+      if (!node) return '';
+      return '<div class="row"><b>' + esc(label) + '</b> ' + statusPill(node.verdict) +
+        '<div class="meta">' + esc(node.conclusion) + '</div></div>';
+    };
+    $('observe-findings').innerHTML = [
+      card('直投是否绕开 CEO', f.directBypassesCeo),
+      card('cowork 是否误建卡', f.coworkCreatesTask),
+      card('挂起是否被误重跑', f.awaitingRerun),
+      card('决策超时率', f.decisionTimeout),
+    ].join('') || '<div class="empty">还没有结论。</div>';
+
+    const d = o.dirty || {};
+    $('observe-dirty').innerHTML = d.clean
+      ? '<div class="row"><b>脏状态</b> ' + statusPill('done') +
+        '<div class="meta">11 条规则全部通过（检查时间 ' + esc(o.generatedAt) + '）</div></div>'
+      : '<div class="row"><b>脏状态</b> ' + statusPill('blocked') +
+        '<div class="meta">' + esc((d.count || 0) + ' 处：' + JSON.stringify(d.counts || {})) + '</div></div>' +
+        (d.issues || []).slice(0, 8).map((i) =>
+          '<div class="row"><span class="tag">' + esc(i.code) + '</span> ' + esc(i.detail) + '</div>').join('');
+
+    const t = state.tuning || {};
+    const options = (t.tunable || []).map((x) =>
+      '<option value="' + esc(x.key) + '">' + esc(x.key) + ' · ' + esc(x.label || '') + '</option>').join('');
+    setOptions('tune-key', options, '（没有可调项）');
+    $('tune-history').innerHTML = (t.history || []).length
+      ? t.history.map((h) => '<div class="row"><b>' + esc(h.key) + '</b> ' +
+        esc(String(h.from)) + ' → ' + esc(String(h.to)) +
+        '<div class="meta">' + esc(h.at) + ' · ' + esc(h.actor) + ' · ' + esc(h.reason || '（未写理由）') +
+        (h.persisted ? ' · 已落覆盖层' : '') + '</div></div>').join('')
+      : '<div class="empty">还没有调过参。</div>';
+    showTuneDesc();
+  }
+
+  function showTuneDesc() {
+    const t = state.tuning || {};
+    const key = $('tune-key').value;
+    const spec = (t.tunable || []).find((x) => x.key === key);
+    $('tune-desc').textContent = spec
+      ? ('范围：' + (spec.type === 'bool' ? 'true / false' : (spec.min + ' ~ ' + spec.max)) + ' · ' + (spec.label || ''))
+      : '';
+  }
+
+  function render() {
+    renderStats();
+    renderTasks();
+    renderGui();
+    renderAgents();
+    renderApprovals();
+    renderDecisions();
+    renderQuotas();
+    renderObserve();
+    const briefRows = [];
+    for (const b of [...state.briefs].reverse()) {
+      briefRows.push('<div class="row"><pre class="brief">' + esc(b.body) + '</pre>' +
+        '<div class="meta">' + esc(b.createdAt) + '</div></div>');
+    }
+    for (const n of [...state.notes].reverse().slice(0, 6)) {
+      if (n.kind === 'approval') continue;
+      briefRows.push('<div class="row"><b>' + esc(n.title || '通知') + '</b>' +
+        '<div class="meta">' + esc(n.at || '') + '</div></div>');
+    }
+    renderSimple('inbox-list', briefRows, '还没有简报。');
+    renderSimple('runs-list', [...state.runs].reverse().slice(0, 12).map((r) =>
+      '<div class="row"><span class="tag">' + esc(r.agentId) + '</span> ' + esc(r.wakeReason) +
+      ' ' + statusPill(r.status) + '<div class="meta">' + esc(short(r.runId)) +
+      ' · ' + esc(short(r.taskId)) + ' · rev' + esc(r.revision) + '</div></div>'),
+      '还没有唤醒记录。');
+    renderSimple('audit-list', [...state.audit].reverse().slice(0, 12).map((a) =>
+      '<div class="row"><b>' + esc(a.action) + '</b> <span class="meta">' + esc(a.actor) + '</span>' +
+      '<div class="meta">' + esc(a.oldValue || '') + (a.oldValue ? ' → ' : '') + esc(a.newValue || '') + '</div></div>'),
+      '还没有审计记录。');
+
+    const b = state.bridge || {};
+    const bridgeRows = [
+      '<div class="row"><b>派活方式</b>：' + esc(b.dispatchMode || 'inline') +
+        '<div class="meta">待补投 ' + esc(b.queued ?? 0) + ' 张 · 已领取 ' + esc(b.leased ?? 0) + ' 张</div></div>',
+    ];
+    for (const x of (b.bridges || [])) {
+      bridgeRows.push('<div class="row"><b>' + esc(x.agentId) + '</b> ' + (x.online ? '在线' : '离线') +
+        '<div class="meta">最后心跳 ' + esc(x.lastSeenAt) + '</div></div>');
+    }
+    $('bridge-list').innerHTML = bridgeRows.join('') +
+      ((b.bridges || []).length ? '' : '<div class="empty">还没有 bridge 上报心跳（inline 模式下正常）。</div>');
+
+    $('recurring-list').innerHTML = state.recurring.length
+      ? state.recurring.map((j) => '<div class="row"><b>' + esc(j.jobId) + '</b> ' + statusPill(j.status) +
+        '<div class="meta">v' + esc(j.jobVersion) + ' · 第 ' + esc(j.lastCycleNo ?? 0) + ' 轮 · ' +
+        esc(j.misfirePolicy) + '/' + esc(j.overlapPolicy) + ' · 下次 ' + esc(j.nextFireAt || '—') + '</div></div>').join('')
+      : '<div class="empty">还没有循环任务，可点下方「注册示例巡检任务」。</div>';
+
+    // 候选席位与变更目标下拉（保留当前选中值）。
+    setOptions('addressedTo', state.agents.map((a) =>
+      '<option value="' + esc(a.agentId) + '">' + esc(a.displayName) + '（' + esc(a.agentId) + '）' +
+      (a.isCEO ? ' · CEO' : '') + '</option>').join(''), '（由 CEO 决定）');
+    setOptions('cr-task', state.tasks.filter((t) => t.status !== 'cancelled').map((t) =>
+      '<option value="' + esc(t.taskId) + '">' + esc(short(t.taskId)) + ' · ' + esc(t.title) +
+      ' · ' + esc(t.status) + '</option>').join(''), '（暂无可变更的卡）');
+    setOptions('thread-select', state.threads.map((t) =>
+      '<option value="' + esc(t.threadId) + '">' + esc(short(t.threadId)) + ' · ' + esc(t.title) +
+      '</option>').join(''), '（暂无空间）');
+    setOptions('activity-task', state.tasks.map((t) =>
+      '<option value="' + esc(t.taskId) + '">' + esc(short(t.taskId)) + ' · ' + esc(t.title) +
+      ' · ' + esc(t.status) + '</option>').join(''), '（选一张卡）');
+  }
+
+  async function refresh() {
+    const [agents, tasks, runs, threads, approvals, audit, inbox, dashboard, bridge, recurring, quotas, changeRequests, observe, tuning, meta, gui] =
+      await Promise.all([
+        api('/api/agents'), api('/api/tasks'), api('/api/runs'), api('/api/threads'),
+        api('/api/approvals'), api('/api/audit'), api('/api/inbox'), api('/api/dashboard'),
+        api('/api/bridge/status'), api('/api/recurring'), api('/api/quotas'), api('/api/change-requests'),
+        // 观测与调参失败不该把整个看板拖黑，单独兜底成 null。
+        api('/api/observe').catch(() => null), api('/api/config/tuning').catch(() => null),
+        // P6：老实例没有这两个端点，读不到就当没有，不影响其它面板。
+        api('/api/meta').catch(() => null), api('/api/gui/state').catch(() => null),
+      ]);
+    state = {
+      agents, tasks, runs, threads, approvals, audit, dashboard, bridge, recurring,
+      quotas, changeRequests,
+      observe, tuning, meta, gui,
+      briefs: inbox.briefs || [], notes: inbox.notifications || [],
+    };
+    if (!metaApplied) applyMetaDefaults();
+    render();
+    await loadThreadMessages();
+  }
+
+  // P6：看板第一次加载时按公司配置摆好默认值 —— 「一句话下单」不该还要手选模式和席位。
+  function applyMetaDefaults() {
+    const meta = state.meta;
+    if (!meta) return;
+    metaApplied = true;
+    const mode = meta.defaultMode || 'delegate';
+    if ($('mode').querySelector('option[value="' + mode + '"]')) $('mode').value = mode;
+    const execSeats = (meta.seats || []).filter((s) => !s.isCEO && (s.capabilities || []).includes('execute'));
+    if (mode === 'direct' && execSeats.length === 1) {
+      const only = execSeats[0].agentId;
+      if ($('addressedTo').querySelector('option[value="' + only + '"]')) $('addressedTo').value = only;
+    }
+    if (execSeats.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = '这家公司没有执行席位，提交了也没人接活。先检查配置里的 agents。';
+      $('mode').closest('form').appendChild(hint);
+    }
+  }
+
+  async function loadThreadMessages() {
+    selectedThread = $('thread-select').value;
+    if (!selectedThread) { $('thread-messages').innerHTML = '<div class="empty">选一个空间就能看到消息流。</div>'; return; }
+    try {
+      const th = await api('/api/threads/' + encodeURIComponent(selectedThread));
+      $('thread-messages').innerHTML = (th.messages || []).map((m) =>
+        '<div class="row"><b>' + esc(m.author) + '</b>：' + esc(m.body) +
+        '<div class="meta">' + esc(m.createdAt) + '</div></div>').join('') ||
+        '<div class="empty">这个空间还没有消息。</div>';
+    } catch (e) {
+      $('thread-messages').innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+    }
+  }
+
+  $('refresh-btn').addEventListener('click', () => refresh().catch((e) => say('request-msg', false, e.message)));
+
+  // P6：看结果。用事件委托，避免每次重绘都要重新绑一堆 onclick。
+  $('tasks-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-result]');
+    if (btn) { openResult(btn.dataset.result).catch((err) => { $('result-text').textContent = err.message; }); return; }
+    const cancel = e.target.closest('button[data-cancel]');
+    if (cancel) {
+      if (!confirm('取消这张卡？卡上的产物会保留，只是不再往下推进。')) return;
+      post('/api/tasks/' + encodeURIComponent(cancel.dataset.cancel) + '/cancel', { reason: '看板手动取消' })
+        .then(() => refresh())
+        .catch((err) => say('request-msg', false, '取消失败：' + err.message));
+    }
+  });
+  $('result-files').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-file]');
+    if (btn) loadResultFile(btn.dataset.file);
+  });
+  const closeResult = () => $('result-modal').classList.remove('on');
+  $('result-close').addEventListener('click', closeResult);
+  $('result-modal').addEventListener('click', (e) => { if (e.target === $('result-modal')) closeResult(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeResult(); });
+
+  // P6：GUI 暂停开关。暂停只是「不抢键鼠」，排着的卡留在 todo，恢复后会重新投。
+  $('gui-bar').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-gui-toggle]');
+    if (!btn) return;
+    btn.disabled = true;
+    try {
+      const paused = !(state.gui && state.gui.paused);
+      await post('/api/gui/pause', { paused, reason: paused ? '看板手动暂停' : '' });
+      await refresh();
+    } catch (err) {
+      say('request-msg', false, '切 GUI 开关失败：' + err.message);
+    } finally { btn.disabled = false; }
+  });
+
+  // P5-2：调参。前端只做类型转换，真正的校验与留痕在服务端（src/tune.js）。
+  $('tune-key').addEventListener('change', showTuneDesc);
+  $('tune-submit').addEventListener('click', async () => {
+    const key = $('tune-key').value;
+    const raw = $('tune-value').value.trim();
+    if (!key || !raw) { say('tune-msg', false, '先选参数并填新值'); return; }
+    let value;
+    if (raw === 'true') value = true;
+    else if (raw === 'false') value = false;
+    else {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) { say('tune-msg', false, '新值要是数字，或 true / false'); return; }
+      value = n;
+    }
+    try {
+      const r = await post('/api/config/tune', { key, value, reason: $('tune-reason').value.trim() });
+      say('tune-msg', true, r.applied
+        ? (key + '：' + r.from + ' → ' + r.to + (r.persisted ? '（已写入覆盖层，重启后仍生效）' : ''))
+        : '值没有变化，未记录。');
+      $('tune-reason').value = '';
+      await refresh();
+    } catch (e) { say('tune-msg', false, e.message); }
+  });
+  $('thread-select').addEventListener('change', loadThreadMessages);
+
+  $('request-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('submit-btn'); btn.disabled = true;
+    try {
+      const mode = $('mode').value;
+      const body = { title: $('title').value.trim() || undefined, text: $('text').value.trim() || '新需求', mode };
+      if (mode !== 'cowork') body.difficulty = $('difficulty').value;
+      const target = $('addressedTo').value;
+      if (mode === 'direct') {
+        if (!target) throw new Error('direct 模式必须先在「交付给」里指名一个席位（cc 不能代替交付）。');
+        body.addressedTo = target;
+      } else if (mode === 'cowork' && target) {
+        body.participants = [target];
+      }
+      const r = await post('/api/requests', body);
+      $('text').value = '';
+      await refresh();
+      // 别用「引擎推进了几步」当结论：卡可能正好被静置闸拦回排队，
+      // 这时候说「已提交」等于骗人 —— 用户会以为没反应，其实是几秒后自己开工。
+      const card = (state.tasks || []).find((t) => t.taskId === r.taskId);
+      if (card && card.status === 'todo') {
+        say('request-msg', true, '已收下 ' + r.taskId + '：手先离开键盘鼠标，几秒后它会自己开工（不用再点一次）。');
+      } else if (r.duplicate) {
+        say('request-msg', true, '同一 requestId 已提交过，未重复建卡（幂等生效）。');
+      } else if (r.taskCreated === false) {
+        say('request-msg', true, '已建协作空间：' + r.threadId + '，任务卡零新增。');
+      } else {
+        say('request-msg', true, '已提交：' + r.taskId + (card ? '（' + (STATUS_LABELS[card.status] || card.status) + '）' : '') +
+          '，引擎自动推进 ' + r.steps + ' 步。');
+      }
+    } catch (err) { say('request-msg', false, err.message); }
+    finally { btn.disabled = false; }
+  });
+
+  $('thread-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const target = $('addressedTo').value;
+      const body = { title: $('thread-title').value.trim() || '协作空间', text: '开个空间一起聊。' };
+      if (target) body.participants = [target];
+      const r = await post('/api/threads', body);
+      say('thread-msg', true, r.duplicate ? '同一 requestId 已存在，未重复建空间。' : '已建空间：' + r.threadId);
+      $('thread-title').value = '';
+      await refresh();
+    } catch (err) { say('thread-msg', false, err.message); }
+  });
+
+  // P4：点名 / 提升 / 归档。full 档要二次确认（浏览器里用 confirm 兑现，不偷偷替人点头）。
+  $('thread-rollcall').addEventListener('click', async () => {
+    try {
+      const id = $('thread-select').value;
+      if (!id) throw new Error('先选一个协作空间。');
+      const style = $('thread-style').value;
+      const body = { style };
+      if (style === 'full') {
+        if (!window.confirm('full 会唤醒全员 + 一次汇总，确定开会？')) return;
+        body.confirm = true;
+      }
+      const r = await post('/api/threads/' + encodeURIComponent(id) + '/roll-call', body);
+      say('thread-msg', true, '点名完成：唤醒 ' + r.wakes + ' 次。' + (r.note ? ' ' + r.note : ''));
+      await loadThreadMessages();
+      await refresh();
+    } catch (err) { say('thread-msg', false, err.message); }
+  });
+
+  $('thread-promote').addEventListener('click', async () => {
+    try {
+      const id = $('thread-select').value;
+      if (!id) throw new Error('先选一个协作空间。');
+      const assignee = $('addressedTo').value || (state.agents.find((a) => !a.isCEO) || {}).agentId;
+      if (!assignee) throw new Error('promote 必须显式指定承接人：先在「交付给」里选一个席位。');
+      const r = await post('/api/threads/' + encodeURIComponent(id) + '/promote', {
+        assignee, title: $('thread-title').value.trim() || undefined,
+      });
+      say('thread-msg', true, '已提升为任务卡 ' + r.taskId + '（' + (r.taskStatus || '已建') + '），空间归档；单向不可逆。');
+      await refresh();
+    } catch (err) { say('thread-msg', false, err.message); }
+  });
+
+  $('thread-archive').addEventListener('click', async () => {
+    try {
+      const id = $('thread-select').value;
+      if (!id) throw new Error('先选一个协作空间。');
+      await post('/api/threads/' + encodeURIComponent(id) + '/archive', {});
+      say('thread-msg', true, '已归档，后续不再收发消息。');
+      await refresh();
+    } catch (err) { say('thread-msg', false, err.message); }
+  });
+
+  $('thread-send').addEventListener('click', async () => {
+    try {
+      const id = $('thread-select').value;
+      if (!id) throw new Error('先选一个协作空间。');
+      const text = $('thread-text').value.trim();
+      if (!text) throw new Error('消息不能为空。');
+      const r = await post('/api/threads/' + encodeURIComponent(id) + '/messages', { text, author: 'human' });
+      say('thread-msg', true, '消息已留痕；唤醒 ' + r.wakes + ' 次，任务卡零新增。');
+      $('thread-text').value = '';
+      await loadThreadMessages();
+      await refresh();
+    } catch (err) { say('thread-msg', false, err.message); }
+  });
+
+  $('change-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const taskId = $('cr-task').value;
+      if (!taskId) throw new Error('先选一张任务卡。');
+      const reason = $('cr-reason').value.trim();
+      if (!reason) throw new Error('请填写变更原因。');
+      const kind = $('cr-kind').value;
+      const worker = state.agents.find((a) => !a.isCEO);
+      const lastRun = [...state.runs].reverse().find((r) => r.taskId === taskId);
+      const r = await post('/api/change-requests', {
+        changeRequestId: 'CR-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        taskId, runId: lastRun ? lastRun.runId : 'R-manual',
+        agentId: worker ? worker.agentId : 'worker-01',
+        kind, severity: kind === 'blocked' ? 'advisory' : 'needsDecision',
+        reason, doneSoFar: { note: 'Web Board 手工上报' },
+      });
+      say('change-msg', true, r.inserted ? '变更请求已上报，CEO 已唤醒并派生新卡。' : '重复的变更请求，未重复处理。');
+      $('cr-reason').value = '';
+      await refresh();
+    } catch (err) { say('change-msg', false, err.message); }
+  });
+
+  const demoJob = {
+    schema: 'aicompany.recurring/v1',
+    jobId: 'JOB-demo-brief', jobVersion: 1,
+    title: '每日简报巡检（演示）', kind: 'brief',
+    owner: 'ceo', assignee: 'worker-01', reportsTo: 'ceo', status: 'active',
+    trigger: { type: 'cron', rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0', timezone: 'UTC' },
+    misfirePolicy: 'run_once', misfireGraceMin: 720, overlapPolicy: 'skip',
+    termination: { validUntil: null, maxCycles: 30, pauseOnConsecutiveFailures: 3, budgetTotal: { quotaUnits: 100 } },
+    requiresHumanEachCycle: false,
+    taskTemplate: {
+      role: 'general', instructions: '汇总今日状态并输出简报。',
+      acceptance: ['completion.json 通过 schema 校验且 status = success'],
+      completionReportPath: 'output/completion.json',
+    },
+    carryOver: { enabled: true, maxItems: 20, injectField: 'input.previousFindings' },
+    dedupeWindowMin: 1, lastCycleNo: 0,
+  };
+
+  $('job-register').addEventListener('click', async () => {
+    try {
+      const r = await post('/api/recurring', demoJob);
+      say('job-msg', true, '已注册 ' + r.jobId + '，下一次触发 ' + (r.nextFireAt || '—'));
+      await refresh();
+    } catch (err) { say('job-msg', false, err.message); }
+  });
+
+  $('job-fire').addEventListener('click', async () => {
+    try {
+      const id = $('job-id').value.trim() || (state.recurring[0] && state.recurring[0].jobId);
+      if (!id) throw new Error('填 jobId，或先注册一个循环任务。');
+      const r = await post('/api/recurring/' + encodeURIComponent(id) + '/fire', {});
+      say('job-msg', true, r.created
+        ? '已实例化第 ' + r.cycleNo + ' 轮：' + r.taskId
+        : '未建卡：' + (r.reason || '被判定闸拦下'));
+      await refresh();
+    } catch (err) { say('job-msg', false, err.message); }
+  });
+
+  // P4：卡片里的按钮用事件委托，列表重渲染也不会丢监听。
+  $('approvals-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-approve]');
+    if (!btn) return;
+    btn.disabled = true;
+    try {
+      const decision = btn.dataset.approve;
+      const r = await post('/api/approvals/' + encodeURIComponent(btn.dataset.id) + '/decision', {
+        decision, decidedBy: 'board',
+        reason: decision === 'approved' ? null : (window.prompt('写一句理由（可留空）：') || null),
+      });
+      say('approval-msg', true, '审批已处理：' + decision +
+        (r.applied === false ? '（未改动任务，仅记录结论）' : '') +
+        (r.action ? ' · ' + r.action : ''));
+      await refresh();
+    } catch (err) { say('approval-msg', false, err.message); }
+    finally { btn.disabled = false; }
+  });
+
+  $('decisions-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-decide]');
+    if (!btn) return;
+    const changeRequestId = btn.dataset.id;
+    if (!changeRequestId) { say('decision-msg', false, '这张卡没有变更请求，无法走决策入口。'); return; }
+    btn.disabled = true;
+    try {
+      const decision = btn.dataset.decide;
+      const body = {
+        decidedBy: 'board', decision, needsHumanApproval: false,
+        reason: window.prompt('拍板理由（必填，会留痕）：') || '',
+      };
+      if (!body.reason) throw new Error('必须写一句拍板理由。');
+      if (decision === 'derive') body.deriveAssignee = $('derive-assignee').value.trim() || null;
+      const r = await post('/api/change-requests/' + encodeURIComponent(changeRequestId) + '/decision', body);
+      if (r.status === 'awaiting_approval') {
+        say('decision-msg', true, '改了指令/验收，已生成 replan 审批，等人点头后才生效（审批单 ' + r.approvalId + '）。');
+      } else {
+        say('decision-msg', true, '已拍板：' + decision + (r.runId ? ' · runId ' + r.runId : '') +
+          (r.childTaskId ? ' · 新卡 ' + r.childTaskId : ''));
+      }
+      await refresh();
+      await loadActivity();
+    } catch (err) { say('decision-msg', false, err.message); }
+    finally { btn.disabled = false; }
+  });
+
+  $('quotas-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-quota-reset]');
+    if (!btn) return;
+    try {
+      const r = await post('/api/quotas/' + encodeURIComponent(btn.dataset.quotaReset) + '/reset', {});
+      say('quota-msg', true, r.reset ? '已清零本周期用量（历史周期保留）。' : '当前周期没有账本，未改动。');
+      await refresh();
+    } catch (err) { say('quota-msg', false, err.message); }
+  });
+
+  $('activity-task').addEventListener('change', () => { loadActivity(); });
+
+  $('cleanup-scan').addEventListener('click', async () => {
+    try {
+      const targets = $('cleanup-targets').value.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean);
+      if (!targets.length) throw new Error('至少填一个扫描目标。');
+      const whitelist = $('cleanup-whitelist').value.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean);
+      const body = { jobId: 'manual-' + Date.now(), targets };
+      if (whitelist.length) body.whitelist = whitelist;
+      const r = await post('/api/cleanup/scan', body);
+      say('cleanup-msg', true, '扫描完成：' + r.metrics.fileCount + ' 个文件，删除 ' +
+        r.metrics.deletedCount + ' 个（红线：恒为 0）。报告：' + r.reportPath);
+      await refresh();
+    } catch (err) { say('cleanup-msg', false, err.message); }
+  });
+
+  function connectSse() {
+    const es = new EventSource('/api/events');
+    es.onopen = () => setSse(true);
+    es.onerror = () => setSse(false);
+    es.onmessage = () => { refresh().catch(() => {}); };
+  }
+
+  refresh().catch((e) => say('request-msg', false, '初始化失败：' + e.message));
+  connectSse();
+  setInterval(() => refresh().catch(() => {}), 10000);
+})();
+</script>
+</body>
+</html>

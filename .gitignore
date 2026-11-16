@@ -1,0 +1,11 @@
+node_modules/
+.env
+config/*.yaml
+!config/company.example.yaml
+# 生产档配置没有密钥，但它是「真实编制」——G-P5 冻结要能钉住它，所以纳入版本
+!config/company.prod.yaml
+work/
+work-*/
+*.tmp
+*.log
+config/runtime-overrides.json
