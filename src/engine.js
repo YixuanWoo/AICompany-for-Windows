@@ -1549,7 +1549,11 @@ export function createEngine({
     }
     db.prepare('UPDATE tasks SET assignee = ?, attempt = 0, updatedAt = ? WHERE taskId = ?')
       .run(rescue, clockIso(), task.taskId);
-    if (task.status === 'blocked') transition(db, task.taskId, 'todo', 'control-plane');
+    // 打回待办要从库里重读状态：outcome 链路传进来的 task 是转 blocked **之前**的快照
+    // （调用方刚 transition 完 blocked 才走到这里），拿它判断会跳过 blocked→todo——
+    // 卡就永远停在 blocked，而救火席位只领 todo 卡，直接死锁（T-465c3869 事故回归）。
+    const freshStatus = db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(task.taskId)?.status;
+    if (freshStatus === 'blocked') transition(db, task.taskId, 'todo', 'control-plane');
     writeAudit(db, {
       actor: 'control-plane', action: 'escalate_to_rescue',
       oldValue: task.assignee, newValue: rescue, taskId: task.taskId,

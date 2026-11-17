@@ -269,11 +269,21 @@ export async function pollForReport({
       try { data = JSON.parse(fs.readFileSync(paths.reportPath, 'utf8')); } catch (error) {
         return { kind: 'invalid_report', error: String(error.message ?? error), polls: i, at: now() };
       }
-      const verified = verifyReport({ report: data, paths, taskId, runId });
-      return {
-        kind: verified.ok ? 'completion' : 'invalid_report',
-        data, verified, polls: i, at: now(),
-      };
+      // ②b 陈旧报告跳过（T-465c3869 事故回归）：卡被打回重做 / 转救火席位再投时，
+      //    任务目录里残留的是**上一轮运行**的 completion.json —— taskId 相同、runId 不同。
+      //    旧逻辑在这里直接判 invalid_report 把卡打死（防串单），新运行永远走不到
+      //    草稿模式，卡就卡死在 blocked。处理：只跳过、不判死，继续等本轮自己的报告；
+      //    草稿模式收尾时 writeCompletion 会用当前 runId 覆盖这份旧文件，自然自愈。
+      //    taskId 都对不上才是真串单，照旧拒绝。
+      const staleFromPreviousRun = data?.taskId === taskId
+        && data?.runId != null && data.runId !== runId;
+      if (!staleFromPreviousRun) {
+        const verified = verifyReport({ report: data, paths, taskId, runId });
+        return {
+          kind: verified.ok ? 'completion' : 'invalid_report',
+          data, verified, polls: i, at: now(),
+        };
+      }
     }
     // ③ progress.json 只是覆盖写的进度，绝不触发事件、绝不唤醒任何人。
     if (fs.existsSync(paths.progressPath)) progressSeen = true;

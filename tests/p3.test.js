@@ -20,6 +20,7 @@ import {
 import {
   buildTaskPaths, writeTaskBundle, writeChangeRequest, sha256File,
   verifyReport, pollForReport, isInsideOutput, buildCompletionFromDraft,
+  writeCompletion,
 } from '../src/gui-report.js';
 import { atomicWriteJson } from '../src/ids.js';
 import {
@@ -647,4 +648,41 @@ test('P3-4 · 草稿被误写进 output/ 也能兜底收单（T-3ff55213 事故�
   const built = buildCompletionFromDraft({ paths, taskId: 'T-DRAFTMISFILE', runId: 'R-DM', agent: 'doubao' });
   assert.equal(built.ok, true, built.reason ?? '');
   assert.ok(built.files.some((f) => f.artifact === 'output/report.draft.json'), '误写的草稿本身算一份产物留痕');
+});
+
+test('P3-4 · 上一轮遗留的 completion.json（runId 不匹配）不毒死新运行（T-465c3869 事故回归）', async (t) => {
+  const root = tmpRoot(t);
+  const paths = buildTaskPaths(root, 'T-STALE', { reportMode: 'draft' });
+  writeTaskBundle(paths, { task: {}, prompt: 'x' });
+  // 复刻事故：上一轮运行已收单落了正式报告（runId R-OLD），卡随后被打回重做，
+  // 新运行的 runId 换成 R-NEW —— 任务目录里躺着上一轮的 completion.json。
+  writeSuccessBundle(paths, 'T-STALE', 'R-OLD');
+  fs.writeFileSync(path.join(paths.outputDir, 'result-new.md'), '新一轮的产物\n', 'utf8');
+  atomicWriteJson(path.join(paths.taskDir, 'report.draft.json'), { status: 'success', summary: '重做完成' });
+
+  const polled = await pollForReport({
+    paths, config: { reportMode: 'draft' }, taskId: 'T-STALE', runId: 'R-NEW',
+    maxPolls: 3, wait: noWait,
+  });
+  assert.equal(polled.kind, 'draft', '旧 runId 的报告要跳过、交给草稿模式收单，而不是把卡打死在 invalid_report');
+
+  // 控制面补全会用当前 runId 重写 completion.json —— 防串单校验从此对得上，文件自愈。
+  const built = buildCompletionFromDraft({ paths, taskId: 'T-STALE', runId: 'R-NEW', agent: 'doubao' });
+  assert.equal(built.ok, true, built.reason ?? '');
+  assert.equal(built.report.runId, 'R-NEW');
+  writeCompletion(paths, built.report);
+  const reread = JSON.parse(fs.readFileSync(paths.reportPath, 'utf8'));
+  assert.equal(reread.runId, 'R-NEW', '残留的旧报告被当前运行的报告覆盖');
+});
+
+test('P3-4 · taskId 都对不上的完成报告仍是串单，照旧拒绝（不因防陈旧放宽）', async (t) => {
+  const root = tmpRoot(t);
+  const paths = buildTaskPaths(root, 'T-CROSS', {});
+  writeTaskBundle(paths, { task: {}, prompt: 'x' });
+  writeSuccessBundle(paths, 'T-OTHER', 'R-OTHER');
+  const polled = await pollForReport({
+    paths, config: {}, taskId: 'T-CROSS', runId: 'R-CROSS', maxPolls: 2, wait: noWait,
+  });
+  assert.equal(polled.kind, 'invalid_report');
+  assert.match(polled.verified.errors.join(), /taskId 不匹配/);
 });

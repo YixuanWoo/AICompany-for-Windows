@@ -346,6 +346,33 @@ test('P4-5 · 返工 2 次转 escalationTo 救火席位（配置决定，不写�
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM runs WHERE agentId = 'worker-02'").get().n, 1);
 });
 
+test('P4-5 · 连续不合格转救火席位时必须把卡打回 todo（T-465c3869 死锁回归）', async (t) => {
+  // 复刻事故：worker-01 连续两次交不合格报告 → 卡转 blocked → 转救火席位。
+  // 旧代码用转 blocked **之前**的任务快照判断「是否 blocked」，恒为假 → 卡停在 blocked，
+  // 而救火席位只领 todo 卡 → 死锁，永远无人接手。
+  const badThenGood = (ctx) => (ctx.agent.id === 'worker-01'
+    ? { ...completion(ctx), status: 'failed', reason: '模拟不合格报告' }
+    : completion(ctx));
+  const ceoPass = (ctx) => (ctx.task === null
+    ? { type: 'message', text: 'ceo 已看过' }
+    : (ctx.wakeReason === 'review_requested'
+      ? { type: 'review', verdict: 'pass', reason: '通过' }
+      : { type: 'task-create', title: '子任务', assignee: 'worker-01' }));
+  const { engine, db } = engineFor(t, { workerResult: badThenGood, ceoResult: ceoPass });
+  const r = await engine.submit({ requestId: 'REQ-DEADLOCK', text: '连续不合格转救火', mode: 'delegate' });
+
+  // CEO 拆出的子卡才是执行卡：连续两次不合格 → 转救火席位 + 打回 todo
+  const child = db.prepare('SELECT * FROM tasks WHERE parentTaskId = ?').get(r.taskId);
+  assert.ok(child, 'CEO 拆出了执行子卡');
+  assert.equal(child.assignee, 'worker-02', '连续两次不合格后转救火席位');
+  assert.notEqual(child.status, 'blocked', '救火接手后卡不能停在 blocked（旧代码死锁在此）');
+
+  await engine.pump();
+  await engine.pump();
+  const after = db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(child.taskId);
+  assert.equal(after.status, 'done', '救火席位能真正接手并收束（旧代码会永远卡死在 blocked）');
+});
+
 test('P4-5 · escalationTo 指向不存在 / 自己时配置直接拒绝', () => {
   const cfg = config();
   const missing = { ...cfg, agents: cfg.agents.map((a) => (a.id === 'worker-01' ? { ...a, escalationTo: 'nobody' } : a)) };
