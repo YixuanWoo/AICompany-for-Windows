@@ -675,6 +675,41 @@ test('P3-4 · 上一轮遗留的 completion.json（runId 不匹配）不毒死�
   assert.equal(reread.runId, 'R-NEW', '残留的旧报告被当前运行的报告覆盖');
 });
 
+test('P3-4 · 打回重做时上一轮残留的 draft 不能当成本轮成果（T-906d3686 事故回归）', async (t) => {
+  const root = tmpRoot(t);
+  const paths = buildTaskPaths(root, 'T-STALEDRAFT', { reportMode: 'draft' });
+  // 上一轮：写了成功草稿、落了正式报告（runId R-OLD）。
+  writeTaskBundle(paths, { task: { taskId: 'T-STALEDRAFT', runId: 'R-OLD' }, prompt: 'x' });
+  fs.writeFileSync(path.join(paths.outputDir, 'done.md'), '上一轮的产物\n', 'utf8');
+  atomicWriteJson(path.join(paths.taskDir, 'report.draft.json'), { status: 'success', summary: '上一轮完成' });
+  writeSuccessBundle(paths, 'T-STALEDRAFT', 'R-OLD');
+
+  // 本轮开工：控制面重写 task.json（新 runId），旧草稿停在上轮（时间戳后退一分钟，模拟真实间隔）。
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(paths.taskDir, 'report.draft.json'), old, old);
+  writeTaskBundle(paths, { task: { taskId: 'T-STALEDRAFT', runId: 'R-NEW' }, prompt: 'x' });
+
+  const polled = await pollForReport({
+    paths, config: { reportMode: 'draft' }, taskId: 'T-STALEDRAFT', runId: 'R-NEW',
+    maxPolls: 3, wait: noWait,
+  });
+  assert.equal(polled.kind, 'timeout', '上一轮的 draft 说 success 也不能当本轮交卷，否则「打回」等于自动通过');
+
+  const built = buildCompletionFromDraft({ paths, taskId: 'T-STALEDRAFT', runId: 'R-NEW', agent: 'doubao' });
+  assert.equal(built.ok, false, '控制面补全不能拿旧 draft 生成报告');
+  assert.equal(built.kind, 'no_draft');
+
+  // 本轮真的重写了草稿，才允许收单。
+  atomicWriteJson(path.join(paths.taskDir, 'report.draft.json'), { status: 'success', summary: '本轮改完' });
+  const again = await pollForReport({
+    paths, config: { reportMode: 'draft' }, taskId: 'T-STALEDRAFT', runId: 'R-NEW',
+    maxPolls: 2, wait: noWait,
+  });
+  assert.equal(again.kind, 'draft', '本轮自己写的草稿要立刻收');
+  const rebuilt = buildCompletionFromDraft({ paths, taskId: 'T-STALEDRAFT', runId: 'R-NEW', agent: 'doubao' });
+  assert.equal(rebuilt.ok, true, rebuilt.reason ?? '');
+});
+
 test('P3-4 · taskId 都对不上的完成报告仍是串单，照旧拒绝（不因防陈旧放宽）', async (t) => {
   const root = tmpRoot(t);
   const paths = buildTaskPaths(root, 'T-CROSS', {});

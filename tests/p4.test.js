@@ -373,6 +373,46 @@ test('P4-5 · 连续不合格转救火席位时必须把卡打回 todo（T-465c3
   assert.equal(after.status, 'done', '救火席位能真正接手并收束（旧代码会永远卡死在 blocked）');
 });
 
+test('P4-5 · CEO 打回必须把意见传给执行人，不能只说「重做」（T-906d3686 事故回归）', async (t) => {
+  // 事故：CEO 判定 reject 并写了意见，但引擎只发了 `{ wakeReason: 'rework' }`——
+  // 意见既没进事件、也没落审计、也没进提示词，执行人被重新叫起来后不知道该改什么。
+  const ceoReject = (ctx) => (ctx.wakeReason === 'review_requested'
+    ? { type: 'review', verdict: 'reject', reason: '第三条验收没给证据' }
+    : { type: 'task-create', title: '子任务', assignee: 'worker-01' });
+  const { engine } = engineFor(t, { ceoResult: ceoReject, workerResult: (ctx) => completion(ctx) });
+  await engine.submit({ requestId: 'REQ-NOTE', text: '带意见打回', mode: 'delegate' });
+
+  const rework = engine.getEvents()
+    .filter((e) => e.type === 'issue_assigned' && JSON.parse(e.payloadJson).wakeReason === 'rework');
+  assert.ok(rework.length >= 1, '打回要重新派活');
+  assert.match(String(JSON.parse(rework[0].payloadJson).reviewNote ?? ''), /第三条验收没给证据/,
+    '打回事件要把 CEO 的意见带下去，否则执行人只能猜');
+
+  const audited = engine.getAudit().filter((a) => a.action === 'review_rework');
+  assert.ok(audited.length >= 1, '打回动作要留痕');
+  assert.match(String(audited[0].newValue), /第三条验收没给证据/, '留痕里要写清为什么打回');
+});
+
+test('P4-3 · 交付成功后「连续不合格」计数归零，且打回记录挂在卡上（T-906d3686 事故回归）', async (t) => {
+  // 事故：计数只在转救火时清零，成功交付从不清零 → 「连续两次」实际是「累计两次」。
+  // 一次早期超时（no_draft）之后，返工时任何一次小磕碰都直接判 blocked + 转救火。
+  let calls = 0;
+  const workerResult = (ctx) => {
+    calls += 1;
+    return calls === 1 ? { status: 'success' } : completion(ctx); // 第一次交个不合规的报告
+  };
+  const { engine, db } = engineFor(t, { workerResult });
+  const r = await engine.submit({ requestId: 'REQ-ATTEMPT', text: '先错后对', mode: 'delegate' });
+
+  const rejected = engine.getAudit().filter((a) => a.action === 'report_rejected');
+  assert.equal(rejected.length, 1, '第一次不合格要留痕');
+  assert.ok(rejected[0].taskId, '打回记录必须挂在卡上：不挂卡就按卡查不到，看板只能说「没说原因」');
+
+  const child = db.prepare('SELECT taskId, attempt, status FROM tasks WHERE parentTaskId = ?').get(r.taskId);
+  assert.equal(child.status, 'done', '重试成功后正常收单');
+  assert.equal(child.attempt, 0, '成功交付后计数要归零；不清零会让「连续」变成「累计」');
+});
+
 test('P4-5 · escalationTo 指向不存在 / 自己时配置直接拒绝', () => {
   const cfg = config();
   const missing = { ...cfg, agents: cfg.agents.map((a) => (a.id === 'worker-01' ? { ...a, escalationTo: 'nobody' } : a)) };

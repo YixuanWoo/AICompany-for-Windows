@@ -1116,6 +1116,10 @@ export function createEngine({
         acceptance: task.acceptance, parentTaskId: task.parentTaskId,
         project: task.project ?? null, repo: task.repo ?? null, reviewBy: task.reviewBy ?? null,
         difficulty: task.difficulty ?? DEFAULT_DIFFICULTY,
+        // 打回重做时把验收意见带下去：提示词据此讲清「这张卡是打回，要改哪一条」。
+        // 不带的话执行人被重新叫起来只看到原任务说明，根本不知道上一轮为什么没过（T-906d3686）。
+        reviewNote: (typeof extra?.reviewNote === 'string' && extra.reviewNote.trim())
+          ? extra.reviewNote.trim() : null,
         // 这张卡的交付路由：谁发布的、默认交给谁、能不能自己判落盘。
         // 提示词据此讲清「这活是董事会下的单，还是你上级派的」——不写清，
         // 员工会把上级派的活当自己的事，干完自己结案，发布者永远看不到结果。
@@ -3277,7 +3281,10 @@ export function createEngine({
       const why = checked.errors.join('; ')
         || [report.status, report.reason].filter(Boolean).join('：')
         || '无原因';
-      writeAudit(db, { actor: agentId, action: 'report_rejected', newValue: `第 ${attempt} 次：${why}`, runId: outcome.runId });
+      writeAudit(db, {
+        actor: agentId, action: 'report_rejected',
+        newValue: `第 ${attempt} 次：${why}`, runId: outcome.runId, taskId: task.taskId,
+      });
       if (attempt < 2) {
         emitEvent({
           type: 'issue_assigned', taskId: task.taskId, agentId,
@@ -3289,6 +3296,13 @@ export function createEngine({
         escalateToRescue({ ...task, attempt }, '报告连续两次不合格');
       }
       return;
+    }
+
+    // 交上来的报告合格 = 「交付能力没问题」，把「连续不合格」计数清零。
+    // 不在成功这里清零，这个计数就变成「累计」而不是「连续」：一次早期超时（no_draft）之后，
+    // 返工时任何一次小磕碰都会直接跳到 blocked + 转救火席位（T-906d3686 事故）。
+    if ((task.attempt ?? 0) !== 0) {
+      db.prepare('UPDATE tasks SET attempt = 0, updatedAt = ? WHERE taskId = ?').run(nowIso(), task.taskId);
     }
 
     const kindInfo = inferArtifactKind(task, report);
@@ -3530,19 +3544,28 @@ export function createEngine({
         deliverAccepted(accepted, outcome.runId);
       } else {
         transition(db, task.taskId, 'in_progress', 'ceo', outcome.runId);
+        // CEO 的打回意见绝不能丢：只说「rework」等于让人猜要改什么（T-906d3686 事故）。
+        // 它要同时进三处 —— 事件（→ 提示词）、审计（→ 看板与按卡追溯）、下面 escalate 的理由。
+        const rejectReason = String(
+          outcome.result?.reason ?? outcome.result?.summary ?? outcome.result?.note ?? '',
+        ).trim().slice(0, 800);
         // 验收打回只自动重跑一次；第二次打回留痕等人审，避免无限空转烧额度（§7.6 / P1-6）。
         const rounds = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE taskId = ? AND wakeReason = 'review_requested'")
           .get(task.taskId).n;
         if (rounds <= 1) {
           emitEvent({
             type: 'issue_assigned', taskId: task.taskId, agentId: task.assignee,
-            payload: { wakeReason: 'rework' },
+            payload: { wakeReason: 'rework', reviewNote: rejectReason || null },
             dedupeKey: `review-reject:${task.taskId}:${outcome.runId}`,
           });
-          writeAudit(db, { actor: 'ceo', action: 'review_rework', newValue: task.taskId, runId: outcome.runId });
+          writeAudit(db, {
+            actor: 'ceo', action: 'review_rework',
+            newValue: `${task.taskId}|${rejectReason || '(CEO 未写原因)'}`,
+            runId: outcome.runId, taskId: task.taskId,
+          });
         } else {
           // P4-5 升级规则：返工 2 次转救火席位（escalationTo 决定）；没配就出人审批卡。
-          escalateToRescue(taskById(task.taskId), '验收连续两次打回');
+          escalateToRescue(taskById(task.taskId), `验收连续两次打回${rejectReason ? `：${rejectReason}` : ''}`);
         }
       }
       return;

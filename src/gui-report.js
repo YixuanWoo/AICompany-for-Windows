@@ -156,9 +156,27 @@ export function draftFileCandidates(paths) {
   ];
 }
 
-export function readDraft(paths) {
+// 本轮开工时刻：控制面每次派活都会重写 task.json（里面带本轮 runId），
+// 所以「task.json 的 mtime」就是这一轮的开始时间。返回 null 表示没有本轮标记
+// （老结构 / 单测手写的 task.json），此时不启用陈旧守卫，保持向后兼容。
+export function runStartedAt(paths, runId) {
+  try {
+    const data = JSON.parse(fs.readFileSync(paths.taskJsonPath, 'utf8'));
+    const recorded = data?.runId ?? data?.task?.runId ?? null;
+    if (!recorded || recorded !== runId) return null;
+    return fs.statSync(paths.taskJsonPath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+export function readDraft(paths, { minMtimeMs = null } = {}) {
   for (const file of draftFileCandidates(paths)) {
     if (!fs.existsSync(file)) continue;
+    // 上一轮留下的草稿不能当本轮成果：见 pollForReport ④b 的说明。
+    if (minMtimeMs != null) {
+      try { if (fs.statSync(file).mtimeMs < minMtimeMs) continue; } catch { continue; }
+    }
     try {
       const data = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (data && typeof data === 'object') return data;
@@ -189,7 +207,8 @@ export function scanOutputFiles(paths) {
 export function buildCompletionFromDraft({
   paths, taskId, runId, agent, revision = 1, now = () => new Date().toISOString(),
 }) {
-  const draft = readDraft(paths);
+  // 只认本轮写的草稿：上一轮的 draft 说 success 也不能拿来交卷（T-906d3686）。
+  const draft = readDraft(paths, { minMtimeMs: runStartedAt(paths, runId) });
   if (!draft) return { ok: false, kind: 'no_draft', reason: `没有 ${DRAFT_REPORT_NAME}` };
 
   const status = String(draft.status ?? '').trim();
@@ -256,6 +275,7 @@ export async function pollForReport({
   const limit = maxPolls ?? Math.max(1, Math.ceil(((config.maxMinutes ?? 1) * 60000) / intervalMs));
   const pause = wait ?? (() => new Promise((resolve) => setTimeout(resolve, intervalMs)));
   let progressSeen = false;
+  const startedAt = runStartedAt(paths, runId);
 
   for (let i = 1; i <= limit; i += 1) {
     // ① 先看变更请求：needsDecision 立刻收，绝不当成超时或失败。
@@ -291,7 +311,15 @@ export async function pollForReport({
     //    但 draft 说成功、output/ 里却还没有非空文件时不算数，继续等（agent 可能还在写）。
     //    草稿被误写进 output/ 也能兜住（draftFileCandidates 有两个候选位）。
     if (config.reportMode === 'draft') {
-      const draftFile = draftFileCandidates(paths).find((f) => fs.existsSync(f));
+      // ④b 陈旧草稿跳过（T-906d3686 事故回归）：卡被验收打回重做 / 转救火再投时，
+      //    任务目录里躺着**上一轮**的 report.draft.json，它说 success。旧逻辑直接当成本轮
+      //    成果收单 —— 等于「打回」自动变成「原样通过」，验收方再拒一次就成死循环。
+      //    处理：比本轮开工时刻（task.json 的 mtime）还老的草稿一律不算数，继续等本轮自己写。
+      const draftFile = draftFileCandidates(paths).find((f) => {
+        if (!fs.existsSync(f)) return false;
+        if (startedAt == null) return true;
+        try { return fs.statSync(f).mtimeMs >= startedAt; } catch { return false; }
+      });
       if (draftFile) {
         let draft;
         try { draft = JSON.parse(fs.readFileSync(draftFile, 'utf8')); } catch (error) {

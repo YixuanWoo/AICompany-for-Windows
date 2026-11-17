@@ -25,6 +25,7 @@ export const DEFAULT_PROMPT_TEMPLATE = [
   '任务说明：{{instructions}}',
   '验收条件：{{acceptance}}',
   '',
+  '{{reworkNote}}',
   '{{projectContext}}',
   '',
   '完成后必须把完成报告写到这个绝对路径：{{reportPath}}',
@@ -52,6 +53,7 @@ export const DRAFT_PROMPT_TEMPLATE = [
   '任务说明：{{instructions}}',
   '验收条件：{{acceptance}}',
   '',
+  '{{reworkNote}}',
   '{{projectContext}}',
   '',
   '【硬性要求，逐条照做】',
@@ -89,6 +91,18 @@ export function promptSlotValues({ task = {}, paths = {}, config = {}, projectCo
     reportsTo: task.reportsTo ?? config.reportsTo ?? '(沿汇报线)',
     instructions: task.instructions ?? '(见 brief.md)',
     acceptance: Array.isArray(task.acceptance) ? task.acceptance.join('；') : String(task.acceptance ?? ''),
+    // 打回重做：把验收意见原样讲给执行人。不是打回时给空串，模板那一行自然消失。
+    // 不给这段，执行人被重新叫起来只看得到原任务说明，只能猜「到底哪没过」（T-906d3686）。
+    reworkNote: (() => {
+      const note = String(task.reviewNote ?? '').trim();
+      if (!note) return '';
+      return [
+        '【重要：这张卡是打回重做，不是新任务】',
+        `上一轮验收没通过，验收人写的意见：${note}`,
+        '只改被指出的问题，已经验收通过的部分不要推翻重做；',
+        '改完仍按上面的要求把报告写到同一个位置（覆盖上一轮那份）。',
+      ].join('\n');
+    })(),
     // P7：项目规范 + 最近经验。没项目时是空串（模板里那一行会留白，不影响阅读）。
     projectContext: String(projectContext ?? '').trim(),
     noScreenOnly: '不要只在屏幕上回复「已完成」，必须把报告写到指定文件',
