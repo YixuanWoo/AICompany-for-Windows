@@ -165,11 +165,13 @@ test('P2-1 · 统一 API：P2 端点全部登记在契约清单里且签名不�
   assert.equal(WEB_BOARD_P2_PANELS.length, 2);
 });
 
-test('P2-1 · Web Board 已挂上 Bridge 与 RecurringJobs 两个 P2 面板', () => {
+test('P2-1 · Web Board 已挂上 Bridge 与计划（循环 + 定时）两个 P2 面板', () => {
   const html = fs.readFileSync(path.join(ROOT, 'src', 'web', 'board.html'), 'utf8');
+  // 2026-11-17：循环任务与一次性定时合并进「计划」标签页（一处看全部未来会触发的活），
+  // 原来的 RecurringJobs 演示按钮（job-register / job-fire）随之下线，所以标记改成实际存在的面板与动作。
   for (const marker of [
-    '/api/bridge/status', '/api/recurring', 'Bridge', 'RecurringJobs',
-    'job-register', 'job-fire',
+    '/api/bridge/status', '/api/recurring', 'Bridge', '未来要触发的活',
+    'plan-list', 'data-sched', '只跑一次',
   ]) assert.ok(html.includes(marker), `看板缺少 ${marker}`);
 });
 
@@ -761,11 +763,11 @@ test('G-P2 · bridge token 401 由统一 API 拦下；本地 inline 演示仍与
 test('P2-7 · 循环卡必须带项目归属：否则「替项目干活却不认这个项目」', () => {
   const { db, rec } = makeRecurring();
   // 带 project 的 job：卡上要能读到同一个项目，后续规范注入 / 经验 / 交付才有着落。
-  rec.registerJob(makeJob({ jobId: 'JOB-PROJ', project: 'yitai' }));
+  rec.registerJob(makeJob({ jobId: 'JOB-PROJ', project: 'demo-editor' }));
   const fired = rec.fire({ jobId: 'JOB-PROJ', scheduledAt: FAR, now: FAR });
   assert.equal(fired.created, true);
   const row = db.prepare('SELECT project, title FROM tasks WHERE taskId = ?').get(fired.taskId);
-  assert.equal(row.project, 'yitai', '循环卡丢了项目归属 = 产物和经验都进不了项目');
+  assert.equal(row.project, 'demo-editor', '循环卡丢了项目归属 = 产物和经验都进不了项目');
 
   // 不写 project 的老 job 仍然可以跑，只是不归属任何项目（向后兼容）。
   rec.registerJob(makeJob({ jobId: 'JOB-NOPROJ' }));

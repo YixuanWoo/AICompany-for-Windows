@@ -10,17 +10,51 @@ import { nowIso } from './ids.js';
 import { createGuiLock } from './gui-lock.js';
 import { evaluateGate } from './gui-gate.js';
 import { renderPrompt, normalizeSteps, assertPromptComplete } from './gui-prompt.js';
+import { seatBriefing, delegationBriefing, taskIntakeBriefing } from './org-chart.js';
 import {
   buildTaskPaths, writeTaskBundle, pollForReport,
   buildCompletionFromDraft, writeCompletion, DRAFT_REPORT_NAME,
 } from './gui-report.js';
 import {
-  createGuiDriver, assertForeground, captureScreenshot, GuiError,
+  createGuiDriver, assertForeground, waitForeground, captureScreenshot, GuiError,
 } from './gui-driver.js';
+// 证据层：启动回执与轮询心跳。GUI 是「聊天窗口型」席位，agent 未必写得出结构化文件，
+// 所以「已启动」这一级必须由 adapter 自己写，不能靠 agent 自报。
+import { writeDispatchReceipt, writeRunHeartbeat, writeRunProgress, ensureAckTemplate, readStopSignal } from './evidence.js';
 
 export const GUI_ENV_KEYS = Object.freeze([
   'workRoot', 'windowTitle', 'steps', 'driver',
 ]);
+
+// P1（2026-11-23）：产物 digest —— 只回答一件事：「任务目录里真的长东西了吗」。
+// 采样成本只是几次 stat（轮询本来每 5 秒一次），不读文件内容、不截图、不碰窗口。
+function sampleOutputDigest(outputDir, { maxFiles = 2000 } = {}) {
+  let count = 0;
+  let bytes = 0;
+  let newest = 0;
+  let seen = 0;
+  const walk = (dir, depth) => {
+    if (depth > 4 || seen >= maxFiles) return; // 项目目录可能很大：心跳只采样，不扫爆磁盘
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (seen >= maxFiles) return;
+      seen += 1;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walk(abs, depth + 1); continue; }
+      if (!entry.isFile()) continue;
+      try {
+        const st = fs.statSync(abs);
+        if (st.size === 0) continue;
+        count += 1;
+        bytes += st.size;
+        if (st.mtimeMs > newest) newest = st.mtimeMs;
+      } catch { /* 文件刚被删 / 被占用，跳过 */ }
+    }
+  };
+  walk(outputDir, 0);
+  return `${count}:${bytes}:${Math.round(newest)}`;
+}
 
 function completionShell(ctx, status, reason, extra = {}) {
   return {
@@ -255,25 +289,58 @@ export function createGuiAdapter(options = {}) {
         task: { ...(ctx.task ?? {}), taskId }, paths, config,
         // P7：项目规范 + 最近经验拼在硬性要求之前；没项目时是空串。
         projectContext: ctx.project?.contextText ?? '',
+        project: ctx.project ?? null,
       });
       const steps = normalizeSteps(config);
-      writeTaskBundle(paths, { task: { ...(ctx.task ?? {}), taskId, runId }, prompt: rendered.prompt });
+      // 身份必须在模板前面：模板只讲「写什么文件、写到哪儿」，谁都能用；
+      // 「你是谁、谁是你上级、你能派给谁、什么不许自己干、上级给了做法要不要照抄」只能来自配置。
+      // 以前只有 webhook-exec 席位注入这段，GUI 席位拿到的是光秃秃的「你是执行席位」，
+      // 工程岗据此把实现活全自己干了（2026-11-17 真机复现）。
+      // 现在统一由引擎算好塞进 ctx.briefing（一种来源、所有 adapter 共享）；
+      // 这里保留自拼回退，只为让直接构造 ctx 的测试与单点调试仍然成立。
+      const roster = { agents: ctx.company?.agents ?? [] };
+      const header = ctx.briefing ?? [
+        seatBriefing(roster, ctx.agent?.id, { repos: ctx.repos ?? null, artifacts: ctx.artifacts ?? null }),
+        taskIntakeBriefing(roster, ctx.agent?.id, { task: ctx.task ?? null, artifacts: ctx.artifacts ?? null }),
+        delegationBriefing(roster, ctx.agent?.id, { workRoot: ctx.workRoot ?? null }),
+      ].filter(Boolean).join('\n\n');
+      const prompt = header ? `${header}\n\n───\n\n${rendered.prompt}` : rendered.prompt;
+      writeTaskBundle(paths, { task: { ...(ctx.task ?? {}), taskId, runId }, prompt });
+      // 预置回执模板：agent 只需改一行字，不用写 JSON；没改也不判死（引擎只减耐心）。
+      ensureAckTemplate({
+        workRoot: config.workRoot ?? options.workRoot, taskId, runId,
+        agentId: ctx.agent?.id ?? ctx.agentId ?? null,
+      });
 
-      const focusOptions = { match: config.windowTitleMatch ?? 'exact' };
+      const focusOptions = {
+        match: config.windowTitleMatch ?? 'exact',
+        // 部分桌面客户端标题会随会话名变，配了进程名就按进程认前台。
+        process: config.windowProcess ?? null,
+      };
+      // 「动作之间等一会儿」：操作系统切前台、桌面客户端重绘、输入法上屏都要时间。
+      // 真机踩过两件事：① 刚 activate 完立刻 hotkey，键打进了上一个窗口；
+      // ② 激活慢半拍就被紧跟的焦点校验判失焦 → 整趟 deferred，人看到的就是「GUI 没起来」。
+      // 默认 command 驱动：每步之间 1.2 秒、激活后 6 秒观察窗；simulation 保持 0（测试不该被拖慢）。
+      const isSim = (config.driver ?? 'simulation') === 'simulation';
+      const settleMs = Number(config.settleMs ?? (isSim ? 0 : 1200));
+      const focusTimeoutMs = Number(config.focusTimeoutMs ?? (isSim ? 0 : 6000));
+      const focusIntervalMs = Math.max(100, Number(config.focusPollMs ?? 500));
+      const pause = options.wait ?? ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
+      const settle = async () => { if (settleMs > 0) await pause(settleMs); };
+      const focusWait = { ...focusOptions, timeoutMs: focusTimeoutMs, intervalMs: focusIntervalMs, pause };
       const first = steps[0];
       // 「启动前」焦点校验只在不需要激活时做：如果第一步就是 activate，窗口本来就还没到前台，
       // 这时要求它已在前台，等于永远发不出去（真实 GUI 上必踩）。
       if (first?.action !== 'activate') {
-        await assertForeground(driver, config.windowTitle, '启动前', focusOptions);
+        await waitForeground(driver, config.windowTitle, '启动前', focusWait);
       }
       let sent = false;
-      const pause = options.wait ?? ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
       for (const step of steps) {
         // activate 这一步本身就是用来夺取前台，它的「前」校验没有意义；「后」校验保留（激活失败立刻中止）。
         // restoreFocus 正相反：它就是要离开目标窗口，前后都不能校验焦点。
         const checkBefore = step.action !== 'activate' && step.action !== 'restoreFocus';
         if (checkBefore) {
-          await assertForeground(driver, config.windowTitle, `${step.index}-前`, focusOptions);
+          await waitForeground(driver, config.windowTitle, `${step.index}-前`, focusWait);
         }
         if (step.action === 'activate') {
           // 激活失败多半不是「活干不了」，而是「现在抢不到前台」（你在用电脑 / 前台锁定）。
@@ -283,6 +350,8 @@ export function createGuiAdapter(options = {}) {
           } catch (error) {
             throw new GuiError('focus', `窗口激活失败：${String(error.message ?? error)}`);
           }
+          // 激活是异步的：先让系统真的把窗口提到前台，再往下按快捷键 / 粘贴。
+          await settle();
         }
         if (step.action === 'newSession') {
           const opened = await openFreshSession(driver, config, pause);
@@ -293,38 +362,125 @@ export function createGuiAdapter(options = {}) {
             throw new GuiError('session', `连开 ${opened.attempts} 次新会话，标题仍是「${opened.title ?? '未知/读不到'}」，拒绝在旧会话里发（上下文会串）`);
           }
         }
-        if (step.action === 'hotkey') await driver.hotkey(step.keys);
+        if (step.action === 'hotkey') { await driver.hotkey(step.keys); await settle(); }
+        // 聚焦输入框：唤醒后光标不一定在输入框里（应用还停在首页 / 上次的怪窗口尺寸），
+        // 不点这一下，粘贴会落空，引擎却会以为发出去了。
+        if (step.action === 'focusInput') {
+          try {
+            sessionParams.focusInput = await driver.focusInput();
+          } catch (error) {
+            throw new GuiError('focus', `输入框聚焦失败：${String(error.message ?? error)}`);
+          }
+          await settle();
+        }
         if (step.action === 'paste') {
           clipboardTouched = true;
-          await driver.setClipboard(rendered.prompt);
-          if (driver.clipboard !== rendered.prompt) {
+          await driver.setClipboard(prompt);
+          if (driver.clipboard !== prompt) {
             throw new GuiError('clipboard', '剪贴板内容与提示词长度/内容不一致，拒绝发送');
           }
           await driver.paste();
+          await settle();
         }
         if (step.action === 'press') {
           await driver.press(step.key);
           if (!sent) {
             sent = true;
-            await driver.send({ taskId, runId, paths, prompt: rendered.prompt, config, ctx });
+            await driver.send({ taskId, runId, paths, prompt, config, ctx });
+            // L1 的硬凭据：直到这一步才算「真的送出去了」。写失败也不阻断（引擎会按未确认处理）。
+            writeDispatchReceipt({
+              workRoot: config.workRoot ?? options.workRoot, taskId, runId,
+              agentId: ctx.agent?.id ?? ctx.agentId ?? null,
+              via: 'gui', windowTitle: config.windowTitle ?? null,
+            });
           }
+          await settle();
         }
         if (step.action === 'restoreFocus') {
           const out = await driver.restoreFocus();
           sessionParams.focusRestored = out ?? 'not-configured';
           continue;
         }
-        await assertForeground(driver, config.windowTitle, `${step.index}-后`, focusOptions);
+        await waitForeground(driver, config.windowTitle, `${step.index}-后`, focusWait);
       }
 
       // 提示词已经发出去了，立刻把剪贴板还给你；轮询产物是纯读文件，不占用键鼠。
       sessionParams.clipboard = await restoreClipboard();
 
-      const polled = await pollForReport({
-        paths, config, taskId, runId,
+      // 验收轮和干活轮的时限分开：验收 30 分钟、执行 60 分钟（董事会口径）。
+      // 只在有 reviewMaxMinutes 时才切，老配置行为不变。
+      const effectiveMaxMinutes = (ctx.review === true || ctx.review?.asReviewer === true)
+        && config.reviewMaxMinutes
+        ? Number(config.reviewMaxMinutes) : config.maxMinutes;
+      const heartbeatEveryPolls = Math.max(1, Number(config.heartbeatEveryPolls ?? 6));
+      // P1（2026-11-23）：每次轮询都采样产物 digest，只有真的变了才写产出心跳。
+      // run-heartbeat 继续每 N 轮写一次，但它只代表「适配器还在轮询」；
+      // 看门狗判「有没有在产出」只认这份 run-progress.json。
+      let lastDigest = null;
+      // 本轮开工时刻：只认这之后写的 stop.json，避免吃掉上一轮残留把人刚派的活误杀。
+      const runStartedMs = Number(options.runStartedMs ?? Date.now());
+      const onPoll = ({ index, progressSeen }) => {
+        // 停手信号：人取消了卡、或点了强制重派，控制面会落 stop.json。
+        // GUI 没法真的掐断人的窗口，但至少能立刻停手，不再往下贴提示词、不再抢前台。
+        const stop = readStopSignal({ workRoot: config.workRoot ?? options.workRoot, taskId, since: runStartedMs });
+        if (stop) throw new GuiError('stopped', `人让这一趟停手：${String(stop.reason ?? '已取消或已重派')}`);
+        // 产出心跳也要看项目落点：产物现在直接写项目目录，output/ 可能一直不变，
+        // 只看 output/ 会把「正在项目目录里正常产出」误判成停摆。
+        const writeDir = ctx.project?.writeDir ?? null;
+        const digest = writeDir && path.resolve(writeDir) !== path.resolve(paths.outputDir)
+          ? `${sampleOutputDigest(paths.outputDir)}|${sampleOutputDigest(writeDir)}`
+          : sampleOutputDigest(paths.outputDir);
+        if (lastDigest !== null && digest !== lastDigest && digest !== '0:0:0') {
+          writeRunProgress({
+            workRoot: config.workRoot ?? options.workRoot, taskId, runId,
+            polls: index, digest,
+          });
+        }
+        lastDigest = digest;
+        if (index % heartbeatEveryPolls !== 0) return;
+        writeRunHeartbeat({
+          workRoot: config.workRoot ?? options.workRoot, taskId, runId,
+          polls: index, note: progressSeen ? 'progress-present' : null,
+        });
+      };
+      let polled = await pollForReport({
+        paths, config: { ...config, maxMinutes: effectiveMaxMinutes }, taskId, runId,
         wait: options.wait, maxPolls: options.maxPolls ?? config.maxPolls,
-        now: options.now ?? nowIso,
+        now: options.now ?? nowIso, onPoll,
+        writeDir: ctx.project?.writeDir ?? null,
       });
+      // P2-3（2026-11-23）：跑满预算没交报告，但写了 partial.md（推进说明 + 阻塞点）时，
+      // 说明它在稳步做、只是没到终点 —— 再给一段补交窗口，不一刀切判失败。
+      // 只延一次，且只认 30 分钟内写的 partial.md，避免吃上一轮的残留。
+      if (polled.kind === 'timeout') {
+        const partialFile = path.join(paths.taskDir, 'partial.md');
+        let st = null;
+        try { st = fs.statSync(partialFile); } catch { st = null; }
+        const freshPartial = st && st.size > 0 && (Date.now() - st.mtimeMs) < 30 * 60_000;
+        if (freshPartial) {
+          sessionParams.partialExtended = true;
+          polled = await pollForReport({
+            paths,
+            config: { ...config, maxMinutes: Math.max(5, Math.round(Number(effectiveMaxMinutes) / 4)) },
+            taskId, runId,
+            wait: options.wait, maxPolls: options.maxPolls ?? config.maxPolls,
+            now: options.now ?? nowIso, onPoll,
+            writeDir: ctx.project?.writeDir ?? null,
+          });
+        }
+      }
+      // P2-4（2026-11-23）：席位主动写了 blocked.json —— 它自己承认做不下去。
+      // 这类停手是有效的信号，别再让它空转到 60 分钟，也别当成"超时失败"。
+      if (polled.kind === 'blocked') {
+        const why = String(polled.data?.reason ?? '席位写了 blocked.json 但没写原因');
+        screenshot = await captureScreenshot({ paths, taskId, runId, driver });
+        return blocked(ctx, `席位停手：${why}`, {
+          sessionParams: {
+            ...sessionParams, screenshot, polls: polled.polls,
+            blockedNeed: polled.data?.need ?? null,
+          },
+        });
+      }
       if (polled.kind === 'change_request') {
         return {
           status: 'change_requested',
@@ -354,6 +510,7 @@ export function createGuiAdapter(options = {}) {
           paths, taskId, runId,
           agent: ctx.agent?.id ?? ctx.agentId ?? 'unknown',
           revision: ctx.task?.revision ?? 1,
+          writeDir: ctx.project?.writeDir ?? null,
           now: options.now ?? nowIso,
         });
         if (built.ok) {
@@ -386,6 +543,16 @@ export function createGuiAdapter(options = {}) {
       // 出错也要把剪贴板还回去：用户不该因为一次失败而丢掉自己复制的东西。
       try { sessionParams.clipboard = await restoreClipboard(); } catch { /* 还原失败不影响判定 */ }
       screenshot = await captureScreenshot({ paths, taskId, runId, driver });
+      // 停手信号命中：不是失败，也不是超时 —— 这一趟被人叫停了，库里也已判死，
+      // 直接把结果交回去（引擎按「已判死」留档，不推进状态）。
+      if (error instanceof GuiError && error.kind === 'stopped') {
+        return {
+          status: 'interrupted',
+          result: completionShell(ctx, 'failed', `停手：${error.message}`),
+          usage: { quotaUnits: 0 },
+          sessionParams: { ...sessionParams, stopped: true, stopReason: error.message },
+        };
+      }
       // 抢不到前台（focus）是**临时条件**：这张卡要退回排队等下次，
       // 不能算成「执行失败」——否则你在电脑前一坐，两张卡就被打成 blocked。
       if (error instanceof GuiError && error.kind === 'focus') {

@@ -91,6 +91,7 @@ powershell -ExecutionPolicy Bypass -File scripts\win\stop.ps1    -Profile demo
 | `status` 说「计划任务：未注册」 | 换过机器 / 卸过 | `npm run win:install` |
 | 日志里连续「第 N 次重启」 | 有东西让它一直崩 | 看日志最后一条错误；连续崩 20 次会主动放弃并写日志 |
 | 日志说「GUI 席位已被另一个控制面占用」 | 起了第二份带同一个 GUI 席位的实例 | 先停掉那份（`status` 会给出占位 pid）；**不要靠重试解决**，重试一定会再被拒 |
+| **开机后日志说「席位被占」，但 `status` 里根本没进程**（2026-11-19 真机） | 占位文件记着上一轮的 pid，重启后这个号被系统进程复用（实测是 `svchost`）。老代码把 `kill(pid,0)` 的 EPERM 当「它还活着」，于是新实例以 code=5 自我拒绝 | 已修：占位文件带「开机时刻指纹」，跨开机一律判遗留并接管；EPERM 不再当活着。现在日志会出现 `[席位接管] …（上一次开机留下的），已接管。` |
 | 端口被占用 | 有别的进程占了 3100 | 改 `config\profiles.json` 里 `prod.port`，或在 `demo` 档（3199）上试 |
 
 ## 六、必须知道的边界（别拿它当服务器）
@@ -114,4 +115,4 @@ powershell -ExecutionPolicy Bypass -File scripts\win\stop.ps1    -Profile demo
 | `scripts/win/tray.ps1` | 托盘（绿点在线 / 红点离线） |
 | `work\run\launch-hidden-<档位>.vbs` | 安装时生成，隐藏窗口启动 runner |
 | `work-prod\run\aicompany.pid`（demo 档在 `work\run\`） | 谁在跑。**内容全是 ASCII**，因为 PowerShell 5.1 默认按 GBK 读文件，中文会把 JSON 解坏 |
-| `work\gui-seat.json` | GUI 席位占位（谁占了键鼠 / pid / 端口 / 配置路径），**跨档位共享**——键鼠只有一副 |
+| `work\gui-seat.json` | GUI 席位占位（谁占了键鼠 / pid / 端口 / 配置路径 / **bootAt 开机指纹**），**跨档位共享**——键鼠只有一副 |

@@ -35,8 +35,8 @@
 
 | jobId | 内容 | 改前 | 改后 |
 |---|---|---|---|
-| `JOB-yitai-每周体检-…` | 每周一 20:30 全量体检 | 无 `reviewBy`（CEO 审） | `reviewBy: engineering`，v2 |
-| `JOB-yitai-每月体检-…` | 每月 1 号 10:00 Release 演练等 | 无 `reviewBy`（CEO 审） | `reviewBy: engineering`，v2 |
+| `JOB-demo-editor-每周体检-…` | 每周一 20:30 全量体检 | 无 `reviewBy`（CEO 审） | `reviewBy: engineering`，v2 |
+| `JOB-demo-editor-每月体检-…` | 每月 1 号 10:00 Release 演练等 | 无 `reviewBy`（CEO 审） | `reviewBy: engineering`，v2 |
 
 - `reportsTo` 一起从 `ceo` 改成 `engineering`：执行人交活时的「汇报对象」和实际审查人一致，提示词里不会再误导它去找总经理。
 - 两条都在 `audit` 里留了 `job_reviewer_migrated`（旧值 / 新值 / 版本号），想追「什么时候改的、原来是谁」有据可查。

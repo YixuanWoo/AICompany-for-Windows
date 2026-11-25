@@ -130,6 +130,44 @@ test('P6-1 · 席位占位：活着不让双开；死了能被接管；别人不
   assert.equal(afterDeath.status().state.port, 3102);
 });
 
+// 2026-11-19 真机事故：开机自启失效。
+// 占位文件记着上一轮的 pid，重启后那个号被 svchost 复用，kill(pid,0) 抛 EPERM；
+// 老代码把 EPERM 当「活着」→ 新控制面认定席位被占 → code=5 拒绝启动 → 开机永远起不来。
+test('P6-1b · 跨开机的占位必须能接管：哪怕那个 pid 现在被系统进程占着', (t) => {
+  const root = tmpRoot(t);
+  const file = path.join(root, 'gui-seat.json');
+  // 上一轮开机：pid 2968（现在这个号在真机上归 svchost，杀不动）
+  const prevBoot = 1_700_000_000;
+  const claimPrev = createSeatClaim({ file, bootAt: () => prevBoot, isAlive: () => true });
+  assert.equal(claimPrev.claim({ pid: 2968, port: 3100, configPath: 'prod.yaml' }).ok, true);
+
+  // 本次开机：同一个 pid 号仍然「活着」（其实是别人的进程），但开机指纹对不上 → 必须判遗留
+  const nowBoot = prevBoot + 3600 * 12;
+  const claimNext = createSeatClaim({ file, bootAt: () => nowBoot, isAlive: () => true });
+  const status = claimNext.status();
+  assert.equal(status.held, false, '跨开机的 pid 不能被当成「另一个控制面还在跑」');
+  assert.equal(status.staleBoot, true);
+
+  const taken = claimNext.claim({ pid: 16892, port: 3100, configPath: 'prod.yaml' });
+  assert.equal(taken.ok, true, '开机后必须能接管，否则自启动等于没有');
+  assert.equal(taken.tookOver.reason, 'cross-boot');
+  assert.equal(claimNext.status().state.pid, 16892);
+});
+
+test('P6-1c · 同一次开机内真双开仍然要拦（不能为了修重启把双开检查也放掉）', (t) => {
+  const root = tmpRoot(t);
+  const file = path.join(root, 'gui-seat.json');
+  const boot = () => 1_700_000_000;
+  const holder = createSeatClaim({ file, bootAt: boot, isAlive: () => true });
+  holder.claim({ pid: 111, port: 3100, configPath: 'prod.yaml' });
+
+  const newcomer = createSeatClaim({ file, bootAt: boot, isAlive: (pid) => pid === 111 });
+  const blocked = newcomer.claim({ pid: 222, port: 3101 });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.conflict, true);
+  assert.match(blocked.reason, /另一个控制面占用/);
+});
+
 // ---------------------------------------------------------------- 产物查看
 
 test('P6-3 · 产物列表：0 字节也列出来并标记；软链接与目录不会混进来', (t) => {

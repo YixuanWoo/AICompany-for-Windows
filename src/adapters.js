@@ -2,6 +2,7 @@
 // 统一 execute(ctx) → { status, usage, result, sessionParams }；差异全封装在这里。
 
 import { spawn } from 'node:child_process';
+import { writeDispatchReceipt } from './evidence.js';
 
 const registry = new Map();
 
@@ -43,6 +44,18 @@ function spawnWithJson(command, ctx) {
       reject(error);
       return;
     }
+    // L1：进程真的起来了，算「已启动」。这件事只靠系统观测，agent 自报不算。
+    // 注意：spawn 成功 ≠ 任务送达 ≠ agent 开工 —— CLI 可能在凭据检查/授权轮询里卡住
+    //（真机 T-5457e8a0：进程活了、心跳在写，10 分钟零产出）。所以看板把这一级叫「已启动」，
+    // 「已收到」要等 ack.md，「有进度」要等产物/进度增长。
+    const workRoot = ctx.adapterConfig?.workRoot ?? ctx.workRoot ?? null;
+    const taskId = ctx.task?.taskId ?? ctx.taskId ?? null;
+    if (workRoot && taskId) {
+      writeDispatchReceipt({
+        workRoot, taskId, runId: ctx.runId ?? null,
+        agentId: ctx.agent?.id ?? null, via: 'process',
+      });
+    }
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -65,12 +78,23 @@ function spawnWithJson(command, ctx) {
   });
 }
 
+// 最后一行 JSON 有两种合法形态，这里统一拆包：
+//   ① 裸结果（推荐）：最后一行直接就是业务对象（完成报告 / 变更请求 / 停手说明）；
+//   ② 信封（历史桥接写法）：{ status, usage, result, sessionParams }，业务对象在 result 里。
+// 老写法一律把 raw 当 result，信封就被当完成报告去校验，报「缺 schema/taskId…、
+// 多 result/sessionParams」整份打回 —— T-a4d59e96 事故（CLI 席位交回信封报告被拒两次）。
 function normalize(raw, ctx) {
+  const isEnvelope = Boolean(raw) && typeof raw === 'object' && !('schema' in raw)
+    && 'status' in raw && raw.result && typeof raw.result === 'object';
+  const body = isEnvelope ? raw.result : (raw ?? {});
+  let status = raw?.status ?? body?.status;
+  // 裸变更请求没有 status 字段：按 schema 认出来，交回引擎走汇报链路。
+  if (!status) status = body?.schema === 'aicompany.change-request/v1' ? 'change_requested' : 'success';
   return {
-    status: raw.status ?? 'success',
-    usage: raw.usage ?? { quotaUnits: 1 },
-    sessionParams: raw.sessionParams ?? null,
-    result: raw,
+    status,
+    usage: raw?.usage ?? body?.usage ?? { quotaUnits: 1 },
+    sessionParams: raw?.sessionParams ?? null,
+    result: body,
     agentId: ctx.agent.id,
     runId: ctx.runId,
   };

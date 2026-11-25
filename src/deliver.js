@@ -52,6 +52,30 @@ export function resolveDeliverDir({ config = {}, id, subdir = null } = {}) {
   return { ok: true, rootDir: rootReal, targetDir, subdir: want };
 }
 
+// 交付过滤（2026-11-23 维护）：output/ 是工作区，不只放真产物 —— 一次性脚本、控制面文件、
+// 校验/调试输出都会混在里面。整批复制会把它们灌进项目目录（真机：04-out 被倒进
+// build_ch15_chujiao.py、completion.json、report.md、预览图，人清了两轮还会再被灌）。
+// 所以落项目之前先过一道：被挡下的不复制，但写进 skipped 台账，绝不静默丢。
+const CONTROL_FILE_NAMES = new Set([
+  'completion.json', 'completion.plan.json', 'report.draft.json', 'report.md',
+  'progress.json', 'run-progress.json', 'run-heartbeat.json', 'dispatch.json',
+  'stop.json', 'blocked.json', 'out-of-scope.json', 'task.json', 'brief.md', 'ack.md',
+]);
+const SCRIPT_EXTENSIONS = new Set([
+  '.py', '.ps1', '.bat', '.cmd', '.sh', '.js', '.mjs', '.cjs', '.ts', '.exe', '.dll',
+]);
+// 校验 / 调试类输出：是「怎么证明干完了」的旁证，不是交付物本身。
+const TOOL_OUTPUT_RE = /^(verify[-_]?|cmp_|check_|chk|debug_|probe_|diag_)/i;
+
+export function deliverableOf(name) {
+  const base = String(name).split('/').pop();
+  if (CONTROL_FILE_NAMES.has(base)) return { ok: false, reason: '控制面文件，不进项目' };
+  const ext = path.extname(base).toLowerCase();
+  if (SCRIPT_EXTENSIONS.has(ext)) return { ok: false, reason: `脚本/可执行文件（${ext}），不进项目` };
+  if (TOOL_OUTPUT_RE.test(base)) return { ok: false, reason: '校验/调试输出，不进项目' };
+  return { ok: true };
+}
+
 /** 公司任务目录里这一单的产物（递归；name 是相对 output 的路径）。 */
 export function listOutputFiles(workRoot, taskId) {
   const root = path.join(workRoot, 'tasks', taskId, 'output');
@@ -102,15 +126,71 @@ export function lastDeliveryOf(workRoot, id, taskId) {
 /**
  * 落盘本体。返回 { ok, code, targetDir, copied, failed, logPath }，**不抛异常**。
  */
-export function deliverTask({ workRoot, config = {}, task, subdir = null, at = null } = {}) {
+export function deliverTask({ workRoot, config = {}, task, subdir = null, at = null, report = null } = {}) {
   const id = task?.project;
   if (!id) return { ok: false, code: 'PROJECT_REQUIRED', error: '这个任务没有项目，不落盘' };
   const target = resolveDeliverDir({ config, id, subdir });
   if (!target.ok) return target;
 
-  const files = listOutputFiles(workRoot, task.taskId);
+  // 2026-11-23 落盘改造：completion.artifacts 是**绝对路径**说明产物已经按项目规矩
+  // 落进项目目录（manifest 模式），这时不再从 output/ 复制一份过去 —— 复制只会造出
+  // 双份产物，还把脚本与校验文件灌进项目文件夹（T-d396e200 / T-d22d97ae 事故）。
+  // 这里只核验「确实在落点内、确实存在」并写台账。相对路径（output/...）仍走旧的复制路径。
+  const declared = Array.isArray(report?.artifacts) ? report.artifacts.map((x) => String(x)) : [];
+  if (declared.length && declared.every((a) => path.isAbsolute(a))) {
+    const files = [];
+    const failed = [];
+    for (const a of declared) {
+      const abs = path.resolve(a);
+      const rel = path.relative(target.targetDir, abs);
+      const inside = rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+      let st = null;
+      try { st = fs.statSync(abs); } catch { st = null; }
+      if (!inside) { failed.push({ name: a, reason: '不在本单落点内，拒绝记账' }); continue; }
+      if (!st?.isFile() || st.size === 0) { failed.push({ name: a, reason: '不存在或为空' }); continue; }
+      files.push({
+        artifact: a.replace(/\\/g, '/'),
+        bytes: st.size,
+        sha256: report?.checksum?.[a] ?? report?.checksum?.[a.replace(/\\/g, '/')] ?? null,
+      });
+    }
+    const record = {
+      schema: DELIVERY_SCHEMA,
+      taskId: task.taskId,
+      project: id,
+      at: at ?? new Date().toISOString(),
+      targetDir: target.targetDir,
+      subdir: target.subdir,
+      mode: 'in-place',
+      copied: [], failed, files, skipped: [],
+    };
+    let logPath = null;
+    try { logPath = appendDeliveryLog(workRoot, id, record); } catch { /* 清单写不进去不影响已落成的文件 */ }
+    if (!files.length) {
+      return {
+        ok: false, code: 'DELIVERY_INCOMPLETE', targetDir: target.targetDir,
+        copied: [], failed, files, mode: 'in-place', logPath,
+        error: 'deliverables 没有一条落在本单落点内',
+      };
+    }
+    return { ok: true, code: 'DELIVERED', targetDir: target.targetDir, copied: [], failed, files, mode: 'in-place', logPath };
+  }
+
+  const scanned = listOutputFiles(workRoot, task.taskId);
+  const skipped = [];
+  const files = [];
+  for (const f of scanned) {
+    const verdict = deliverableOf(f.name);
+    if (verdict.ok) files.push(f);
+    else skipped.push({ name: f.name, reason: verdict.reason });
+  }
   if (files.length === 0) {
-    return { ok: false, code: 'NO_ARTIFACTS', error: 'output 目录里没有产物，没什么可落', targetDir: target.targetDir };
+    return {
+      ok: false, code: 'NO_ARTIFACTS', targetDir: target.targetDir, skipped,
+      error: scanned.length
+        ? `output 里 ${scanned.length} 个文件全是脚本/控制面/校验输出，没有可交付产物（详见 skipped）`
+        : 'output 目录里没有产物，没什么可落',
+    };
   }
 
   const result = copyArtifacts({ files, targetDir: target.targetDir, taskId: task.taskId });
@@ -123,6 +203,7 @@ export function deliverTask({ workRoot, config = {}, task, subdir = null, at = n
     subdir: target.subdir,
     copied: result.copied,
     failed: result.failed,
+    skipped,
   };
   let logPath = null;
   try { logPath = appendDeliveryLog(workRoot, id, record); } catch { /* 清单写不进去不影响已落成的文件 */ }
@@ -132,13 +213,14 @@ export function deliverTask({ workRoot, config = {}, task, subdir = null, at = n
     targetDir: target.targetDir,
     copied: result.copied,
     failed: result.failed,
+    skipped,
     logPath,
   };
 }
 
 /**
  * 落盘前的「别人正占着」检查：项目配置 deliverBlockers.processes 里列出的进程在跑就先不写。
- * 例：小王子项目的译台（YiTai*）开着时会锁住 04-译稿 里的文件。
+ * 例：目标项目被某个独占进程占用时，会锁住交付目录里的文件。
  */
 export function runningProcesses(patterns = []) {
   const wanted = (Array.isArray(patterns) ? patterns : []).filter((p) => typeof p === 'string' && p.trim());

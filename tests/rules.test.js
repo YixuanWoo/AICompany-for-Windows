@@ -26,7 +26,7 @@ test('P0-5 · CEO 输出是封闭四类；未知决策出口被拒', () => {
 });
 
 test('P0-5 · 改目标必须走 replan 人审；放宽验收一律拒绝', () => {
-  rejects('decision', { ...fixtures.decision.valid[0], newInstructions: '改用英式术语', needsHumanApproval: false }, 'needsHumanApproval');
+  rejects('decision', { ...fixtures.decision.valid[0], newInstructions: '改用统一术语', needsHumanApproval: false }, 'needsHumanApproval');
   rejects('decision', { ...fixtures.decision.valid[0], newAcceptance: ['放宽验收条件'], needsHumanApproval: true }, '放宽');
 });
 

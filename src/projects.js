@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseYaml } from './yaml-lite.js';
 
 export const MEMORY_SCHEMA = 'aicompany.memory/v1';
 export const DEFAULT_MEMORY_LIMIT = 10;
@@ -262,6 +263,12 @@ export function readRecentMemory(workRoot, id, { limit = DEFAULT_MEMORY_LIMIT, c
 
 /**
  * 派活时塞进 brief 的那一段。没有规范 / 没有记忆时**该段省略**，不写空标题占位。
+ *
+ * 2026-11-23 第二轮维护（配置死字段落地）：
+ *   - 「必须遵守」的规范文本剔除 memory: 段 —— 那是控制面自己的配置，不是项目规矩；
+ *   - memory.focus 单独成段【项目焦点】，**无条件注入**（用户拍板：记忆量不大，全量读）；
+ *   - memory.requireLessons = true 变成提示词里的明确要求（软约束，不判失败）；
+ *   - 最近 3 单 lessons/nextHints 全空时点一次名（经验库退化的可观测性）。
  */
 export function buildProjectContext({ workRoot, config = {}, id, limit = null } = {}) {
   if (!id) return null;
@@ -271,13 +278,7 @@ export function buildProjectContext({ workRoot, config = {}, id, limit = null } 
   const memory = readRecentMemory(workRoot, id, { limit: take });
   const blocks = [];
   if (spec.ok && spec.text.trim()) {
-    // 规范文件里的注释是写给人看的（怎么改、为什么这么定），不必塞进提示词：
-    // 既占篇幅又容易和「必须遵守」混淆。只留实际生效的键值。
-    const body = spec.text.split('\n')
-      .filter((line) => !line.trim().startsWith('#'))
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
+    const body = specBodyWithoutMemory(spec.text);
     if (body) {
       blocks.push([
         `【项目规范】${entry.displayName ?? id}（${id}）`,
@@ -285,6 +286,20 @@ export function buildProjectContext({ workRoot, config = {}, id, limit = null } 
         body,
       ].join('\n'));
     }
+  }
+  // 结构化读规范：解析失败不阻断派活（规范原文已经贴进去了），只是没有焦点段。
+  const data = spec.ok ? readProjectSpecData(workRoot, id) : null;
+  const focus = Array.isArray(data?.memory?.focus)
+    ? data.memory.focus.map((x) => String(x).trim()).filter(Boolean)
+    : [];
+  if (focus.length) {
+    blocks.push([
+      '【项目焦点】这几条是本项目最容易踩的坑，必读，优先级同项目规范：',
+      ...focus.map((text, i) => `${i + 1}. ${text}`),
+    ].join('\n'));
+  }
+  if (data?.memory?.requireLessons === true) {
+    blocks.push('【记忆要求】本项目要求每次交差都在报告里写 lessons / nextHints（至少一条具体经验）；实在没有就写 []，但不要连续交空白。');
   }
   if (memory.entries.length) {
     const lines = [memory.entries.length === 1
@@ -297,12 +312,76 @@ export function buildProjectContext({ workRoot, config = {}, id, limit = null } 
       if (rec.nextHints?.length) lines.push(`   下次：${rec.nextHints.join('；')}`);
     });
     blocks.push(lines.join('\n'));
+    const recent = memory.entries.slice(-3);
+    if (recent.length >= 3 && recent.every((r) => !r.lessons?.length && !r.nextHints?.length)) {
+      blocks.push('【提醒】本项目最近 3 单都没留下任何经验，教训库在退化；这一单请务必写一条真实的 lessons 或 nextHints。');
+    }
   }
   return {
     id,
     specPath: spec.path,
     specLoaded: spec.ok,
     memoryCount: memory.count,
+    focus,
+    requireLessons: data?.memory?.requireLessons === true,
     contextText: blocks.join('\n\n'),
   };
+}
+
+/** 结构化读 project.yaml；受限解析器吃不下时返回 null（调用方退回原文，不影响派活）。 */
+export function readProjectSpecData(workRoot, id) {
+  const spec = readProjectSpec(workRoot, id);
+  if (!spec.ok) return null;
+  try {
+    const data = parseYaml(spec.text);
+    return data && typeof data === 'object' ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+// 规范正文里剔除 memory: 段（顶层键及其缩进子块）。不重新序列化 YAML —— 保持原文，
+// 避免中文、缩进、行内注释被改写；只把「控制面自己的配置」从「必须遵守的项目规矩」里拿掉。
+function specBodyWithoutMemory(text) {
+  const lines = String(text).split('\n').filter((line) => !line.trim().startsWith('#'));
+  const out = [];
+  let skipping = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const indent = line.length - line.replace(/^ +/, '').length;
+    if (skipping) {
+      if (trimmed === '' || indent > 0) continue;
+      skipping = false; // 回到顶层，按普通行处理
+    }
+    if (indent === 0 && /^memory\s*:/.test(trimmed)) { skipping = true; continue; }
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * 记忆只追加不淘汰会无限变长：超过保留量时把最老的挪进 knowledge/archive-YYYY-MM.jsonl。
+ * 归档不是删除：原文一行不少，只是不再进每单的提示词。保留量默认 memoryLimit 的两倍。
+ */
+export function archiveMemoryIfNeeded(workRoot, id, { keep = null } = {}) {
+  const file = memoryPath(workRoot, id);
+  const retain = Math.max(10, Math.floor(Number(keep ?? DEFAULT_MEMORY_LIMIT) * 2));
+  let lines = [];
+  try {
+    lines = fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.trim());
+  } catch {
+    return { archived: 0, count: 0 };
+  }
+  if (lines.length <= retain) return { archived: 0, count: lines.length };
+  const overflow = lines.slice(0, lines.length - retain);
+  const rest = lines.slice(lines.length - retain);
+  const stamp = new Date().toISOString().slice(0, 7);
+  const archive = path.join(projectDir(workRoot, id), 'knowledge', `archive-${stamp}.jsonl`);
+  try {
+    fs.appendFileSync(archive, `${overflow.join('\n')}\n`, 'utf8');
+    fs.writeFileSync(file, `${rest.join('\n')}\n`, 'utf8');
+  } catch (error) {
+    return { archived: 0, count: lines.length, error: String(error.message ?? error) };
+  }
+  return { archived: overflow.length, count: rest.length, archive };
 }

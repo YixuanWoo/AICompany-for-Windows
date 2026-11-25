@@ -6,151 +6,270 @@
 <title>AICompany · Web Board</title>
 <style>
   :root {
-    --bg: #F1EFE8; --card: #FFFFFF; --line: #B4B2A9; --ink: #2C2C2A;
-    --muted: #5F5E5A; --accent: #185FA5; --accent-bg: #E6F1FB;
-    --ok: #1E7A45; --warn: #B45309; --bad: #B42318;
+    /* 2026-11-18 换肤：冷灰蓝 + 海军蓝。原来那套米黄/暖白像咖啡馆，不像公司。
+       只用「深灰蓝 / 白 / 一点点红」，红色只留给「等你拍板」和危险操作。 */
+    --bg: #EDF0F4;
+    --card: #FFFFFF;
+    --line: #D6DDE7;
+    --line-soft: #E7ECF3;
+    --ink: #16202B;
+    --muted: #5C6879;
+    --accent: #1E4E79;
+    --accent-strong: #143A5C;
+    --accent-bg: #E8F0F8;
+    --ok: #16704C;
+    --ok-bg: #E9F5EF;
+    --warn: #92571A;
+    --warn-bg: #FBF2E4;
+    --bad: #B3261E;
+    --bad-bg: #FBECEA;
+    --band: #131C26;
+    --soft: #F5F7FA;
+    --radius: 8px;
+    --shadow: 0 1px 2px rgba(19,28,38,.05), 0 10px 26px rgba(19,28,38,.05);
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 0 20px 48px; background: var(--bg); color: var(--ink);
+    margin: 0; padding: 0 0 56px; background: var(--bg); color: var(--ink);
     font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
   }
-  header {
-    max-width: 1440px; margin: 0 auto; padding: 22px 0 16px;
+
+  /* ===== 顶栏：深色一条，品牌 + 待办红点 + 连接状态 ===== */
+  .topbar {
+    position: sticky; top: 0; z-index: 30; background: var(--band);
+    border-bottom: 1px solid rgba(255,255,255,.08); box-shadow: 0 2px 10px rgba(0,0,0,.12);
+  }
+  .topbar-inner {
+    max-width: 1280px; margin: 0 auto; padding: 10px 20px;
     display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
   }
-  h1 { margin: 0; font-size: 21px; letter-spacing: .5px; }
+  .brand { display: flex; align-items: center; gap: 10px; color: #fff; }
+  .brand-mark {
+    width: 30px; height: 30px; border-radius: 6px; display: grid; place-items: center;
+    background: linear-gradient(160deg, #2C638F, #163A57); color: #fff;
+    font: 700 13px/1 var(--mono); letter-spacing: .5px;
+  }
+  .brand b { font-size: 15px; letter-spacing: .8px; font-weight: 600; }
+  .brand-sub { display: block; font-size: 11px; color: rgba(255,255,255,.55); letter-spacing: .3px; }
+  .topbar-right { display: flex; align-items: center; gap: 12px; }
+  .badge-btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px 6px 12px;
+    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.18); color: #fff;
+    border-radius: 999px; font-size: 12.5px;
+  }
+  .badge-btn:hover { background: rgba(255,255,255,.12); filter: none; }
+  .badge {
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+    background: var(--bad); color: #fff; font: 600 11px/18px var(--mono);
+    text-align: center; display: inline-block;
+  }
+  .badge.zero { background: rgba(255,255,255,.16); color: rgba(255,255,255,.7); }
+  .conn { display: flex; align-items: center; gap: 8px; font-size: 12px; color: rgba(255,255,255,.65); }
+  .conn button { background: transparent; color: rgba(255,255,255,.85); border-color: rgba(255,255,255,.25); padding: 4px 10px; font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.3); display: inline-block; }
+  .dot.on { background: #46D08C; box-shadow: 0 0 0 3px rgba(70,208,140,.18); }
+  .dot.off { background: #E46B5E; }
   .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .conn { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); display: inline-block; }
-  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(30,122,69,.14); }
-  .dot.off { background: var(--bad); }
+  h1 { margin: 0; font-size: 21px; letter-spacing: .5px; }
+
   button, select, input, textarea { font: inherit; color: var(--ink); }
   input, select, textarea {
-    width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
-    background: #fff; outline: none;
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: #fff; outline: none; transition: border-color .15s, box-shadow .15s;
   }
-  input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(24,95,165,.12); }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(30,78,121,.12); }
   textarea { resize: vertical; min-height: 68px; }
   label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
   button {
     padding: 8px 14px; border: 1px solid var(--accent); border-radius: 6px;
-    background: var(--accent); color: #fff; cursor: pointer;
+    background: var(--accent); color: #fff; cursor: pointer; transition: background .15s, border-color .15s;
   }
-  button:hover { filter: brightness(1.08); }
-  button.ghost { background: #fff; color: var(--accent); }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  .layout { max-width: 1440px; margin: 0 auto; display: grid; grid-template-columns: 330px 1fr; gap: 16px; align-items: start; }
+  button:hover { background: var(--accent-strong); border-color: var(--accent-strong); filter: none; }
+  button.ghost { background: #fff; color: var(--accent); border-color: var(--line); }
+  button.ghost:hover { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+  button.danger { background: #fff; color: var(--bad); border-color: #E7BFBB; }
+  button.danger:hover { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  .layout { max-width: 1280px; margin: 0 auto; display: grid; grid-template-columns: 330px 1fr; gap: 16px; align-items: start; }
   .col { display: grid; gap: 16px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
-  .card h2 { margin: 0 0 10px; font-size: 15px; }
-  .hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
-  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 auto 16px; max-width: 1440px; }
-  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px; min-width: 108px; }
-  .stat b { display: block; font-size: 19px; line-height: 1.2; }
-  .stat span { font-size: 11px; color: var(--muted); }
-  /* 「待我拍板」= 呼叫董事会的黄条：不管你在哪个标签页都看得见，点一下直达审批卡。 */
-  .pending-banner {
-    max-width: 1440px; margin: 0 auto 14px; padding: 11px 16px; border-radius: 10px;
-    background: #FFF6E5; border: 1px solid #D99A00; color: #6B3F00;
-    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px 18px; box-shadow: var(--shadow);
   }
-  .pending-banner b { font-size: 14px; }
-  .pending-banner button { background: #B45309; border-color: #B45309; flex: none; }
-  .stat.action { cursor: pointer; border-color: #D99A00; background: #FFF6E5; }
-  .stat.action b { color: #B45309; }
+  .card h2 { margin: 0 0 8px; font-size: 15px; font-weight: 600; letter-spacing: .3px; display: flex; align-items: center; gap: 8px; }
+  .hint { font-size: 12px; color: var(--muted); margin: 0 0 10px; line-height: 1.65; }
+  .stats { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 auto 16px; max-width: 1280px; }
+  .stat {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 13px; min-width: 96px; box-shadow: 0 1px 2px rgba(19,28,38,.03);
+  }
+  .stat b { display: block; font: 600 18px/1.25 var(--mono); color: var(--ink); }
+  .stat span { font-size: 11px; color: var(--muted); letter-spacing: .2px; }
+  .stat.action {
+    cursor: pointer; border-color: #E3B4AE; background: var(--bad-bg);
+  }
+  .stat.action b { color: var(--bad); }
+  .stat.action:hover { border-color: var(--bad); }
   .card.flash { animation: cardflash 1.8s ease-out 1; }
   @keyframes cardflash {
-    0%, 35% { box-shadow: 0 0 0 3px rgba(180,83,9,.55); border-color: #D99A00; }
-    100% { box-shadow: none; }
+    0%, 35% { box-shadow: 0 0 0 3px rgba(179,38,30,.35); border-color: var(--bad); }
+    100% { box-shadow: var(--shadow); }
   }
   .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
   @media (max-width: 980px) { .layout, .grid2 { grid-template-columns: 1fr; } }
+
+  /* ===== 审批坞：常驻在指令台下面，不藏进标签页 ===== */
+  .dock {
+    max-width: 1280px; margin: 0 auto 16px; border-left: 3px solid var(--bad);
+    display: none;
+  }
+  .dock.on { display: block; }
+  .dock-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .dock-head h2 { margin: 0; }
+  .dock-note { font-size: 12px; color: var(--muted); }
+  .dock .list { max-height: 340px; }
+
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #EAE8E0; vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; letter-spacing: .4px; background: var(--soft); position: sticky; top: 0; z-index: 1; }
+  tbody tr:hover td { background: #FAFBFD; }
   tr:last-child td { border-bottom: none; }
-  .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); }
-  .s-done { color: var(--ok); border-color: #A7D3B8; background: #EFF8F2; }
-  .s-in_progress, .s-in_review { color: var(--accent); border-color: #A9C9E8; background: var(--accent-bg); }
-  .s-blocked { color: var(--bad); border-color: #E9B4AE; background: #FDF1EF; }
-  .s-awaiting_decision, .s-paused { color: var(--warn); border-color: #E4C79A; background: #FDF6EA; }
-  .s-cancelled, .s-todo, .s-backlog { color: var(--muted); background: #F5F4EF; }
-  .msg { font-size: 12px; padding: 7px 10px; border-radius: 6px; margin-top: 10px; display: none; }
-  .msg.ok { display: block; background: #EFF8F2; border: 1px solid #A7D3B8; color: var(--ok); }
-  .msg.err { display: block; background: #FDF1EF; border: 1px solid #E9B4AE; color: var(--bad); }
-  .list { max-height: 230px; overflow: auto; font-size: 12.5px; }
-  .row { padding: 6px 0; border-bottom: 1px dashed #EAE8E0; }
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+    border: 1px solid var(--line); color: var(--muted); background: var(--soft); white-space: nowrap;
+  }
+  .s-done { color: var(--ok); border-color: #B7DAC8; background: var(--ok-bg); }
+  .s-in_progress, .s-in_review, .s-active { color: var(--accent); border-color: #B7CCE0; background: var(--accent-bg); }
+  .s-blocked { color: var(--bad); border-color: #E3B4AE; background: var(--bad-bg); }
+  .s-awaiting_decision, .s-paused, .s-interrupted { color: var(--warn); border-color: #E2C9A3; background: var(--warn-bg); }
+  .s-cancelled, .s-todo, .s-backlog, .s-ended { color: var(--muted); background: var(--soft); }
+  /* 证据层（2026-11-18）：卡片上要能看出「送到了没 / 在不在动 / 交活了没」。
+     颜色只承担一种含义：绿=有交付，蓝=在动，黄=可疑/等待，红=异常。 */
+  .ev {
+    display: inline-block; margin-top: 4px; padding: 1px 7px; border-radius: 4px;
+    font-size: 10.5px; line-height: 1.6; border: 1px solid var(--line);
+    color: var(--muted); background: #fff; white-space: nowrap;
+  }
+  .ev-ok { color: var(--ok); border-color: #B7DAC8; background: var(--ok-bg); }
+  .ev-work { color: var(--accent); border-color: #B7CCE0; background: var(--accent-bg); }
+  .ev-warn { color: var(--warn); border-color: #E2C9A3; background: var(--warn-bg); }
+  .ev-bad { color: var(--bad); border-color: #E3B4AE; background: var(--bad-bg); }
+  .msg { font-size: 12px; padding: 8px 10px; border-radius: 6px; margin-top: 10px; display: none; }
+  .msg.ok { display: block; background: var(--ok-bg); border: 1px solid #B7DAC8; color: var(--ok); }
+  .msg.err { display: block; background: var(--bad-bg); border: 1px solid #E3B4AE; color: var(--bad); }
+  .list { max-height: 380px; overflow: auto; font-size: 12.5px; }
+  .row { padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
   .row:last-child { border-bottom: none; }
-  .row .meta { color: var(--muted); font-size: 11px; }
-  pre.brief { white-space: pre-wrap; margin: 0; font: 12px/1.65 ui-monospace, Consolas, monospace; }
-  .empty { color: var(--muted); font-size: 12px; padding: 6px 0; }
+  .row .meta { color: var(--muted); font-size: 11px; line-height: 1.6; }
+  .taskbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 4px 2px 8px; font-size: 12px; color: var(--muted);
+  }
+  .taskbar button { padding: 3px 10px; font-size: 11.5px; }
+  pre.brief { white-space: pre-wrap; margin: 0; font: 12px/1.65 var(--mono); }
+  .empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
   .inline { display: flex; gap: 8px; align-items: center; }
   .inline > * { flex: 1; }
-  .tag { font-size: 11px; color: var(--accent); background: var(--accent-bg); border-radius: 4px; padding: 1px 6px; }
-  .bar { height: 6px; border-radius: 4px; background: #EAE8E0; overflow: hidden; margin-top: 5px; }
+  .tag {
+    font-size: 11px; color: var(--accent); background: var(--accent-bg);
+    border: 1px solid #D2E0EC; border-radius: 4px; padding: 0 6px; white-space: nowrap;
+  }
+  .bar { height: 5px; border-radius: 3px; background: var(--line-soft); overflow: hidden; margin-top: 6px; }
   .bar > i { display: block; height: 100%; background: var(--accent); }
   .bar.warn > i { background: var(--warn); }
   .bar.stop > i { background: var(--bad); }
   .btnrow { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
-  .btnrow button { padding: 3px 9px; font-size: 11.5px; border-radius: 5px; }
-  .btnrow button.danger { background: #fff; color: var(--bad); border-color: #E9B4AE; }
+  .btnrow button { padding: 4px 10px; font-size: 11.5px; border-radius: 5px; }
   .tl { font-size: 12px; }
-  .tl .t { color: var(--muted); font-size: 11px; margin-right: 6px; }
-  /* P6：结果弹窗 —— 产物就在眼前，不用去翻资源管理器 */
-  .modal { position: fixed; inset: 0; background: rgba(44,44,42,.45); display: none; z-index: 60; padding: 24px; }
+  .tl .t { color: var(--muted); font-size: 11px; margin-right: 6px; font-family: var(--mono); }
+
+  /* P6：结果弹窗 */
+  .modal { position: fixed; inset: 0; background: rgba(13,20,28,.55); display: none; z-index: 60; padding: 24px; }
   .modal.on { display: block; }
-  .modal-box { background: #fff; border: 1px solid var(--line); border-radius: 10px; max-width: 1040px; margin: 0 auto; padding: 16px 18px; max-height: 88vh; overflow: auto; }
+  .modal-box {
+    background: #fff; border: 1px solid var(--line); border-radius: 10px; max-width: 1040px;
+    margin: 0 auto; padding: 18px 20px; max-height: 88vh; overflow: auto; box-shadow: 0 24px 60px rgba(0,0,0,.25);
+  }
   .modal-box h3 { margin: 0; font-size: 15px; }
   .filelist { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
-  .filelist button { padding: 4px 10px; font-size: 12px; background: #fff; color: var(--accent); }
-  .filelist button.active { background: var(--accent); color: #fff; }
-  .outtext { white-space: pre-wrap; word-break: break-word; background: #FAF9F5; border: 1px solid #EAE8E0; border-radius: 8px; padding: 12px; font: 12.5px/1.65 ui-monospace, Consolas, monospace; max-height: 52vh; overflow: auto; margin: 0; }
-  /* P6：GUI 席位状态条 —— 「会不会抢我键盘」必须一眼看得见 */
-  .gui-bar { display: flex; align-items: center; gap: 10px; justify-content: space-between; background: var(--accent-bg); border: 1px solid #A9C9E8; border-radius: 8px; padding: 7px 10px; font-size: 12px; margin-bottom: 10px; }
-  .gui-bar.paused { background: #FDF6EA; border-color: #E4C79A; }
-  .gui-bar button { padding: 3px 10px; font-size: 12px; flex: 0 0 auto; }
+  .filelist button { padding: 4px 10px; font-size: 12px; background: #fff; color: var(--accent); border-color: var(--line); }
+  .filelist button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .outtext {
+    white-space: pre-wrap; word-break: break-word; background: var(--soft);
+    border: 1px solid var(--line-soft); border-radius: 8px; padding: 12px;
+    font: 12.5px/1.65 var(--mono); max-height: 52vh; overflow: auto; margin: 0;
+  }
 
-  /* ===== 董事会指令台：全屏视觉中心 ===== */
+  /* P6：GUI 席位状态条 */
+  .gui-bar {
+    display: flex; align-items: center; gap: 10px; justify-content: space-between;
+    background: var(--accent-bg); border: 1px solid #C3D6E6; border-radius: 6px;
+    padding: 8px 12px; font-size: 12px; margin-bottom: 12px;
+  }
+  .gui-bar.paused { background: var(--warn-bg); border-color: #E2C9A3; }
+  .gui-bar button { padding: 4px 12px; font-size: 12px; flex: 0 0 auto; }
+
+  /* ===== 指令台：全屏视觉中心 ===== */
   .command-deck {
-    max-width: 1180px; margin: 0 auto 18px; padding: 22px 26px 20px;
-    border: 1px solid #A9C9E8; border-top: 4px solid var(--accent); border-radius: 14px;
-    background: #fff; box-shadow: 0 6px 22px rgba(24,95,165,.10);
+    max-width: 1280px; margin: 18px auto 16px; padding: 22px 26px 20px;
+    border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: var(--radius);
+    background: var(--card); box-shadow: var(--shadow);
   }
   .deck-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
-  .deck-head h1 { margin: 0; font-size: 24px; letter-spacing: .5px; }
-  .deck-sub { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+  .deck-head h1 { margin: 0; font-size: 22px; letter-spacing: .5px; font-weight: 600; }
+  .deck-sub { color: var(--muted); font-size: 12.5px; margin: 5px 0 0; line-height: 1.7; }
   .deck-input {
-    min-height: 168px; font-size: 16px; line-height: 1.7; padding: 14px 16px;
-    border: 2px solid var(--line); border-radius: 10px; background: #FCFCFA; resize: vertical;
+    min-height: 150px; font-size: 15.5px; line-height: 1.7; padding: 14px 16px;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--soft); resize: vertical;
   }
-  .deck-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(24,95,165,.12); }
+  .deck-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(30,78,121,.12); }
   .deck-actions { display: flex; gap: 10px; align-items: stretch; margin-top: 12px; }
   .deck-actions input { flex: 1; font-size: 14px; }
-  .deck-actions button { flex: 0 0 auto; padding: 12px 30px; font-size: 16px; font-weight: 600; border-radius: 9px; }
+  .deck-actions button { flex: 0 0 auto; padding: 12px 30px; font-size: 15px; font-weight: 600; border-radius: 7px; letter-spacing: .5px; }
   .deck-advanced { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
   .deck-advanced summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
   .deck-advanced .grid2 { margin-top: 12px; }
   .deck-advanced label { margin-top: 6px; }
 
-  /* ===== 标签页：把次要数据收进抽屉 ===== */
-  .tabs { max-width: 1180px; margin: 0 auto 12px; display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+  /* ===== 标签页 ===== */
+  .tabs { max-width: 1280px; margin: 0 auto 14px; display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
   .tabs button {
     background: transparent; color: var(--muted); border: 1px solid transparent;
-    border-bottom: none; border-radius: 8px 8px 0 0; padding: 9px 16px; font-size: 13.5px;
+    border-radius: 8px 8px 0 0; padding: 9px 16px; font-size: 13.5px; font-weight: 500;
   }
-  .tabs button:hover { color: var(--ink); background: #F5F4EF; }
-  .tabs button.active { background: #fff; color: var(--accent); border-color: var(--line); font-weight: 600; }
-  .tabpane { display: none; max-width: 1180px; margin: 0 auto; }
+  .tabs button:hover { color: var(--ink); background: rgba(255,255,255,.6); border-color: transparent; }
+  .tabs button.active {
+    background: var(--card); color: var(--accent); border-color: var(--line); border-bottom-color: var(--card);
+    font-weight: 600; margin-bottom: -1px;
+  }
+  .tabpane { display: none; max-width: 1280px; margin: 0 auto; }
   .tabpane.active { display: block; }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="conn">
-    <span class="dot" id="sse-dot"></span><span id="sse-text">连接中…</span>
-    <button class="ghost" id="refresh-btn" type="button">刷新</button>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="brand-mark">AI</div>
+      <div>
+        <b>AICompany</b>
+        <span class="brand-sub">董事会看板 · 你只跟总经理对话，其余交给公司</span>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <button class="badge-btn" id="pending-jump" type="button" title="点一下直接去拍板">
+        <span>待我拍板</span><span class="badge zero" id="pending-badge">0</span>
+      </button>
+      <div class="conn">
+        <span class="dot" id="sse-dot"></span><span id="sse-text">连接中…</span>
+        <button class="ghost" id="refresh-btn" type="button">刷新</button>
+      </div>
+    </div>
   </div>
 </header>
 
@@ -165,7 +284,7 @@
   <div class="gui-bar" id="gui-bar" style="display:none"></div>
   <form id="request-form">
     <label for="text" style="font-size:13px;margin-top:0">要总经理做什么</label>
-    <textarea id="text" class="deck-input" placeholder="例如：把小王子的第三章重译一遍，术语按项目规范来，完成后给我一份简报">写一份本周工作简报</textarea>
+    <textarea id="text" class="deck-input" placeholder="例如：把第三章重译一遍，术语按项目规范来，完成后给我一份简报">写一份本周工作简报</textarea>
     <div class="deck-actions">
       <input id="title" placeholder="标题（可不填，默认取正文第一句）" autocomplete="off">
       <button type="submit" id="submit-btn">下达指令 →</button>
@@ -199,26 +318,83 @@
   </form>
 </section>
 
-<div class="pending-banner" id="pending-banner" hidden></div>
+<!-- ===== 审批坞：有单子就常驻在指令台下面，红点也同步到顶栏 ===== -->
+<section class="card dock" id="approvals-card">
+  <div class="dock-head">
+    <h2>审批 · Approvals · 等你拍板 <span class="badge" id="approval-count">0</span></h2>
+    <span class="dock-note">不点就一直停在这儿，公司不会自己往下走</span>
+  </div>
+  <div class="list" id="approvals-list" style="max-height:none"></div>
+  <div class="msg" id="approval-msg"></div>
+</section>
 
 <div class="stats" id="stats"></div>
 
 <!-- ===== 次要数据：收进标签页 ===== -->
 <div class="tabs" id="main-tabs">
-  <button type="button" class="active" data-tab="work">任务与汇报</button>
+  <button type="button" class="active" data-tab="plan">计划 · 未来要触发的</button>
+  <button type="button" data-tab="work">任务与汇报</button>
   <button type="button" data-tab="projects">项目</button>
   <button type="button" data-tab="agents">席位与配额</button>
   <button type="button" data-tab="collab">协作 / 变更</button>
   <button type="button" data-tab="ops">观测与运维</button>
 </div>
 
+<!-- 计划：董事会要一眼看到「公司接下来会自己干什么」，所以放在第一个标签页 -->
+<div class="tabpane active" data-pane="plan">
+  <section class="card">
+    <h2>未来要触发的活 · 计划</h2>
+    <p class="hint">一处列全：<b>循环任务</b>（每周/每月反复跑）、<b>一次性定时</b>（到点做一次就自动结束）、
+      以及<b>还在等你批的排班申请</b>。按「下次触发」从近到远排，已经跑完的排在最后。
+      总经理自己提的排班也要你在这里（或审批区）点通过才会真的跑。</p>
+    <div class="list" id="plan-list" style="max-height:none"></div>
+  </section>
+
+  <!-- 定时下达：到点才把活传到公司（避开白天用机 / 压到低峰计费窗） -->
+  <section class="card" id="schedule-card">
+    <h2>定时下达 · 到点再传给公司</h2>
+    <p class="hint">白天不想占电脑、或想压到低峰计费窗，就排到这里：<b>到点才建卡</b>。
+      到点时若手上还有活，卡会留在队列里等，不会打断正在做的事。只跑一次，不会每周重复。</p>
+    <form id="schedule-form">
+      <label for="sched-text" style="font-size:13px;margin-top:0">到点要它做什么</label>
+      <textarea id="sched-text" class="deck-input" placeholder="例如：把第四章译完，术语按项目规范来；完成后给我一份简报"></textarea>
+      <div class="inline" style="margin-top:10px">
+        <div style="flex:0 0 auto"><label for="sched-date" style="margin-top:0;font-size:12px">日期（可空＝最近一次）</label>
+          <input id="sched-date" type="date"></div>
+        <div style="flex:0 0 auto"><label for="sched-time" style="margin-top:0;font-size:12px">时间</label>
+          <input id="sched-time" type="time" value="02:30" required></div>
+        <button type="submit" id="sched-btn" style="flex:0 0 auto">排上 →</button>
+      </div>
+      <details class="deck-advanced">
+        <summary>高级（交给谁 / 谁验收 / 归属项目）—— 一般不填，交给总经理判断</summary>
+        <div class="grid2">
+          <div>
+            <label for="sched-to">交给谁</label>
+            <select id="sched-to"><option value="ceo">（默认）总经理拆活</option></select>
+            <label for="sched-review">谁验收</label>
+            <select id="sched-review">
+              <option value="">（默认）按发布者：我派的活直接落盘</option>
+              <option value="human">董事会亲审</option>
+            </select>
+          </div>
+          <div>
+            <label for="sched-project">归属项目</label>
+            <select id="sched-project"><option value="">（不指定 · 由总经理判断）</option></select>
+          </div>
+        </div>
+      </details>
+      <div class="msg" id="sched-msg"></div>
+    </form>
+  </section>
+</div>
+
 <!-- 任务与汇报：董事会最常看的 -->
-<div class="tabpane active" data-pane="work">
+<div class="tabpane" data-pane="work">
   <div class="grid2">
     <section class="card">
-      <h2>任务卡 · Tasks</h2>
-      <p class="hint">每条任务右边「看结果」= 总经理交回来的汇报与产物。点开就能读它说了什么。</p>
-      <div class="list" id="tasks-list" style="max-height:none"></div>
+      <h2>任务卡 · Tasks（最近）</h2>
+      <p class="hint">默认只列最近 12 张，看板不当流水账用；要翻旧账点「看全部」。右边「看结果」= 总经理交回来的汇报与产物。</p>
+      <div class="list" id="tasks-list" style="max-height:560px"></div>
     </section>
     <section class="card">
       <h2>消息 · Messages / Inbox <span class="tag" id="msg-unread" hidden></span></h2>
@@ -249,13 +425,6 @@
       </div>
       <div class="msg" id="decision-msg"></div>
     </section>
-    <section class="card" id="approvals-card">
-      <h2>审批 · Approvals</h2>
-      <p class="hint">三道常规门禁（strategy / hiring_budget / review_reject）＋两类按需人审（replan / 循环改版）。
-        看完直接点：通过 / 要求重写 / 驳回。顶部黄条出现时，点它就能跳到这里。</p>
-      <div class="list" id="approvals-list"></div>
-      <div class="msg" id="approval-msg"></div>
-    </section>
   </div>
 </div>
 
@@ -267,16 +436,16 @@
       项目 id、名称、落盘位置、验收条件、固定规矩都由它填好，你只选通过 / 拒绝，有意见写在申请单下面。
       下面这张表只是兜底（比如你想先建好项目再下单）。填了落盘目录 = 授权引擎把验收通过的产物复制过去。</p>
     <details>
-      <summary style="cursor:pointer;font-size:13px;color:#5F5E5A">手工兜底：我指定项目信息（一般用不到）</summary>
+      <summary style="cursor:pointer;font-size:13px;color:var(--muted)">手工兜底：我指定项目信息（一般用不到）</summary>
     <form id="project-form" style="margin-top:10px">
       <label for="p-id">项目 id（会当目录名：小写字母/数字/_/-）</label>
-      <input id="p-id" placeholder="例如：benny-2" autocomplete="off">
+      <input id="p-id" placeholder="例如：proj-2" autocomplete="off">
       <label for="p-name">显示名</label>
-      <input id="p-name" placeholder="例如：小王子翻译（第二版）" autocomplete="off">
+      <input id="p-name" placeholder="例如：某翻译项目（第二版）" autocomplete="off">
       <label for="p-root">落盘目录（绝对路径，可留空；必须是已经存在的文件夹）</label>
-      <input id="p-root" placeholder="例如：D:/Benny/20_项目/小王子翻译" autocomplete="off">
+      <input id="p-root" placeholder="例如：D:/projects/demo-project" autocomplete="off">
       <label for="p-sub">交付子目录（相对项目文件夹，可留空）</label>
-      <input id="p-sub" placeholder="例如：04-译稿" autocomplete="off">
+      <input id="p-sub" placeholder="例如：04-out" autocomplete="off">
       <div style="margin-top:12px"><button type="submit">创建项目</button></div>
       <div class="msg" id="project-msg"></div>
     </form>
@@ -375,8 +544,8 @@
   <div class="grid2">
     <section class="card">
       <h2>试运行观测 · Observe（P5）</h2>
-      <p class="hint">五项指标 + 四项结论 + 脏状态，全部从控制面自己的记录算出来。注意：<b>压缩跑不能代替真实 72 小时</b>，
-        门禁结论只认 <code>npm run soak:real</code> 出的报告。</p>
+      <p class="hint">五项指标 + 四项结论 + 脏状态，全部从控制面自己的记录算出来。<b>G-P5 已改为常驻累计门禁</b>：
+        按累计活动时间、任务/Run 样本量和异常率判，晚上关机不扣时间，不再要求连续 72 小时。</p>
       <div class="list" id="observe-metrics"></div>
       <div class="list" id="observe-findings" style="margin-top:10px"></div>
       <div class="list" id="observe-dirty" style="margin-top:10px"></div>
@@ -407,16 +576,6 @@
       <h2>Bridge · 拉模式（P2）</h2>
       <p class="hint">默认 inline 单机直调；切到 bridge 后任务排队，等本机 bridge 来领。本地没服务器也能跑。</p>
       <div class="list" id="bridge-list"></div>
-    </section>
-    <section class="card">
-      <h2>循环任务 · RecurringJobs（P2）</h2>
-      <div class="list" id="recurring-list"></div>
-      <div class="inline" style="margin-top:8px">
-        <input id="job-id" placeholder="jobId（留空用第一个）" autocomplete="off">
-        <button type="button" id="job-fire" style="flex:0 0 auto">触发一轮</button>
-      </div>
-      <div style="margin-top:8px"><button type="button" class="ghost" id="job-register">注册示例巡检任务（演示用，会真实建卡）</button></div>
-      <div class="msg" id="job-msg"></div>
     </section>
   </div>
 </div>
@@ -469,6 +628,9 @@
   let metaApplied = false;
   let hashScrolled = false;
   let resultTaskId = '';
+  // 任务卡默认只列最近 12 张：77 张全铺出来是流水账，董事会真正要的是「现在在发生什么」。
+  const RECENT_TASKS = 12;
+  let showAllTasks = false;
 
   function say(id, ok, text) {
     const el = $(id);
@@ -509,12 +671,105 @@
   const STATUS_LABELS = {
     todo: '排队中', in_progress: '干活中', in_review: '待验收', done: '已完成',
     blocked: '卡住了', cancelled: '已取消', awaiting_decision: '等你拍板',
+    // 计划（循环 / 定时任务）用的是另一套状态词，混着显示会变成英文生词。
+    active: '会触发', paused: '已暂停', ended: '已跑完',
+    // Run 也可能被重启收尸（不是真失败，是进程没了），别显示成生词。
+    interrupted: '被重启打断',
   };
   function statusPill(s) { return '<span class="pill s-' + esc(s) + '">' + esc(STATUS_LABELS[s] || s) + '</span>'; }
 
-  // 重填下拉框但保住当前选中项。
-  // 每次刷新都重建 option，不保住选择的话用户刚选的席位会被冲回默认值。
-  // 必须在顶层：之前它被写在某个渲染函数里面，另一个函数调用它就报了 keep is not defined。
+  // 「待验收」和「验收中」是两件事，但卡的状态都叫 in_review —— 区别只在有没有一趟验收 run 在跑。
+  // 原来不分，验收会话跑的那几分钟看板照旧写「待验收」，人以为没人管（2026-11-18 董事会当场指出）。
+  // 只读 state.runs（/api/runs 已经全量拉回来了），不额外加接口。
+  function reviewRunFor(taskId) {
+    const runs = state.runs || [];
+    for (let i = runs.length - 1; i >= 0; i -= 1) {
+      const r = runs[i];
+      if (r.taskId === taskId && r.status === 'running' && r.wakeReason === 'review_requested') return r;
+    }
+    return null;
+  }
+
+  // 证据层（2026-11-18）：卡片上直接显示「送到了没、有没有在动、交活了没」。
+  // 数据全部来自 /api/runs 已经拉回来的字段（evidenceLevel / evidenceKinds / dispatchConfirmedAt /
+  // ackAt / lastActivityAt / interruptedReason），不新增接口、不改派活逻辑。
+  // 只给「还在流程里」的卡显示；done / cancelled 不再关心证据，避免历史卡满屏噪音。
+  const EVIDENCE_KIND_LABELS = {
+    ack: '回执', progress: '进度', artifact: '产物', draft: '草稿', completion: '报告',
+    dispatch: '启动回执', heartbeat: '心跳', 'artifact-project': '项目产物',
+  };
+  function evidenceRunFor(taskId) {
+    const runs = state.runs || [];
+    let latest = null;
+    for (let i = runs.length - 1; i >= 0; i -= 1) {
+      const r = runs[i];
+      if (r.taskId !== taskId) continue;
+      if (r.status === 'running') return { run: r, live: true };
+      if (!latest) latest = r;
+    }
+    return latest ? { run: latest, live: false } : null;
+  }
+  function agoText(iso) {
+    const ms = Date.now() - Date.parse(iso ?? '');
+    if (!Number.isFinite(ms)) return '';
+    const min = Math.floor(ms / 60000);
+    return min <= 0 ? '刚刚' : (min + ' 分钟前');
+  }
+  function evidenceChip(task) {
+    if (!task || task.status === 'done' || task.status === 'cancelled') return '';
+    const got = evidenceRunFor(task.taskId);
+    if (!got) {
+      // 还没跑过任何一趟：排队中就说「未派单」，别让人误以为是引擎漏了。
+      return task.status === 'todo'
+        ? '<div><span class="ev">未派单</span></div>' : '';
+    }
+    const r = got.run;
+    const level = Number(r.evidenceLevel ?? 0);
+    const kinds = Array.isArray(r.evidenceKinds) ? r.evidenceKinds : [];
+    // 取「最强的那条痕迹」当副标题：产物 > 进度 > 回执 > 心跳。
+    const kind = ['artifact', 'progress', 'draft', 'completion', 'ack', 'heartbeat']
+      .find((k) => kinds.includes(k));
+    if (r.status === 'interrupted') {
+      const noDispatch = !r.dispatchConfirmedAt;
+      const reason = String(r.interruptedReason ?? '');
+      const why = noDispatch ? '没启动' : (reason.includes('没有任何产出痕迹') ? '无产出' : '被中断');
+      return '<div><span class="ev ev-warn">' + esc(why + ' · 已中断') + '</span></div>';
+    }
+    if (r.status !== 'running') {
+      // deferred / blocked：跑过但没收单（闸门、焦点、报告不合格都算），状态列已有说明，不重复。
+      return '';
+    }
+    if (level >= 3) {
+      return '<div><span class="ev ev-ok">已交活' + (kind ? ' · ' + esc(EVIDENCE_KIND_LABELS[kind] || kind) : '')
+        + '</span></div>';
+    }
+    if (level >= 2) {
+      const at = r.lastActivityAt ?? r.ackAt ?? r.startedAt;
+      // 只有回执、还没有产物：说「已收到」，比笼统的「有进度」更贴近员工回了句「收到」。
+      const label = kind === 'ack' ? '已收到' : '有进度';
+      return '<div><span class="ev ev-work">' + label
+        + (kind ? ' · ' + esc(EVIDENCE_KIND_LABELS[kind] || kind) : '')
+        + (at ? ' · ' + esc(agoText(at)) : '') + '</span></div>';
+    }
+    if (level >= 1) {
+      // 2026-11-24 修正：L1 只代表「进程 / 窗口已经起来」，**不代表 agent 收到任务、更不代表开工**。
+      // CLI（process）席位的 dispatch.json 是在 spawn 成功那一刻写的：进程活着、心跳在写，
+      // 但 agent 可能一直没动（真机 T-5457e8a0：徽标看着一切正常，实际 10 分钟 CPU 一动不动、
+      // ch17 一个字没写）。原来这里直接说「送到了」就是这次误判的来源 —— 现在一律说「已启动」，
+      // 并区分「机器在转」与「没心跳」；超过 5 分钟仍无任何产出痕迹，标黄提示「未开工」。
+      const since = r.dispatchConfirmedAt ?? r.startedAt;
+      const mins = Math.floor((Date.now() - Date.parse(since ?? '')) / 60000);
+      const beat = kinds.includes('heartbeat') ? '机器在转' : '无心跳';
+      if (Number.isFinite(mins) && mins >= 5) {
+        return '<div><span class="ev ev-warn">' + esc('已启动 · 未开工 ' + mins + ' 分 · ' + beat)
+          + '</span></div>';
+      }
+      return '<div><span class="ev ev-work">已启动 · 等开工'
+        + (r.dispatchConfirmedAt ? ' · ' + esc(agoText(r.dispatchConfirmedAt)) : '') + '</span></div>';
+    }
+    return '<div><span class="ev ev-warn">未见回执 · 已等 '
+      + esc(Math.max(0, Math.floor((Date.now() - Date.parse(r.startedAt ?? '')) / 60000))) + ' 分</span></div>';
+  }
   function setOptions(id, options, placeholder) {
     const el = $(id);
     if (!el) return;
@@ -596,18 +851,18 @@
     const t = d.tasks || {};
     const { approvals: pendingAp, decisions: stuck } = pendingBoardWork();
     const tight = (state.quotas || []).filter((q) => (q.quotaUsed || 0) >= (q.quotaLimit || 1)).length;
+    // 只留「周一早上要看的六个数」；其余三个（触顶额度 / 唤醒次数 / 协作空间）有情况才冒出来。
     const items = [
       ['任务卡', Object.values(t).reduce((a, b) => a + b, 0)],
       ['已完成', t.done || 0],
       ['进行中', (t.in_progress || 0) + (t.in_review || 0)],
       ['阻塞', t.blocked || 0],
-      ['已取消', t.cancelled || 0],
       ['待我拍板', pendingAp.length, 'approvals'],
       ['挂起待决策', stuck.length, 'decisions'],
-      ['配额触顶', tight],
-      ['唤醒次数', d.runs || 0],
-      ['协作空间', d.threads || 0],
     ];
+    if (tight > 0) items.push(['配额触顶', tight]);
+    if ((d.runs || 0) > 0) items.push(['唤醒次数', d.runs || 0]);
+    if ((d.threads || 0) > 0) items.push(['协作空间', d.threads || 0]);
     $('stats').innerHTML = items.map(([k, v, jump]) =>
       '<div class="stat' + (jump && v > 0 ? ' action' : '') + '"' +
       (jump && v > 0 ? ' data-jump="' + jump + '" role="button" tabindex="0" title="点一下去处理"' : '') +
@@ -629,27 +884,61 @@
   }
 
   function renderTasks() {
-    const rows = [...state.tasks].reverse();
-    $('tasks-list').innerHTML = rows.length ?
+    // 最新在前：卡都有 createdAt 就按时间排；老数据缺时间就退回「库里的顺序倒过来」。
+    const all = state.tasks.every((t) => Number.isFinite(Date.parse(t.createdAt ?? '')))
+      ? [...state.tasks].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      : [...state.tasks].reverse();
+    const visible = showAllTasks ? all : all.slice(0, RECENT_TASKS);
+    const hidden = all.length - visible.length;
+    const bar = '<div class="taskbar"><span>共 ' + all.length + ' 张' +
+      (hidden ? '，显示最近 ' + visible.length + ' 张' : '') + '</span>' +
+      (all.length > RECENT_TASKS
+        ? '<button type="button" class="ghost" data-toggle-tasks="1">' +
+          (showAllTasks ? '只看最近 ' + RECENT_TASKS + ' 张' : '看全部 ' + all.length + ' 张') + '</button>'
+        : '') + '</div>';
+    const table = visible.length ?
       '<table><thead><tr><th>卡号</th><th>标题</th><th>难度</th><th>状态</th><th>交付给</th><th>模式</th><th></th></tr></thead><tbody>' +
-      rows.map((t) => {
+      visible.map((t) => {
         const note = ceoNoteOf(t);
-        return '<tr><td>' + esc(short(t.taskId)) + '</td><td>' + esc(t.title) +
+        const reviewRun = t.status === 'in_review' ? reviewRunFor(t.taskId) : null;
+        const reviewingMin = reviewRun ? Math.floor((Date.now() - Date.parse(reviewRun.startedAt)) / 60000) : 0;
+        // 归口（2026-11-18）：验收通过了但仓库还没落地，不能写成「待验收」——
+        // 那是两件事：等仓库主人签字，不是等验收。
+        const pendingAck = t.assetAck === 'pending' && t.status === 'in_review';
+        const statusCell = pendingAck
+          ? '<span class="pill s-in_review">验收通过 · 待归口</span>'
+            + '<div class="meta" style="font-size:11px">等 ' + esc(t.assetOwner || '工程执行') + ' 核对提交/推送</div>'
+          : (reviewRun ? '<span class="pill s-in_review">验收中</span>' : statusPill(t.status));
+        const ackCell = t.assetAck === 'done'
+          ? '<span class="ev ev-ok">已归口</span>'
+          : (t.assetAck === 'failed' ? '<span class="ev ev-bad">归口未过</span>' : '');
+        return '<tr><td style="font-family:var(--mono);color:var(--muted)">' + esc(short(t.taskId)) + '</td><td>' + esc(t.title) +
         (note ? '<div class="meta" style="font-size:11px">总经理：' + esc(note) + '</div>' : '') +
-        '</td><td>' + difficultyTag(t.difficulty) + '</td><td>' + statusPill(t.status) +
+        '</td><td>' + difficultyTag(t.difficulty) + '</td><td>' +
+        // 同一张卡在「有没有人正在审」这两件事上说法必须不同，否则看起来像没人管。
+        statusCell +
+        (reviewRun
+          ? '<div class="meta" style="font-size:11px">' + esc(reviewRun.agentId) + ' 正在审'
+            + (reviewingMin >= 0 ? '（' + reviewingMin + ' 分钟）' : '') + '</div>'
+          : '') +
         (t.holdReason ? '<div class="meta" style="font-size:11px">' + esc(t.holdReason) + '</div>' : '') +
+        evidenceChip(t) + ackCell +
         '</td><td>' + esc(t.assignee) +
         '</td><td><span class="tag">' + esc(t.mode) + '</span>' +
         (t.repo ? '<span class="tag">仓库 ' + esc(t.repo) + '</span>' : '') +
         (t.status === 'in_review' && t.reviewBy && t.reviewBy !== 'ceo'
-          ? '<span class="tag">等 ' + esc(t.reviewBy) + ' 审</span>' : '') +
+          ? '<span class="tag">' + (reviewRun ? esc(t.reviewBy) + ' 审着' : '等 ' + esc(t.reviewBy) + ' 审') + '</span>' : '') +
         '</td>' +
         '<td style="white-space:nowrap"><button type="button" class="ghost" data-result="' + esc(t.taskId) + '">看结果</button>' +
+        // 卡停住了要能立刻让它再跑一趟：自动补偿（补投 / 看门狗）要等阈值，人在看板前不能干等。
+        ((t.status === 'done' || t.status === 'cancelled') ? ''
+          : ' <button type="button" class="ghost" data-redispatch="' + esc(t.taskId) + '">重派</button>') +
         ((t.status === 'done' || t.status === 'cancelled') ? ''
           : ' <button type="button" class="danger" data-cancel="' + esc(t.taskId) + '">取消</button>') +
         '</td></tr>';
       }).join('') +
-      '</tbody></table>' : '<div class="empty">还没有任务卡，左边提一条需求试试。</div>';
+      '</tbody></table>' : '<div class="empty">还没有任务卡，上面提一条需求试试。</div>';
+    $('tasks-list').innerHTML = bar + table;
   }
 
   // P6：GUI 席位状态条。「会不会抢我键盘」必须一眼看得见，而且能立刻叫停。
@@ -768,7 +1057,7 @@
       '<div class="meta">验收条件：<br>' + lines(p.acceptance) + '</div>' +
       '<div class="meta">固定规矩：<br>' + lines(p.rules) + '</div>' +
       '<textarea data-comment="' + esc(a.approvalId) + '" rows="2" ' +
-        'style="width:100%;margin-top:6px;padding:6px;border:1px solid #B4B2A9;border-radius:6px;font:inherit" ' +
+        'style="width:100%;margin-top:6px;padding:6px;border:1px solid var(--line);border-radius:6px;font:inherit" ' +
         'placeholder="意见（可留空；拒绝时写清原因）"></textarea>' +
       '<div class="btnrow">' +
       '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过并创建</button>' +
@@ -776,36 +1065,41 @@
       '</div></div>';
   }
 
-  // 循环任务申请：董事会要一眼看清「多久一次、谁干、归哪儿、烧多少」，否则不敢批。
+  // 循环任务 / 一次性定时申请：董事会要一眼看清「多久一次还是只做一次、谁干、归哪儿、烧多少」，否则不敢批。
   function recurringApprovalRow(a, p) {
     const job = p.job || {};
     const tpl = job.taskTemplate || {};
+    const once = p.oneShot === true || (job.termination && job.termination.maxCycles === 1);
     const lines = (arr) => (Array.isArray(arr) && arr.length
       ? arr.map((x) => '· ' + esc(x)).join('<br>') : '（未写）');
     const seatName = (id) => {
       const s = (state.agents || []).find((x) => x.agentId === id);
       return s ? (s.postTitle || id) + '（担任：' + (s.holderName || id) + '）' : (id || '（未写）');
     };
-    return '<div class="row"><b>循环任务申请：' + esc(job.title || a.approvalId) + '</b> ' +
-      '<span class="tag">总经理发起</span><span class="tag">长期反复执行</span>' +
-      '<div class="meta"><b>节奏：' + esc(p.rruleText || job.trigger?.rrule || '（未写）') + '</b>' +
-        '　每次开始时间由系统按此时区算（' + esc(job.trigger?.timezone || 'Asia/Shanghai') + '）</div>' +
-      '<div class="meta">每轮干什么：' + esc(String(tpl.instructions || '（未写）').slice(0, 500)) + '</div>' +
-      '<div class="meta">每轮怎么算干完：<br>' + lines(tpl.acceptance) + '</div>' +
+    return '<div class="row"><b>' + (once ? '定时任务申请（只跑一次）：' : '循环任务申请：')
+      + esc(job.title || a.approvalId) + '</b> ' +
+      '<span class="tag">总经理发起</span><span class="tag">' + (once ? '只做一次' : '长期反复执行') + '</span>' +
+      '<div class="meta"><b>' + (once ? '什么时候跑：' : '节奏：') + esc(p.rruleText || job.trigger?.rrule || '（未写）') + '</b>'
+        + (once ? '　跑完这一轮自动结束，不会每周重复' : '　每次开始时间由系统按此时区算（' + esc(job.trigger?.timezone || 'Asia/Shanghai') + '）') + '</div>' +
+      '<div class="meta">' + (once ? '这一次干什么：' : '每轮干什么：') + esc(String(tpl.instructions || '（未写）').slice(0, 500)) + '</div>' +
+      '<div class="meta">' + (once ? '怎么算干完：' : '每轮怎么算干完：') + '<br>' + lines(tpl.acceptance) + '</div>' +
       '<div class="meta">谁干：' + esc(seatName(job.assignee)) + '</div>' +
-      '<div class="meta">每轮谁来审：' + esc(job.reviewBy
+      '<div class="meta">谁来审：' + esc(job.reviewBy
         ? (job.reviewBy === 'human' ? '董事会亲审（每轮出一张待你拍板的单）' : seatName(job.reviewBy))
         : '未指定（老排班，按默认路由）') + (job.reviewNote ? '　←　' + esc(job.reviewNote) : '') + '</div>' +
       '<div class="meta">归属项目：' + esc(job.project || '不归属任何项目（产物只留在公司）') + '</div>' +
       '<div class="meta">消耗：每轮最多 2 次唤醒；连续失败 3 轮自动暂停等你处理；不会自动恢复。</div>' +
-      '<div class="meta">有效期：到 ' + esc(String((job.termination || {}).validUntil || '').slice(0, 10)) +
-        ' 自动暂停' + ((job.termination || {}).maxCycles ? '；最多 ' + esc(job.termination.maxCycles) + ' 轮' : '') +
-        '，要续再点一次。</div>' +
+      (once
+        ? '<div class="meta">结束方式：只跑这一轮，跑完自动结束（不会留下「下次还会跑」的假计划）。</div>'
+        : '<div class="meta">有效期：到 ' + esc(String((job.termination || {}).validUntil || '').slice(0, 10)) +
+          ' 自动暂停' + ((job.termination || {}).maxCycles ? '；最多 ' + esc(job.termination.maxCycles) + ' 轮' : '') +
+          '，要续再点一次。</div>') +
       '<textarea data-comment="' + esc(a.approvalId) + '" rows="2" ' +
-        'style="width:100%;margin-top:6px;padding:6px;border:1px solid #B4B2A9;border-radius:6px;font:inherit" ' +
+        'style="width:100%;margin-top:6px;padding:6px;border:1px solid var(--line);border-radius:6px;font:inherit" ' +
         'placeholder="意见（可留空；拒绝时写清原因）"></textarea>' +
       '<div class="btnrow">' +
-      '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过并开始排班</button>' +
+      '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">'
+        + (once ? '通过并排到那一刻' : '通过并开始排班') + '</button>' +
       '<button type="button" class="danger" data-approve="rejected" data-id="' + esc(a.approvalId) + '">拒绝</button>' +
       '</div></div>';
   }
@@ -830,7 +1124,7 @@
       '<div class="meta">验收条件：<br>' + checkHtml + '</div>' +
       (p.workDir ? '<div class="meta">文件在这儿：<code>' + esc(p.workDir) + '</code></div>' : '') +
       '<textarea data-comment="' + esc(a.approvalId) + '" rows="2" ' +
-        'style="width:100%;margin-top:6px;padding:6px;border:1px solid #B4B2A9;border-radius:6px;font:inherit" ' +
+        'style="width:100%;margin-top:6px;padding:6px;border:1px solid var(--line);border-radius:6px;font:inherit" ' +
         'placeholder="审批意见（通过可留空；打回要写清哪里不行，执行人只看这一句）"></textarea>' +
       '<div class="btnrow">' +
       '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过</button>' +
@@ -854,7 +1148,7 @@
         '<div class="meta">审批单 ' + esc(a.approvalId) + (a.taskId ? ' · 卡 ' + esc(short(a.taskId)) : '') +
         (p.decisionMaker ? ' · 建议由 ' + esc(p.decisionMaker) + ' 先看' : '') + '</div>' +
         '<textarea data-comment="' + esc(a.approvalId) + '" rows="2" ' +
-          'style="width:100%;margin-top:6px;padding:6px;border:1px solid #B4B2A9;border-radius:6px;font:inherit" ' +
+          'style="width:100%;margin-top:6px;padding:6px;border:1px solid var(--line);border-radius:6px;font:inherit" ' +
           'placeholder="审批意见（可留空）"></textarea>' +
         '<div class="btnrow">' +
         '<button type="button" data-approve="approved" data-id="' + esc(a.approvalId) + '">通过</button>' +
@@ -977,6 +1271,22 @@
       ['GUI 失败率', pct(m.guiFailure?.rate) + '（' + (m.guiFailure?.failed || 0) + '/' + (m.guiFailure?.runs || 0) + '）'],
       ['额度消耗', pct(m.quotaBurn?.rate) + '（' + (m.quotaBurn?.used || 0) + '/' + (m.quotaBurn?.limit || 0) + '）'],
     ];
+    // G-P5 改成常驻累计：看板直接显示「还差多少」，不用再去翻 72h 报告。
+    const g = o.gate || {};
+    if (g.gate && g.state) {
+      const st = g.state;
+      const gm = g.gate.metrics || {};
+      const th = gm.thresholds || {};
+      const gateRows = [
+        ['G-P5 常驻门禁', (g.gate.passed ? '通过' : '进行中') + ' · ' + (g.gate.level || '')],
+        ['累计活动', (Number(gm.activeHours || 0).toFixed(2)) + ' / ' + (th.minActiveHours ?? '?') + ' 小时（关机空档不计）'],
+        ['任务样本', (st.tasks || 0) + ' / ' + (th.minTasks ?? '?') + ' 个（done ' + (st.tasksDone || 0) + '，blocked/cancelled ' + (st.tasksBad || 0) + '）'],
+        ['Run 样本', (st.effectiveRuns || 0) + ' / ' + (th.minRuns ?? '?') + ' 个（任务异常率 ' + pct(gm.taskErrorRate) + '，failed run ' + (st.failedRuns || 0) + '）'],
+        ['GUI 任务', (st.guiTasks || 0) + ' / ' + (th.minGuiTasks ?? '?') + ' 个'],
+        ['脏状态（最近 ' + (th.dirtyWindowHours ?? 24) + 'h）/ 探测失败', (gm.recentDirtySamples ?? 0) + ' / ' + (st.probeErrors || 0) + ' 次（累计脏 ' + (st.dirtySamples || 0) + '）'],
+      ];
+      metricRows.unshift(...gateRows);
+    }
     $('observe-metrics').innerHTML = metricRows.map(([k, v]) =>
       '<div class="row"><b>' + esc(k) + '</b><div class="meta">' + esc(v) + '</div></div>').join('');
 
@@ -1103,7 +1413,11 @@
     renderSimple('inbox-list', briefRows, '还没有简报。');
     renderSimple('runs-list', [...state.runs].reverse().slice(0, 12).map((r) =>
       '<div class="row"><span class="tag">' + esc(r.agentId) + '</span> ' + esc(r.wakeReason) +
-      ' ' + statusPill(r.status) + '<div class="meta">' + esc(short(r.runId)) +
+      ' ' + statusPill(r.status) +
+      // 证据级别也放进唤醒记录：事后查「这趟到底动没动」不用再翻库。
+      (Number(r.evidenceLevel ?? 0) > 0
+        ? ' <span class="ev ev-work">证据 L' + esc(r.evidenceLevel) + '</span>' : '') +
+      '<div class="meta">' + esc(short(r.runId)) +
       ' · ' + esc(short(r.taskId)) + ' · rev' + esc(r.revision) + '</div></div>'),
       '还没有唤醒记录。');
     renderSimple('audit-list', [...state.audit].reverse().slice(0, 12).map((a) =>
@@ -1123,27 +1437,88 @@
     $('bridge-list').innerHTML = bridgeRows.join('') +
       ((b.bridges || []).length ? '' : '<div class="empty">还没有 bridge 上报心跳（inline 模式下正常）。</div>');
 
-    $('recurring-list').innerHTML = state.recurring.length
-      ? state.recurring.map((j) => {
-        const tpl = j.taskTemplate || {};
-        const seat = (state.agents || []).find((x) => x.agentId === j.assignee);
-        const who = seat ? (seat.postTitle || j.assignee) + '（' + (seat.holderName || j.assignee) + '）' : (j.assignee || '（未写）');
-        return '<div class="row"><b>' + esc(j.title || j.jobId) + '</b> ' + statusPill(j.status) +
-          (j.status === 'paused' ? '<span class="tag">已自动暂停，需人工恢复</span>' : '') +
-          '<div class="meta"><b>节奏：' + esc(rruleText(j.trigger && j.trigger.rrule)) + '</b>' +
-            ' · 下次 ' + esc(fmtAt(j.nextFireAt)) + ' · 已跑 ' + esc(j.lastCycleNo ?? 0) + ' 轮</div>' +
-          '<div class="meta">谁干：' + esc(who) + ' · 归属项目：' + esc(j.project || '不归属（产物只留公司）') + '</div>' +
-          '<div class="meta">谁审：' + esc(j.reviewBy
-            ? (j.reviewBy === 'human' ? '董事会亲审' : ((state.agents || []).find((x) => x.agentId === j.reviewBy)?.postTitle || j.reviewBy))
-            : '未指定') + '</div>' +
-          '<div class="meta">每轮：' + esc(String(tpl.instructions || '').slice(0, 160)) + '</div></div>';
-      }).join('')
-      : '<div class="empty">还没有循环任务。长期要反复做的活（体检 / 巡检 / 清理），总经理会在拆活时提排班，你在审批区点通过才会开始。</div>';
+  // 计划总览：把「将来会自己触发」的活全放在一处 —— 循环任务 + 一次性定时 + 待批的排班申请。
+  // 董事会的原话是「公司到底设置成功了没」，所以默认全部可见、按下次触发从近到远排，
+  // 已跑完 / 已暂停的沉到后面，不能因为状态不同就把计划藏起来。
+  const oneShotOf = (j) => Boolean(j && j.termination && j.termination.maxCycles === 1);
+  const planRank = (j) => (j.status === 'ended' ? 2 : j.status === 'paused' ? 1 : 0);
+  const planMs = (j) => {
+    const t = Date.parse(j && j.nextFireAt ? j.nextFireAt : '');
+    return Number.isNaN(t) ? Infinity : t;
+  };
+  const planJobs = (state.recurring || []).slice()
+    .sort((a, b) => planRank(a) - planRank(b) || planMs(a) - planMs(b));
+  const pendingPlan = (state.approvals || []).filter((a) => a.kind === 'recurring_create' && a.status === 'pending');
+  const loopJobs = planJobs.filter((j) => !oneShotOf(j));
+  const onceJobs = planJobs.filter((j) => oneShotOf(j));
+  const planRows = [];
+  planRows.push('<div class="row"><b>一共 ' + planJobs.length + ' 条计划</b>'
+    + '<div class="meta">循环 ' + loopJobs.length + ' 条 · 一次性定时 ' + onceJobs.length + ' 条 · 等你批 '
+    + pendingPlan.length + ' 条' + (planJobs.length ? '' : '（公司现在不会自己触发任何活）') + '</div></div>');
+  if (pendingPlan.length) {
+    // 排班申请还没批 → 也在这里露一条，别让人以为「提了就等于排上了」。
+    for (const a of pendingPlan) {
+      planRows.push('<div class="row"><b>' + esc(a.title || '排班申请') + '</b> ' + statusPill('awaiting_decision')
+        + '<div class="meta">还在等你批准，批了才会真的到点跑。到「任务与汇报 → 审批」里点通过 / 拒绝。</div></div>');
+    }
+  }
+  for (const j of planJobs) {
+    const tpl = j.taskTemplate || {};
+    const seat = (state.agents || []).find((x) => x.agentId === j.assignee);
+    const who = seat ? (seat.postTitle || j.assignee) : (j.assignee || '（未写）');
+    const reviewer = j.reviewBy
+      ? (j.reviewBy === 'human' ? '董事会亲审' : ((state.agents || []).find((x) => x.agentId === j.reviewBy)?.postTitle || j.reviewBy))
+      : '未指定';
+    const once = oneShotOf(j);
+    let when;
+    if (j.status === 'ended') when = '已跑完，不会再触发';
+    else if (j.status === 'paused') when = '已暂停，到点不会跑';
+    else if (once) when = '到点 ' + fmtAt(j.nextFireAt) + '（只跑一次）';
+    else when = '节奏：' + rruleText(j.trigger && j.trigger.rrule) + ' · 下次 ' + fmtAt(j.nextFireAt);
+    const doneText = once
+      ? '已跑 ' + (j.lastCycleNo ?? 0) + '/1 轮'
+      : '已跑 ' + (j.lastCycleNo ?? 0) + ' 轮';
+    const buttons = j.status === 'ended'
+      ? ''
+      : '<div class="btnrow" style="margin-top:6px">'
+        + (j.status === 'paused'
+          ? '<button type="button" class="ghost" data-sched="resume" data-id="' + esc(j.jobId) + '">恢复</button>'
+          : '<button type="button" class="ghost" data-sched="pause" data-id="' + esc(j.jobId) + '">先别跑</button>')
+        + '<button type="button" class="ghost" data-sched="fire" data-id="' + esc(j.jobId) + '">现在就跑一次</button>'
+        + '</div>';
+    planRows.push('<div class="row"><b>' + esc(j.title || j.jobId) + '</b> ' + statusPill(j.status)
+      + ' <span class="tag">' + (once ? '只跑一次' : '循环') + '</span>'
+      + '<div class="meta"><b>' + esc(when) + '</b> · ' + esc(doneText) + '</div>'
+      + '<div class="meta">谁干：' + esc(who) + ' · 归属项目：' + esc(j.project || '不归属（产物只留公司）')
+      + ' · 谁审：' + esc(reviewer) + '</div>'
+      + '<div class="meta">干什么：' + esc(String(tpl.instructions || '').slice(0, 150)) + '</div>'
+      + buttons + '</div>');
+  }
+  if (!planJobs.length) {
+    planRows.push('<div class="empty">还没有任何计划。要么在下面「定时下达」里排一条，'
+      + '要么在「给总经理下指令」里让它提排班（长期重复的写真循环、只做一次的写到点），批了就会出现在这里。</div>');
+  }
+  $('plan-list').innerHTML = planRows.join('');
 
     // 候选席位与变更目标下拉（保留当前选中值）。
     setOptions('addressedTo', state.agents.map((a) =>
       '<option value="' + esc(a.agentId) + '">' + esc(a.displayName) + '（' + esc(a.agentId) + '）' +
       (a.isCEO? ' · 总经理' : '') + '</option>').join(''), '（由总经理决定）');
+    // 定时下达的三个下拉：按岗位写（董事会认得「工程执行」，不认 agent 代号）。
+    // 占位项由 setOptions 统一加，这里只给真实选项 —— 否则下拉里会出现两条一模一样的「默认」。
+    setOptions('sched-to',
+      (state.agents || []).filter((a) => !a.isCEO).map((a) =>
+        '<option value="' + esc(a.agentId) + '">' + esc(a.postTitle || a.displayName) + '（' + esc(a.agentId) + '）</option>').join(''),
+      '（默认）总经理拆活');
+    setOptions('sched-review',
+      '<option value="human">董事会亲审</option>' +
+      (state.agents || []).filter((a) => a.agentId !== 'ceo').map((a) =>
+        '<option value="' + esc(a.agentId) + '">' + esc(a.postTitle || a.displayName) + ' 验收</option>').join(''),
+      '（默认）按发布者：我派的活直接落盘');
+    setOptions('sched-project',
+      (state.projects || []).map((p) =>
+        '<option value="' + esc(p.id) + '">' + esc(p.displayName || p.id) + '（' + esc(p.id) + '）</option>').join(''),
+      '（不指定 · 由总经理判断）');
     setOptions('cr-task', state.tasks.filter((t) => t.status !== 'cancelled').map((t) =>
       '<option value="' + esc(t.taskId) + '">' + esc(short(t.taskId)) + ' · ' + esc(t.title) +
       ' · ' + esc(t.status) + '</option>').join(''), '（暂无可变更的卡）');
@@ -1182,31 +1557,37 @@
     return { approvals, decisions };
   }
 
+  // 待办可见性（2026-11-18 重做）：原来是一条黄条，暖色、还占一整行。
+  // 现在收敛成两个红点 + 一个常驻审批坞：
+  //   ① 顶栏「待我拍板」按钮上的红色数字（任何标签页都看得见，点一下直达）；
+  //   ② 指令台下面那张审批卡右上角的数字；没有单子就整张收起来，不占地方。
   function renderPendingBanner() {
-    const el = $('pending-banner');
-    if (!el) return;
     const { approvals, decisions } = pendingBoardWork();
     const total = approvals.length + decisions.length;
-    // 待办数必须同时出现在三处，董事会才不可能错过：
-    // 页面顶部黄条（任何标签页都看得见）、「任务与汇报」标签角标、浏览器标签页标题。
+    const badge = $('pending-badge');
+    if (badge) {
+      badge.textContent = String(total);
+      badge.classList.toggle('zero', total === 0);
+    }
+    const btn = $('pending-jump');
+    if (btn) btn.title = total ? `点一下直接去拍板（${total} 项）` : '现在没有待你拍板的事';
     const workTab = document.querySelector('#main-tabs button[data-tab="work"]');
     if (workTab) workTab.textContent = total ? `任务与汇报 · ${total} 待办` : '任务与汇报';
     document.title = (total ? `（${total} 项待你拍板）` : '') + 'AICompany · Web Board';
-    const parts = [];
-    if (approvals.length) parts.push(approvals.length + ' 项审批等你拍板');
-    if (decisions.length) parts.push(decisions.length + ' 张卡挂起等你决策');
-    if (!parts.length) { el.hidden = true; el.innerHTML = ''; return; }
-    el.hidden = false;
-    el.innerHTML = '<div><b>⏳ ' + esc(parts.join('，')) + '</b>' +
-      '　放着不处理，这单会一直停在这儿，不会自己往下走。</div>' +
-      '<button type="button" id="pending-jump">去拍板 →</button>';
-    $('pending-jump').addEventListener('click', () => jumpToPending());
+    // 审批坞：有单子才露出来（包住它的 .dock.on 控制显示）。
+    const dock = $('approvals-card');
+    if (dock) {
+      dock.hidden = approvals.length === 0;
+      dock.classList.toggle('on', approvals.length > 0);
+    }
+    const apCount = $('approval-count');
+    if (apCount) apCount.textContent = String(approvals.length);
   }
 
-  // 跳到「能拍板的地方」：任务页的审批卡 + 待决策卡，滚过去并闪一下边框。
+  // 跳到「能拍板的地方」：审批坞常驻在页面上，直接滚过去；只有「挂起待决策」才需要切标签页。
   function jumpToPending() {
-    activateTab('work');
-    const { approvals } = pendingBoardWork();
+    const { approvals, decisions } = pendingBoardWork();
+    if (!approvals.length && decisions.length) activateTab('work');
     const target = approvals.length ? $('approvals-card') : $('decisions-card');
     if (!target) return;
     target.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1222,7 +1603,9 @@
       await Promise.all([
         api('/api/agents'), api('/api/tasks'), api('/api/runs'), api('/api/threads'),
         api('/api/approvals'), api('/api/audit'), api('/api/inbox'), api('/api/dashboard'),
-        api('/api/bridge/status'), api('/api/recurring'), api('/api/quotas'), api('/api/change-requests'),
+        // 桥接状态只用于画面板；读不到就按「没有桥接」渲染，绝不让它把整个看板初始化拖黑
+        // （2026-11-18 真机：桥接关死后 503 冲进 Promise.all，任务卡区整块消失）。
+        api('/api/bridge/status').catch(() => null), api('/api/recurring'), api('/api/quotas'), api('/api/change-requests'),
         // 观测与调参失败不该把整个看板拖黑，单独兜底成 null。
         api('/api/observe').catch(() => null), api('/api/config/tuning').catch(() => null),
         // P6：老实例没有这两个端点，读不到就当没有，不影响其它面板。
@@ -1302,6 +1685,8 @@
   }
 
   $('refresh-btn').addEventListener('click', () => refresh().catch((e) => say('request-msg', false, e.message)));
+  // 顶栏的红点按钮 = 待办入口：点一下滚到审批坞 / 待决策卡。这里是常驻绑定（不再每次重绘重绑）。
+  $('pending-jump').addEventListener('click', jumpToPending);
 
   // 总经理会话换新：只影响下一轮投递，不打断正在跑的卡（adapter 里按会话排队）。
   $('agents-list').addEventListener('click', (e) => {
@@ -1317,8 +1702,33 @@
 
   // P6：看结果。用事件委托，避免每次重绘都要重新绑一堆 onclick。
   $('tasks-list').addEventListener('click', (e) => {
+    // 「看全部 / 只看最近」：任务卡默认只列最近 12 张，别把看板当流水账。
+    const toggle = e.target.closest('button[data-toggle-tasks]');
+    if (toggle) { showAllTasks = !showAllTasks; renderTasks(); return; }
     const btn = e.target.closest('button[data-result]');
     if (btn) { openResult(btn.dataset.result).catch((err) => { $('result-text').textContent = err.message; }); return; }
+    // 手动重派：先按「不打断」试一次；只有卡真的绑着一趟 Run 时，才问人要不要强行打断。
+    // 不直接上 force，是为了避免手滑把正在正常干活的卡掐掉。
+    const redo = e.target.closest('button[data-redispatch]');
+    if (redo) {
+      const id = redo.dataset.redispatch;
+      const send = (force) => post('/api/tasks/' + encodeURIComponent(id) + '/redispatch', {
+        reason: '看板手动重派', force,
+      }).then((r) => {
+        if (r && r.ok) {
+          say('request-msg', true, '已重派：' + short(id) + '（' + (r.from || '') + ' → 排队）');
+          return refresh();
+        }
+        if (r && r.code === 'RUNNING' && !force
+          && confirm((r.message || '这张卡正在跑。') + '\n\n要打断这一趟、让它从头再跑吗？')) {
+          return send(true);
+        }
+        say('request-msg', false, (r && r.message) || '重派失败');
+        return null;
+      }).catch((err) => say('request-msg', false, '重派失败：' + err.message));
+      send(false);
+      return;
+    }
     const cancel = e.target.closest('button[data-cancel]');
     if (cancel) {
       if (!confirm('取消这张卡？卡上的产物会保留，只是不再往下推进。')) return;
@@ -1547,42 +1957,68 @@
     } catch (err) { say('change-msg', false, err.message); }
   });
 
-  const demoJob = {
-    schema: 'aicompany.recurring/v1',
-    jobId: 'JOB-demo-brief', jobVersion: 1,
-    title: '每日简报巡检（演示）', kind: 'brief',
-    owner: 'ceo', assignee: 'worker-01', reportsTo: 'ceo', status: 'active',
-    trigger: { type: 'cron', rrule: 'FREQ=DAILY;BYHOUR=9;BYMINUTE=0', timezone: 'UTC' },
-    misfirePolicy: 'run_once', misfireGraceMin: 720, overlapPolicy: 'skip',
-    termination: { validUntil: null, maxCycles: 30, pauseOnConsecutiveFailures: 3, budgetTotal: { quotaUnits: 100 } },
-    requiresHumanEachCycle: false,
-    taskTemplate: {
-      role: 'general', instructions: '汇总今日状态并输出简报。',
-      acceptance: ['completion.json 通过 schema 校验且 status = success'],
-      completionReportPath: 'output/completion.json',
-    },
-    carryOver: { enabled: true, maxItems: 20, injectField: 'input.previousFindings' },
-    dedupeWindowMin: 1, lastCycleNo: 0,
-  };
-
-  $('job-register').addEventListener('click', async () => {
+  // 定时下达：填一句需求 + 选个时间，到点才建卡（避开白天用机 / 低峰计费窗）。
+  // 这里只负责收集，翻译成循环任务由服务端做（src/schedule-request.js，与命令行同一份逻辑）。
+  $('schedule-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = $('sched-text').value.trim();
+    const time = $('sched-time').value;
+    const date = $('sched-date').value;
+    if (!text) { say('sched-msg', false, '先写一句「到点要它做什么」。'); return; }
+    if (!time) { say('sched-msg', false, '选个时间（默认 02:30）。'); return; }
+    // 选了过去的日期会被引擎当成「迟到」，下一秒就开跑 —— 那不是排班，所以当场拦住。
+    if (date) {
+      const at = new Date(date + 'T' + time + ':00');
+      if (at.getTime() < Date.now() - 60 * 1000) {
+        say('sched-msg', false, '这个时间已经过去了：换个时间，或把日期留空（会排到最近一次该时刻）。');
+        return;
+      }
+    }
+    const btn = $('sched-btn');
+    btn.disabled = true;
     try {
-      const r = await post('/api/recurring', demoJob);
-      say('job-msg', true, '已注册 ' + r.jobId + '，下一次触发 ' + (r.nextFireAt || '—'));
+      const r = await post('/api/schedule', {
+        text,
+        at: time,
+        date: date || null,
+        project: $('sched-project').value || null,
+        assignee: $('sched-to').value || 'ceo',
+        reviewBy: $('sched-review').value || null,
+      });
+      say('sched-msg', true, '排上了：' + (r.title || r.jobId) +
+        '｜下次 ' + fmtAt(r.nextFireAt) + '（到点才建卡；那时若正忙，会排队等）');
+      $('sched-text').value = '';
       await refresh();
-    } catch (err) { say('job-msg', false, err.message); }
+    } catch (err) {
+      say('sched-msg', false, '没排上：' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
-  $('job-fire').addEventListener('click', async () => {
+  // 列表上的三个动作：先别跑 / 恢复 / 现在就跑一次（循环任务与一次性定时共用一套）。
+  $('plan-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-sched]');
+    if (!btn) return;
+    const action = btn.dataset.sched;
+    if (action === 'fire' && !confirm('现在就跑一次？会立刻建卡交给公司，不等时间。')) return;
+    btn.disabled = true;
     try {
-      const id = $('job-id').value.trim() || (state.recurring[0] && state.recurring[0].jobId);
-      if (!id) throw new Error('填 jobId，或先注册一个循环任务。');
-      const r = await post('/api/recurring/' + encodeURIComponent(id) + '/fire', {});
-      say('job-msg', true, r.created
-        ? '已实例化第 ' + r.cycleNo + ' 轮：' + r.taskId
-        : '未建卡：' + (r.reason || '被判定闸拦下'));
+      const jobId = encodeURIComponent(btn.dataset.id);
+      if (action === 'fire') {
+        await post('/api/recurring/' + jobId + '/fire', {});
+        say('sched-msg', true, '已立刻触发一轮，卡马上进队列。');
+      } else {
+        await post('/api/recurring/' + jobId + '/' + action,
+          { reason: action === 'pause' ? '董事会手动暂停' : '董事会手动恢复' });
+        say('sched-msg', true, action === 'pause' ? '已暂停：到点不会跑了。' : '已恢复：按时间跑。');
+      }
       await refresh();
-    } catch (err) { say('job-msg', false, err.message); }
+    } catch (err) {
+      say('sched-msg', false, '操作失败：' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // P4：卡片里的按钮用事件委托，列表重渲染也不会丢监听。

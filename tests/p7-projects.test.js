@@ -64,7 +64,7 @@ test('P7-1 · 项目配置：id 必须是安全目录名；rootDir 必须绝对�
 
   const bad = [
     [['projects:', '  ../evil:', '    displayName: x'], /项目 id/],
-    [['projects:', '  demo:', '    rootDir: benny/out'], /绝对路径/],
+    [['projects:', '  demo:', '    rootDir: demo/out'], /绝对路径/],
     [['projects:', '  demo:', '    deliverSubdir: D:/elsewhere'], /相对子目录/],
     [['projects:', '  demo:', '    deliverSubdir: ../out'], /相对子目录/],
     [['projects:', '  demo:', '    memoryLimit: 999'], /0–50/],
@@ -153,10 +153,10 @@ function company(root, { projects = null, reportMode = null, lessons = null } = 
             // 模拟「聊天窗口型助手」交差：产物 + 三/五字段的极简报告（可选带经验）
             simulation: {
               onSend: async ({ paths }) => {
-                fs.writeFileSync(path.join(paths.outputDir, 'note.md'), '译文内容', 'utf8');
+                fs.writeFileSync(path.join(paths.outputDir, 'note.md'), '交付文本内容', 'utf8');
                 fs.writeFileSync(path.join(paths.taskDir, 'report.draft.json'), JSON.stringify({
-                  status: 'success', summary: '译完一章，产物是 output/note.md',
-                  ...(lessons ? { lessons, nextHints: ['先核对章节号再动笔'] } : {}),
+                  status: 'success', summary: '处理完一章，产物是 output/note.md',
+                  ...(lessons ? { lessons, nextHints: ['先核对编号再动笔'] } : {}),
                 }), 'utf8');
               },
             },
@@ -174,13 +174,13 @@ function company(root, { projects = null, reportMode = null, lessons = null } = 
               const paths = buildTaskPaths(root, ctx.task.taskId);
               fs.mkdirSync(paths.outputDir, { recursive: true });
               const file = path.join(paths.outputDir, 'note.md');
-              fs.writeFileSync(file, '译文内容', 'utf8');
+              fs.writeFileSync(file, '交付文本内容', 'utf8');
               const feed = ctx.adapterConfig.memoryFeed;
               return {
                 schema: 'aicompany.completion/v1',
                 taskId: ctx.task.taskId, runId: ctx.runId, agent: 'worker-01',
                 revision: ctx.task.revision, status: 'success',
-                summary: '译完一章，产物是 output/note.md',
+                summary: '处理完一章，产物是 output/note.md',
                 artifacts: ['output/note.md'],
                 checksum: { 'output/note.md': sha256File(file) },
                 acceptanceResults: [{ rule: '产物非空', pass: true }],
@@ -205,12 +205,12 @@ test('P7-3 · 直投单 done 后落一条记忆：元数据由引擎补，员工
   // 员工在记忆供料里夹带 taskId / project：都不该进库
   cfg.agents[1].adapter.config.memoryFeed = {
     lessons: ['长文一次贴 3000 字会崩，要分段'],
-    nextHints: ['先要术语表再动笔'],
+    nextHints: ['先要词条表再动笔'],
     taskId: 'T-FAKE', project: 'hacked',
   };
   const db = openDb(':memory:');
   const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
-  const r = await engine.submit({ text: '译第三章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
+  const r = await engine.submit({ text: '处理第三章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
 
   assert.equal(r.project, 'demo');
   assert.equal(db.prepare('SELECT project FROM tasks WHERE taskId = ?').get(r.taskId).project, 'demo');
@@ -237,7 +237,7 @@ test('P7-3 · 记忆字段不合法就不入库：只留审计，库里一条不
   cfg.agents[1].adapter.config.memoryFeed = { lessons: '不是数组（写花了）' };
   const db = openDb(':memory:');
   const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
-  await engine.submit({ text: '译第四章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
+  await engine.submit({ text: '处理第四章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
 
   assert.equal(readRecentMemory(root, 'demo', { limit: 5 }).count, 0, '校验不过一律不入库');
   const rejected = engine.getAudit().filter((a) => a.action === 'memory_rejected');
@@ -252,20 +252,20 @@ test('P7-3 · 记忆字段不合法就不入库：只留审计，库里一条不
 
 test('P7-2 / P7-4 · brief：规范全文 + 上一单的教训都进提示词，第一单没有「相关经验」', async (t) => {
   const root = tmpRoot(t);
-  writeSpec(root, 'demo', '# 这行是写给人看的注释\n术语表必须在 input/术语表.md；段落数必须与原文一致。');
+  writeSpec(root, 'demo', '# 这行是写给人看的注释\n词条表必须在 input/词条表.md；段落数必须与原文一致。');
   const cfg = company(root, {
     projects: { demo: { displayName: '演示' } }, reportMode: 'draft',
-    lessons: ['豆包会把章节号写错'],
+    lessons: ['豆包会把编号写错'],
   });
   const db = openDb(':memory:');
   const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
 
   // 第一单：brief 里只有规范，没有「相关经验」
-  const first = await engine.submit({ text: '译第一章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
+  const first = await engine.submit({ text: '处理第一章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
   assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(first.taskId).status, 'done');
   const firstBrief = fs.readFileSync(path.join(root, 'tasks', first.taskId, 'brief.md'), 'utf8');
   assert.match(firstBrief, /【项目规范】/, '规范必须进 brief');
-  assert.match(firstBrief, /术语表必须在 input\/术语表\.md/);
+  assert.match(firstBrief, /词条表必须在 input\/词条表\.md/);
   assert.equal(/这行是写给人看的注释/.test(firstBrief), false, '规范里的注释不进提示词（只留生效的键值）');
   assert.equal(/【相关经验】/.test(firstBrief), false, '还没有记忆时这一节要省略，不能留空标题');
   assert.ok(firstBrief.indexOf('【项目规范】') < firstBrief.indexOf('【硬性要求'), '规范要排在硬性要求之前');
@@ -273,15 +273,15 @@ test('P7-2 / P7-4 · brief：规范全文 + 上一单的教训都进提示词，
   // 员工交差时顺路带回经验（draft 的可选字段）
   const taskDir = path.join(root, 'tasks', first.taskId);
   fs.writeFileSync(path.join(taskDir, 'report.draft.json'), JSON.stringify({
-    status: 'success', summary: '第一章译完', lessons: ['豆包会把章节号写错'], nextHints: ['先核对章节号'],
+    status: 'success', summary: '第一章处理完', lessons: ['豆包会把编号写错'], nextHints: ['先核对编号'],
   }), 'utf8');
 
   // 第二单：brief 里应该出现第一单的教训
-  const second = await engine.submit({ text: '译第二章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
+  const second = await engine.submit({ text: '处理第二章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
   const secondBrief = fs.readFileSync(path.join(root, 'tasks', second.taskId, 'brief.md'), 'utf8');
   assert.match(secondBrief, /【相关经验】/);
-  assert.match(secondBrief, /豆包会把章节号写错/);
-  assert.match(secondBrief, /先核对章节号/);
+  assert.match(secondBrief, /豆包会把编号写错/);
+  assert.match(secondBrief, /先核对编号/);
   db.close();
 });
 
@@ -314,7 +314,7 @@ test('P7-1 · 子卡继承父卡的项目：CEO 拆活不会把活拆出项目�
   cfg.interaction.defaultMode = 'delegate';
   const db = openDb(':memory:');
   const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
-  const r = await engine.submit({ text: '译第五章', mode: 'delegate', project: 'demo' });
+  const r = await engine.submit({ text: '处理第五章', mode: 'delegate', project: 'demo' });
 
   const rows = db.prepare('SELECT taskId, parentTaskId, project, assignee FROM tasks ORDER BY rowid').all();
   assert.equal(rows.length, 2, '父卡 + CEO 派出的子卡');
@@ -419,18 +419,18 @@ test('P7-11 · 建项目用 CEO 拟好的规范：董事会只审不填，通过
   const config = {};
   const out = createProject({
     config, workRoot: root, id: 'demo2', displayName: '演示二',
-    deliverSubdir: '04-译稿',
-    acceptance: ['44 章全部译完', '术语表前后一致'],
-    rules: ['文件名用 04-译稿/第NN章.md', '不许改动原文目录'],
+    deliverSubdir: '04-out',
+    acceptance: ['44 批全部处理完', '词条表前后一致'],
+    rules: ['文件名用 04-out/docNN.md', '不许改动源文件目录'],
   });
   const spec = fs.readFileSync(out.specPath, 'utf8');
-  assert.match(spec, /44 章全部译完/, '验收条件要原样写进规范');
-  assert.match(spec, /术语表前后一致/);
-  assert.match(spec, /04-译稿\/第NN章\.md/, '固定规矩要原样写进规范');
+  assert.match(spec, /44 批全部处理完/, '验收条件要原样写进规范');
+  assert.match(spec, /词条表前后一致/);
+  assert.match(spec, /04-out\/docNN\.md/, '固定规矩要原样写进规范');
   assert.doesNotMatch(spec, /产物落在约定目录，且内容非空/, 'CEO 给了验收条件就不该用空白模板');
   assert.match(spec, /displayName: 演示二/);
-  assert.match(spec, /deliverSubdir: 04-译稿/);
-  assert.equal(config.projects.demo2.deliverSubdir, '04-译稿');
+  assert.match(spec, /deliverSubdir: 04-out/);
+  assert.equal(config.projects.demo2.deliverSubdir, '04-out');
 });
 
 test('P7-12 · 卡上写了还不存在的项目：父卡挂起等审批，一张子卡都不许建（白批事故回归）', async (t) => {
@@ -442,10 +442,10 @@ test('P7-12 · 卡上写了还不存在的项目：父卡挂起等审批，一�
   cfg.agents[0].adapter.config.result = (ctx) => (ctx.wakeReason === 'review_requested'
     ? { type: 'review', verdict: 'pass', reason: '通过' }
     : {
-      type: 'task-create', summary: '归 yitai',
-      projectSuggestion: { id: 'yitai', displayName: '译台', reason: '长期项目' },
+      type: 'task-create', summary: '归 demo-editor',
+      projectSuggestion: { id: 'demo-editor', displayName: '外部编辑器', reason: '长期项目' },
       tasks: [{
-        title: '接管仓库', assignee: 'worker-01', project: 'yitai',
+        title: '接管仓库', assignee: 'worker-01', project: 'demo-editor',
         instructions: '读仓库并出基线', acceptance: ['产物非空'],
       }],
     });
@@ -456,7 +456,7 @@ test('P7-12 · 卡上写了还不存在的项目：父卡挂起等审批，一�
     const out = createProject({ config: cfg, workRoot: root, ...payload.project });
     return { project: out.project };
   });
-  await engine.submit({ text: '接管译台', mode: 'delegate' });
+  await engine.submit({ text: '接管外部编辑器', mode: 'delegate' });
 
   const parent = db.prepare('SELECT taskId, status FROM tasks WHERE parentTaskId IS NULL').get();
   assert.equal(parent.status, 'awaiting_decision', '项目没批，父卡必须挂起等董事会');
@@ -468,7 +468,7 @@ test('P7-12 · 卡上写了还不存在的项目：父卡挂起等审批，一�
   // 董事会通过 → 真建项目，并把父卡放出来重拆（不批就永远停着）。
   const decided = engine.decideApproval(ap.approvalId, { decision: 'approved', decidedBy: 'board' });
   assert.equal(decided.applied, true, decided.error ?? '');
-  assert.ok(cfg.projects.yitai, '通过之后项目才存在');
+  assert.ok(cfg.projects['demo-editor'], '通过之后项目才存在');
   assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(parent.taskId).status, 'in_progress',
     '父卡要被放出来，否则批了也接不上');
   const wake = db.prepare("SELECT payloadJson FROM events WHERE taskId = ? AND type = 'issue_assigned' ORDER BY rowid DESC LIMIT 1").get(parent.taskId);
@@ -505,15 +505,15 @@ test('P7-13 · 项目被拒：父卡放出来按一次性任务跑，不会永�
 
 test('P7-14 · 只排班不派卡：tasks 空数组不建空壳卡，批了才进调度器', async (t) => {
   const root = tmpRoot(t);
-  writeSpec(root, 'yitai');
-  const cfg = company(root, { projects: { yitai: { displayName: '译台' } } });
+  writeSpec(root, 'demo-editor');
+  const cfg = company(root, { projects: { 'demo-editor': { displayName: '外部编辑器' } } });
   cfg.interaction.defaultMode = 'delegate';
   cfg.agents[0].adapter.config.result = (ctx) => (ctx.wakeReason === 'review_requested'
     ? { type: 'review', verdict: 'pass', reason: '通过' }
     : {
-      type: 'task-create', summary: '为 yitai 排运行节奏',
+      type: 'task-create', summary: '为 demo-editor 排运行节奏',
       recurringSuggestion: {
-        title: '译台每周体检', project: 'yitai',
+        title: '外部编辑器每周体检', project: 'demo-editor',
         rrule: 'FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=0',
         assignee: 'worker-01', kind: 'inspection',
         instructions: '按 MAINTENANCE-PLAN 1.2 做每周体检',
@@ -525,7 +525,7 @@ test('P7-14 · 只排班不派卡：tasks 空数组不建空壳卡，批了才�
 
   const db = openDb(':memory:');
   const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
-  await engine.submit({ text: '给 yitai 排节奏', mode: 'delegate' });
+  await engine.submit({ text: '给 demo-editor 排节奏', mode: 'delegate' });
 
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE parentTaskId IS NOT NULL').get().n, 0,
     '只排班不该建出干活的卡（tasks:[] 不能被当成「把整个结果当一张卡」）');
@@ -534,7 +534,7 @@ test('P7-14 · 只排班不派卡：tasks 空数组不建空壳卡，批了才�
   const ap = db.prepare("SELECT approvalId, requestJson FROM approvals WHERE kind = 'recurring_create'").get();
   assert.ok(ap, '要出循环任务审批单');
   const payload = JSON.parse(ap.requestJson).payload;
-  assert.equal(payload.job.project, 'yitai', '排班必须带回项目归属');
+  assert.equal(payload.job.project, 'demo-editor', '排班必须带回项目归属');
   assert.equal(payload.job.assignee, 'worker-01');
   assert.equal(payload.job.trigger.rrule, 'FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=0');
   assert.equal(payload.rruleText, '每周一 20:00', '董事会要看人话，不是 rrule');
@@ -550,7 +550,7 @@ test('P7-14 · 只排班不派卡：tasks 空数组不建空壳卡，批了才�
   assert.equal(decided.applied, true, decided.error ?? '');
   const jobs = db.prepare('SELECT jobId, status, jobJson FROM recurring_jobs').all();
   assert.equal(jobs.length, 1, '批了才真排班');
-  assert.equal(JSON.parse(jobs[0].jobJson).project, 'yitai');
+  assert.equal(JSON.parse(jobs[0].jobJson).project, 'demo-editor');
   assert.equal(jobs[0].status, 'active');
   db.close();
 });

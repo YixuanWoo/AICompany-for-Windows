@@ -4,7 +4,7 @@
 //   npm run task -- "写一份本周工作简报"
 //   npm run task -- "把 output 里的周报改成 200 字" --wait
 //   npm run task -- "这个难活" --difficulty hard --to doubao
-//   npm run task -- "把第三章译完" --project benny --wait
+//   npm run task -- "把第三批文档处理完" --project demo --wait
 //
 // 为什么要有它：控制面已经有 REST 接口，但「天天用」的门槛是**记不住 curl 和字段**。
 // 这里只做三件事：拼请求、打印任务号、可选地等到出结果并把产物摘要打出来。

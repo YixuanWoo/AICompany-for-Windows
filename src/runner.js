@@ -12,6 +12,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveProfile } from './profiles.js';
+import { bootAtSeconds } from './gui-seat.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_SHARD_BYTES = 8 * 1024 * 1024;
@@ -96,6 +97,7 @@ export function writePid(runDir, info) {
   const safe = {
     pid: info.pid,
     runnerPid: info.runnerPid,
+    bootAt: info.bootAt ?? bootAtSeconds(),
     startedAt: info.startedAt,
     reasonCode: info.reasonCode ?? 'unknown',
     port: Number(info.port ?? 0) || null,
@@ -118,14 +120,21 @@ export function isAlive(pid) {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    // Windows 上对「别人起的同权限进程」可能抛 EPERM，那也说明它活着。
-    return error.code === 'EPERM';
+    // 2026-11-19 真机：重启后旧 pid 被系统进程（svchost）复用，`kill` 对它抛 EPERM。
+    // 老代码把 EPERM 当「它还活着」，于是去 kill 一个系统进程（必然 EPERM 失败），
+    // 还顺手让控制面以为席位被占。EPERM 的真实含义是「这不是我能管的进程」，
+    // 对「我自己的 node 进程」来说就意味着它不是我的 —— 判死。
+    return false;
   }
 }
 
 export function runningInfo(runDir) {
   const info = readPid(runDir);
   if (!info) return { running: false, reason: '没有 pid 文件' };
+  // 跨开机的 pid 文件一律作废：同一个号在重启后可能属于任何进程，留着它只会骗自己。
+  if (Number.isInteger(info.bootAt) && Math.abs(info.bootAt - bootAtSeconds()) > 120) {
+    return { running: false, reason: `pid 文件是上一次开机（${info.pid}）留下的，作废`, stale: true, info };
+  }
   if (!isAlive(info.pid)) return { running: false, reason: `pid ${info.pid} 已不在`, stale: true, info };
   return { running: true, info };
 }

@@ -19,11 +19,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CEO_OUTPUT_KINDS } from './enums.js';
 import {
-  DEFAULT_SESSION_POLICY, ensureCeoSession, recordSessionTurn, withSessionLock,
+  DEFAULT_SESSION_POLICY, ensureCeoSession, recordSessionTurn, rotateCeoSession, withSessionLock,
 } from './ceo-session.js';
 import { listOutputFiles } from './deliver.js';
-import { seatBriefing, ceoRoutingBriefing } from './org-chart.js';
+import { seatBriefing, ceoRoutingBriefing, taskIntakeBriefing } from './org-chart.js';
 import { describeRepo } from './repos.js';
+import { writeDispatchReceipt, writeRunHeartbeat } from './evidence.js';
 
 const DEFAULT_BASE = 'http://127.0.0.1:8080';
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;   // agent 干活最久 15 分钟
@@ -113,11 +114,19 @@ function buildPrompt(ctx) {
   const lines = [];
   // 身份先讲：不知道「我是谁、上级是谁、能派给谁」的席位，会默认自己是全公司唯一的人。
   // 这段全部来自配置（company.yaml 的 posts），换人 / 加岗不用改代码。
-  const org = seatBriefing(
-    { agents: ctx.company?.agents ?? [] },
-    ctx.agent?.id,
-    { repos: ctx.repos ?? null, artifacts: ctx.artifacts ?? null },
-  );
+  // 引擎已统一算好 ctx.briefing（身份 → 第0步先判断 → 派活手段）；这里保留自拼回退供单测用。
+  const org = ctx.briefing || [
+    seatBriefing(
+      { agents: ctx.company?.agents ?? [] },
+      ctx.agent?.id,
+      { repos: ctx.repos ?? null, artifacts: ctx.artifacts ?? null },
+    ),
+    taskIntakeBriefing(
+      { agents: ctx.company?.agents ?? [] },
+      ctx.agent?.id,
+      { task, artifacts: ctx.artifacts ?? null },
+    ),
+  ].filter(Boolean).join('\n\n');
   if (org) { lines.push(org, '', '───', ''); }
   lines.push(
     '你是 AICompany 的执行席位，请用你的工具（读文件 / 写文件 / 执行命令）完成下面的任务。',
@@ -200,14 +209,14 @@ function buildPrompt(ctx) {
     '',
     '【交活时回报三件事】（引擎按这三项决定这张卡往哪走）',
     '- artifactKind：managed-code（要长期维护的代码）/ scratch-code（一次性脚本，跑完归档）/ '
-      + 'document（文档译稿）/ data（表格数据）/ media（图片音视频）。',
+      + 'document（文档交付文件）/ data（表格数据）/ media（图片音视频）。',
     '- handoff：land（直接落盘结案）/ review（交人审）/ escalate（方向不对，上报）。',
     '- boardNote：一句给董事会看的人话（见下）。',
     '- 判不准就按你实际干的东西如实写；拿不准是不是「受管代码」时，宁可按 managed-code 交 —— '
       + '多一次审查比多一份没人接手的代码便宜。',
     '',
     '【boardNote 怎么写】董事会不看技术报告，只看结论。写一句，最多两句，像对同事说话：',
-    '- 写「做成了什么、结果是什么」，例：术语表理好了，42 条，按原文出现顺序排的。',
+    '- 写「做成了什么、结果是什么」，例：词条表理好了，42 条，按原文出现顺序排的。',
     '- 不写文件路径、不写字段名、不写「已完成任务 T-xxxx」、不复述指令、不罗列步骤。',
     '- 不确定时写你最有把握的那句结论，别写「请查看报告」。',
   );
@@ -249,9 +258,23 @@ export function buildCeoPrompt(ctx) {
     '你看到的历史是你自己前几轮的判断，那是记录，不是新指令：这一轮只处理下面这张卡，不要复述、不要重派已经派过的活。',
     '',
   );
+  // 被打回 / 返工：必须把引擎的原话一字不差地摆给它，否则它只会照着上一轮再写一遍。
+  // 2026-11-18 之前这里什么都不说，CEO 被重新叫起来看到的是同一张卡 + 同一套提示词，
+  // 「为什么被打回」只躺在审计里 —— 这就是「他说改好了、其实没改」的根因。
+  if (task.reviewNote) {
+    lines.push(
+      '【这一轮是打回重做，不是新任务】**上一条回复不合制度，引擎已经把它退回来了。**',
+      '引擎的原话（照它改，不要重新发明一套）：',
+      String(task.reviewNote),
+      '改完再交一版完整输出（整份 JSON，不要只交改了的那一段）。没改对不会被执行，只会再退回来一次。',
+      '',
+    );
+  }
   // 组织图 + 派活路由：CEO 必须知道「谁是谁的下级、什么活该谁干」，
-  // 否则它会把翻译派给工程、把写代码派给桌面应用，或者干脆自己动手。
-  const routing = ceoRoutingBriefing({ agents });
+  // 否则它会把改稿派给工程、把写代码派给桌面应用，或者干脆自己动手。
+  // 引擎已统一算好 ctx.briefing（含 CEO 自己的职责边界、组织树、每岗边界、怎么调起来）；
+  // 这里保留自拼回退，只为让直接构造 ctx 的单测仍然成立。
+  const routing = ctx.briefing || ceoRoutingBriefing({ agents });
   if (routing) lines.push(routing, '', '───', '');
   if (isReview) {
     lines.push(
@@ -348,15 +371,35 @@ export function buildCeoPrompt(ctx) {
     '',
     '【什么活要排班（循环任务）】',
     '你自己判断：这活**不是干一次就完**，而是「每周/每月都得再来一遍」的，就该排班。典型：定期体检、定期巡检、定期清理、定期出简报。',
-    '排班不是你的权限，是董事会的决定：你写 "recurringSuggestion"，董事会看「多久一次 / 干什么 / 谁干 / 谁审 / 烧多少」后决定通不通过。',
+    '你有**「提」的权，没有「直接排」的权**：写 "recurringSuggestion"，董事会看「多久一次 / 干什么 / 谁干 / 谁审 / 烧多少」后决定通不通过。',
     '- 一次最多提 3 条，别把每件小事都排班；一次能干完的活不要提排班。',
     '- rrule 用标准写法，例：每周一 20:00 → "FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=0"；每天 09:30 → "FREQ=DAILY;BYHOUR=9;BYMINUTE=30"；每月 1 号 10:00 → "FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=10;BYMINUTE=0"。',
     '- instructions 要写成「每一轮照着做就能做完」的自足说明（不要写「同上」「按上次」）；acceptance 每轮都要能判死。',
     '- 已有项目里的长期工作，一定要写 project，否则那一轮产物不归这个项目。',
-    '- **每一轮由谁审，你必须写明 reviewBy**：日常巡检 / 体检 / 清理 / 例行简报 → "engineering"（工程岗），'
-      + '这类活审的是「有没有照做、数字对不对」，不是方向，不要每轮都来惊动你自己；'
-      + '只有会动方向 / 对外承诺 / 技术路线的长期任务，才写 "ceo"（你自己审）或 "human"（请董事会），'
-      + '并在 reviewNote 里说清「为什么这个必须我看」。不写就默认工程岗；写成执行人自己会被拒单。',
+    '- **你只定三件事：这活是什么、多久一次、（可选）谁来干**。'
+      + '日常巡检 / 体检 / 清理 / 例行简报要写 "assignee"（指向下级执行席位，例如执行席），**不要点你自己**——'
+      + '点自己等于你每轮亲自下场，那还要员工干什么。',
+    '- **谁来审不用你写**：审查人由引擎按「执行人的上级」自动定（日常巡检自然落到工程岗）；'
+      + '万一撞到执行人自己，引擎会自动往上抬一级，不会拒单，也不会来烦你。'
+      + '只有会动方向 / 对外承诺 / 技术路线的长期任务，才显式写 "reviewBy":"ceo" 或 "human"，'
+      + '并在 reviewNote 里说清「为什么这个必须我看」。',
+    '- **别把「该由下级做的技术判断」写死在你这里**：像「按什么节奏跑、跑哪几项、怎么算过」这类细节，'
+      + '可以派一张卡给中层（instructions 写「由你定这个月度计划的具体内容与判定口径」），'
+      + '让他定完再回来；但你也可以直接把这三件事写清 —— 只要不越界写技术工序。',
+    '',
+    '【回执：什么才算「真的安排上了」】',
+    '- 你的建议只是**申请**。只有董事会通过并注册后，库里才会出现 "JOB-xxx"；没通过之前只有审批单 "AP-xxx"。',
+    '- 所以回话时必须说实话：「已提交申请，等董事会点头」（拿到 AP 号就报上）／「已排上班，任务号 JOB-xxx」／'
+      + '「引擎打回了，原因是……，我改成……」。**没拿到任何号，就不许说「已经安排好了」。**',
+    '- 引擎打回你时会把「违反了哪条、为什么、正确怎么写」原样贴在下一轮开头，照着改就行，不要自己猜。',
+    '',
+    '【有些活只做一次，但得等到某个时间点再做（一次性定时）】',
+    '别把它排成循环——「视频发完第二天复盘」这种活每周再来一遍纯属烧额度。',
+    '写法：还是 "recurringSuggestion"，但**写 at 不写 rrule**，系统按「只跑一次」处理：到点建一张卡，跑完自动结束。',
+    '- at 写 "2026-11-18 21:30"（最好带日期）；只写时间 "21:30" ＝最近那一次（今天已过就明天）。',
+    '- 同样要给 instructions（一次干完的完整说明）、acceptance、reviewBy、reason；不要写 rrule / maxCycles。',
+    '- 判定口径：**同一件事以后还会反复做 → rrule；做一次就完、只是要等时机 → at**。',
+    '- 一次性定时同样要董事会点头，你只提、不自建。',
     '',
     '【先判断：这条到底要不要派卡】',
     '不是每条消息都是活。下面这些**直接回话，不要派卡**：',
@@ -366,14 +409,31 @@ export function buildCeoPrompt(ctx) {
     '- 你手上的信息（项目清单、近期记忆、审计）已经够答，不需要员工动手。',
     '这类**不派卡**：type 照写 task-create，把 "tasks" 写成空数组 []，想说的话写进 summary（也可以另写 answer）。',
     '为一句「你好」派一张卡，等于让员工干一件没必要干的活，还占住席位。',
-    '反过来：只要这活**需要产出东西**（文件、译稿、脚本、报告、跑命令），就必须派卡，别用空 tasks 假装干完了。',
+    '反过来：只要这活**需要产出东西**（文件、交付文件、脚本、报告、跑命令），就必须派卡，别用空 tasks 假装干完了。',
     '这类回话不建卡、不进项目、不再唤醒你；答复会原样送到董事会面前。',
     '',
-    '【怎么拆：你只定「做什么、做到什么算完」】',
-    '- 你是总经理，不是工程组长：把任务是什么、归哪个项目、要什么结果说清，然后把活交给能独立交付的那一级。',
-    '- 默认交给工程岗一张「做成什么样」的卡，由它自己决定怎么拆实现、改哪些文件、跑什么命令 —— 那是它的判断，不是你的。',
-    '- 不要写实现步骤、不要指定技术选型、不要写代码；除非董事会明确要你先出方案。',
-    '- 一张卡能干完就别拆两张；只有跨工种（一边写代码、一边写文档/翻译）或确有先后依赖才拆，并在后一张写 after。',
+    '【怎么拆：你写的是验收单，不是施工图】',
+    '- 一句话标准：**你写「要什么」，工程岗写「怎么做」**。施工图由工程岗画 —— 它比你更清楚改哪儿、怎么改。',
+    '- instructions 只写四样，一段一句，别写成长篇：',
+    '  ① 要什么结果：描述用户/董事会能看到的变化（现象层），不要写实现；',
+    '  ② 边界：产物放哪、什么不许碰、什么不能改坏；',
+    '  ③ 已知事实：只写你真的知道的（哪台机器、哪个仓库、董事会原话里的现象）；',
+    '  ④ 拿不准的：明确写「由工程岗判断」，不要替它决定。',
+    '- **禁止写方法 / 工序**（这些属于工程岗的判断）：',
+    '  ✗「先复现再修」「先写失败断言」「定位到 文件:行」「跑 build.ps1 / npm test」'
+      + '「补 N 条断言」「不许删断言」「重构成 X 类」',
+    '  ✓ 换成结果口径：「修好后用户点一次就能跳过整段省略号」「改动不许降低既有测试覆盖」。',
+    '- **每张卡的 instructions 必须带一句授权**，原样写（这是承接人敢先判后做的凭据）：',
+    '  「技术方案与拆分由你定；拿不准先给判断再动手」。',
+    '  不写这句，承接人只有两条路：把你的写法当命令照抄，或者不敢自己判断、把卡原样顶回来。',
+    '- **验收条件 3–6 条，每条必须看一眼就能判过没过**；不要写成工序清单。'
+      + '真需要十几条，说明这活该拆成多张卡，而不是把一张卡写成 15 条验收。',
+    '- 你手里没有仓库内部细节，就别假装有：不知道改哪儿、改几处，就写「由工程岗判断」。',
+    '- **写方法是有代价的**：这张卡到工程岗后还要再拆给执行岗，你写的每一道工序都会被原样转发；'
+      + '方法写死，执行岗只会照抄，遇到岔路不会转向。你写结果，它才有判断空间。',
+    '- 交 JSON 前自检三问：①这句话是在说「要什么」还是「怎么做」？②删掉技术细节，验收还能不能判死？'
+      + '③工程岗读完能不能自己决定改哪、怎么改？（①是「要什么」、②③都是「能」才算写好）',
+    '- 一张卡能干完就别拆两张；只有跨工种（一边写代码、一边写文档）或确有先后依赖才拆，并在后一张写 after。',
     '- 把一件活切成五步流水账，等于提前替员工做完了判断，还把它绑死在你的方案上 —— 这是最常见的越界。',
     '- 每张卡写清三样：title（一句话）、instructions（要什么结果、产物放哪、什么不要碰）、acceptance（怎么算过，要能判死）。',
     '- difficulty 取 easy / normal / hard，按员工接得住的程度标。',
@@ -385,11 +445,12 @@ export function buildCeoPrompt(ctx) {
       + '"reason":"为什么值得单开","acceptance":["产物在哪个目录、怎么算过"],"rules":["必须遵守的规矩"]},'
       + '"recurringSuggestion":{"title":"这条循环任务叫什么","project":"项目id","rrule":"FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=0",'
       + '"timezone":"Asia/Shanghai","assignee":"岗位id","kind":"maintenance","instructions":"每一轮照着做的完整说明",'
-      + '"acceptance":["怎么算这一轮干完"],"reviewBy":"engineering","reviewNote":"日常巡检，工程岗看图看数就行",'
-      + '"reason":"为什么值得长期排班"},'
+      + '"acceptance":["怎么算这一轮干完"],"reason":"为什么值得长期排班"},'
+      + '   ← 排班的 reviewBy 可以不写：引擎按执行人的上级自动定；写错会被打回。'
       + '"tasks":[{"title":"...","assignee":"岗位id","difficulty":"normal","project":"项目id",'
       + '"repo":"仓库id（代码类活才写）","reviewBy":"engineering（代码类活写工程岗）",'
-      + '"instructions":"...","acceptance":["..."],"after":[1]}]}',
+      + '"instructions":"要什么结果、产物放哪、什么不许碰；技术方案与拆分由你定，拿不准先给判断再动手",'
+      + '"acceptance":["..."],"after":[1]}]}',
     '- summary / projectSuggestion / recurringSuggestion / 卡片里的 project 都可省略；',
     '- 需要派活时 tasks 至少一张；**只排班不派卡**时把 "tasks" 写成空数组 []（别硬凑一张干活的卡）。',
     '- **只回话**时：tasks 写 []，summary 写你的回话。写了 task-create 却没给任何一张带标题/指令的卡，也按回话处理（不会派活）。',
@@ -398,6 +459,10 @@ export function buildCeoPrompt(ctx) {
       + '凡是「后一张必须用上前一张的成果」（先接管再定计划、先写脚本再发布）就一定要写 after，'
       + '否则它们会并行，后一张会在前一张还没做完时就开始干。',
     '- 多条排班用 "recurringSuggestions":[{…},{…}]（复数，数组），单条用 "recurringSuggestion"。',
+    '- 只做一次、等某个时间点的活：同一个字段写 at，例 '
+      + '"recurringSuggestion":{"title":"复盘第 12 期视频","project":"项目id","at":"2026-11-18 21:30",'
+      + '"assignee":"岗位id","instructions":"...","acceptance":["..."],"reason":"..."}'
+      + '（不写 rrule 就是一次性，跑完自动结束）。',
     '- kind 取 maintenance（维护）/ inspection（巡检）/ cleanup（清理）/ brief（简报）。',
   );
   return lines.join('\n');
@@ -487,7 +552,14 @@ export function createWebhookExecAdapter(overrides = {}) {
     requestFn(base, endpoint, payload, { token: tk, timeoutMs: timeout });
 
   /** 投一棒并等这一轮结束：返回 { text, sessionId, turn }；出错抛异常（由调用方决定怎么收场）。 */
-  async function runTurn({ taskId, prompt, cwd, sessionId = null, config = {}, label = '' }) {
+  async function runTurn({
+    taskId, prompt, cwd, sessionId = null, config = {}, label = '',
+    workRoot = null, runId = null, agentId = null,
+    // 证据目录按「真任务号」写：CEO 一轮的 API 任务键带 -plan / -review 后缀（同一个会话
+    // 同一张卡要跑两轮，键不能重复），但看门狗找的是 workRoot/tasks/<taskId>/dispatch.json。
+    // 少了这一层映射，CEO 的长回合永远没有 L1/L2 证据，会被当成「没送到」误杀。
+    evidenceTaskId = null,
+  }) {
     const base = config.baseUrl ?? baseUrl;
     const tk = config.token ?? token;
     const budget = Number(config.timeoutMs ?? timeoutMs);
@@ -503,9 +575,19 @@ export function createWebhookExecAdapter(overrides = {}) {
     } catch (error) {
       throw new Error(`${label}投递失败：${error.message}`);
     }
+    // L1：服务端收下了这单，算「已接收」（不是「已开工」：真正干没干还得看 ack / 产物）。
+    const evTaskId = evidenceTaskId ?? taskId;
+    if (workRoot && evTaskId) {
+      writeDispatchReceipt({ workRoot, taskId: evTaskId, runId, agentId, via: 'webhook' });
+    }
     const deadline = Date.now() + budget;
     let last = null;
+    let polls = 0;
     while (Date.now() < deadline) {
+      polls += 1;
+      if (workRoot && evTaskId && polls % 5 === 0) {
+        writeRunHeartbeat({ workRoot, taskId: evTaskId, runId, polls, note: last?.status ?? null });
+      }
       let reply;
       try {
         reply = await call('/aiceo/api/result', { taskId }, Math.min(budget, 30000), base, tk);
@@ -543,6 +625,7 @@ export function createWebhookExecAdapter(overrides = {}) {
     try {
       done = await runTurn({
         taskId, prompt: buildPrompt(ctx), cwd: config.cwd ?? workRoot ?? null, config,
+        workRoot, runId: ctx.runId ?? null, agentId: ctx.agent?.id ?? ctx.agentId ?? null,
       });
     } catch (error) {
       return completion(ctx, 'failed', error.message);
@@ -572,22 +655,40 @@ export function createWebhookExecAdapter(overrides = {}) {
       ? ensureCeoSession(workRoot, agentId, policy)
       : { sessionId: null };
     // 一个会话同时只能跑一轮（否则服务端按 sessionId 收集文本会串台），这里排队。
-    const done = session.sessionId
-      ? await withSessionLock(session.sessionId, () => runTurn({
-        taskId: key,
-        prompt: buildCeoPrompt(ctx),
-        cwd: workRoot,
-        sessionId: session.sessionId,
-        config: { ...cfg, ...(ctx.adapterConfig ?? {}) },
-        label: 'CEO ',
-      }))
-      : await runTurn({
-        taskId: key,
-        prompt: buildCeoPrompt(ctx),
-        cwd: workRoot,
-        config: { ...cfg, ...(ctx.adapterConfig ?? {}) },
-        label: 'CEO ',
-      });
+    let done;
+    try {
+      done = session.sessionId
+        ? await withSessionLock(session.sessionId, () => runTurn({
+          taskId: key,
+          prompt: buildCeoPrompt(ctx),
+          cwd: workRoot,
+          sessionId: session.sessionId,
+          config: { ...cfg, ...(ctx.adapterConfig ?? {}) },
+          label: 'CEO ',
+          workRoot, runId: ctx.runId ?? null, agentId,
+          evidenceTaskId: ctx.task?.taskId ?? null,
+        }))
+        : await runTurn({
+          taskId: key,
+          prompt: buildCeoPrompt(ctx),
+          cwd: workRoot,
+          config: { ...cfg, ...(ctx.adapterConfig ?? {}) },
+          label: 'CEO ',
+          workRoot, runId: ctx.runId ?? null, agentId,
+          evidenceTaskId: ctx.task?.taskId ?? null,
+        });
+    } catch (error) {
+      // 2026-11-20 真机事故：上游那一轮卡死 20 分钟不返回（服务端还挂着 status=running，
+      // turn 0），客户端超时放弃后，下一趟再投**同一个会话**就会排在那条死任务后面 ——
+      // 回执永远不来，卡被反复判「没送到」。超时就换新会话，让重派能真开跑；
+      // 旧会话留给上游自己清，我们不再往里投。
+      if (workRoot && /超时/.test(String(error.message ?? ''))) {
+        try {
+          rotateCeoSession(workRoot, agentId, { reason: '上一轮超时未返回，换新会话再派', actor: 'system' });
+        } catch { /* 换不成也不影响上报，下一趟顶多再排一次队 */ }
+      }
+      throw error;
+    }
     const after = workRoot ? recordSessionTurn(workRoot, agentId, { taskId }) : null;
     const parsed = extractJsonObject(done.text, (value) => CEO_OUTPUT_KINDS.includes(value.type));
     if (!parsed) {

@@ -10,7 +10,7 @@ import path from 'node:path';
 import { openDb } from '../src/core.js';
 import { createEngine, createNotifier } from '../src/engine.js';
 import { normalizeRepos, assertRepo, findRepoForPath } from '../src/repos.js';
-import { seatBriefing, orgTreeLines } from '../src/org-chart.js';
+import { seatBriefing, orgTreeLines, delegationBriefing, taskIntakeBriefing, seatPreamble } from '../src/org-chart.js';
 import { buildTaskPaths, sha256File } from '../src/gui-report.js';
 
 function tmpRoot(t) {
@@ -55,7 +55,7 @@ function company(root, { report = {}, tasks = null } = {}) {
       {
         id: 'doubao', postTitle: '执行', isCEO: false,
         capabilities: ['execute'], status: 'active', quotaDaily: 99, reportsTo: 'engineering',
-        duties: '写文档、翻译', boundaries: ['不改代码仓库'],
+        duties: '写文档、改稿', boundaries: ['不改代码仓库'],
         adapter: {
           type: 'mock',
           config: {
@@ -135,6 +135,78 @@ test('R2 · 组织图与席位身份：豆包的上级是工程，工程的上�
   assert.match(eng, /永不 force push|force push/);
 });
 
+test('R2b · 管理岗的提示词必须给出「怎么派」的手段，执行岗不该有', (t) => {
+  const { cfg } = setup(t);
+  const eng = delegationBriefing(cfg, 'engineering', { workRoot: '/tmp/company' });
+  // 只写「你是管理岗、别自己干」不够：没有派活手段，它只能自己干（2026-11-17 真机）。
+  assert.match(eng, /你的活主要是「派」，不是「做」/);
+  assert.match(eng, /技术负责人（CTO）/);
+  assert.match(eng, /--assignee/);
+  assert.match(eng, /\/api\/bridge\/spawn/);
+  assert.match(eng, /doubao/);
+  assert.match(eng, /派给自己等于换个名字继续自己干/);
+  // 边界要「默认派 + 小改例外」，不能钉成零自做（董事会 2026-11-17 明确要求允许弹性）。
+  assert.match(eng, /单点小改/);
+  assert.match(eng, /留痕/);
+  assert.match(eng, /≤1 个文件、≤40 行/);
+  // 执行岗没有 delegate 能力：不该塞派活说明，免得它也去拆卡。
+  assert.equal(delegationBriefing(cfg, 'doubao'), '');
+});
+
+test('R2d · 每个席位开工前都有「第 0 步：先判断，再安排」', (t) => {
+  const { cfg } = setup(t);
+  // 「指令是命令句」不等于「必须照抄」：这一层以前全公司只有 CEO 有，而且判的是「要不要派卡」。
+  const eng = taskIntakeBriefing(cfg, 'engineering', { task: { difficulty: 'hard' } });
+  assert.match(eng, /第 0 步：先判断，再安排/);
+  assert.match(eng, /结果」还是「做法/);
+  assert.match(eng, /先判它对不对/);
+  assert.match(eng, /这事多大/);
+  assert.match(eng, /你做，还是派下去/);
+  // 大小尺子必须带数值，且明确「判不准按大处理」。
+  assert.match(eng, /≤1 个文件、≤40 行/);
+  assert.match(eng, /判不准就按「大」处理/);
+  // 小活可以自己做，但留痕（不是请示）。
+  assert.match(eng, /你自己做/);
+  assert.match(eng, /留痕，不是请示/);
+  // 派活要列得出下级；顶回去有正当通道，别拿 failed 当意见。
+  assert.match(eng, /派给下级/);
+  assert.match(eng, /change-requests\//);
+  assert.match(eng, /handoff=escalate/);
+  // 执行岗没有下级：给它的是「先出方案报上级」，不是「派下去」。
+  const doubao = taskIntakeBriefing(cfg, 'doubao');
+  assert.match(doubao, /没有可派的下级/);
+  assert.doesNotMatch(doubao, /派给下级/);
+});
+
+test('R2e · 统一入口：非 CEO 拿到「身份 + 第0步 + 派活」，CEO 只拿派活路由', (t) => {
+  const { cfg } = setup(t);
+  const eng = seatPreamble(cfg, 'engineering', { workRoot: '/tmp/company' });
+  assert.match(eng, /【你是谁】/);
+  assert.match(eng, /第 0 步：先判断，再安排/);
+  assert.match(eng, /--assignee/);
+  // 顺序必须是「身份 → 判断 → 派活」：先判断让位于身份是无意义的。
+  assert.ok(eng.indexOf('【你是谁】') < eng.indexOf('第 0 步'));
+  assert.ok(eng.indexOf('第 0 步') < eng.indexOf('--assignee'));
+  const doubao = seatPreamble(cfg, 'doubao');
+  assert.match(doubao, /第 0 步：先判断，再安排/);
+  assert.equal(delegationBriefing(cfg, 'doubao'), '', '执行岗仍不该有派活段');
+  // CEO 的前置是「派活路由 + 组织树」，不是「你怎么判断要不要自己干」。
+  const ceo = seatPreamble(cfg, 'ceo');
+  assert.match(ceo, /【公司长什么样（组织树：谁归谁管）】/);
+  assert.doesNotMatch(ceo, /第 0 步：先判断，再安排/);
+});
+
+test('R2c · 管理岗不能把子卡派给自己（自派 = 换个名字继续自己干）', async (t) => {
+  const { db, engine } = setup(t);
+  const parent = await engine.submit({ text: '加个功能', mode: 'direct', addressedTo: 'engineering' });
+  assert.throws(() => engine.spawnChild({
+    parentTaskId: parent.taskId, assignerId: 'engineering', assignee: 'engineering',
+    title: '自己复核一遍', instructions: '逐条复核', acceptance: ['复核完成'],
+  }), /不能把子卡派给自己/);
+  const hit = db.prepare("SELECT * FROM audit WHERE action = 'spawn_self_rejected'").get();
+  assert.ok(hit, '自派被拒必须留痕，否则看不出它想自己干');
+});
+
 test('R3 · 判成受管代码却没写 repo：打回两次后进 blocked，审计留痕', async (t) => {
   const { db, engine } = setup(t, { report: { artifactKind: 'managed-code', handoff: 'review' } });
   await engine.submit({ text: '写个脚本' });
@@ -146,7 +218,7 @@ test('R3 · 判成受管代码却没写 repo：打回两次后进 blocked，审�
   assert.ok(hit, `必须留下「代码没登记仓库」的审计，否则查无可查；实际审计：${seen}`);
 });
 
-test('R4 · 受管代码 + 仓库 + 工程审：卡停在 in_review，审过才 done', async (t) => {
+test('R4 · 受管代码 + 仓库 + 工程审：审过停在「待归口」，仓库主人回执后才 done', async (t) => {
   const { db, engine } = setup(t, {
     tasks: [{ title: '改引擎', assignee: 'doubao', repo: 'demo' }],
     report: { artifactKind: 'managed-code' },
@@ -162,8 +234,14 @@ test('R4 · 受管代码 + 仓库 + 工程审：卡停在 in_review，审过才 
   assert.equal(pending.length, 1);
   assert.equal(pending[0].taskId, card.taskId);
 
-  engine.reviewTask(card.taskId, { reviewer: 'engineering', verdict: 'pass', reason: '看过，没问题' });
-  assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(card.taskId).status, 'done');
+  const verdict = engine.reviewTask(card.taskId, { reviewer: 'engineering', verdict: 'pass', reason: '看过，没问题' });
+  assert.equal(verdict.pendingAssetAck, true, '代码卡验收通过后还要等仓库主人回执');
+  const after = db.prepare('SELECT * FROM tasks WHERE taskId = ?').get(card.taskId);
+  assert.equal(after.status, 'in_review');
+  assert.equal(after.assetAck, 'pending');
+  assert.equal(after.assetOwner, 'engineering');
+  assert.ok(after.assetAckTaskId, '要派生归口核对卡');
+  assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'asset_ack_required' AND taskId = ?").get(card.taskId));
 });
 
 test('R5 · 一次性脚本（scratch-code）+ 发布者授权：走直接落盘，不建审查、不叫 CEO', async (t) => {
@@ -260,7 +338,7 @@ test('R8 · 打回必须写原因；写成 pass 才收账', async (t) => {
 
 test('R9 · 董事会直投：默认直接落盘，不惊动总经理', async (t) => {
   const { db, engine } = setup(t);
-  const out = await engine.submit({ mode: 'direct', addressedTo: 'doubao', text: '整理一份术语表' });
+  const out = await engine.submit({ mode: 'direct', addressedTo: 'doubao', text: '整理一份词条表' });
   await pumpAll(engine);
   const row = db.prepare('SELECT * FROM tasks WHERE taskId = ?').get(out.taskId);
   assert.equal(row.status, 'done');
@@ -272,7 +350,7 @@ test('R9 · 董事会直投：默认直接落盘，不惊动总经理', async (t
 test('R10 · 董事会指定「给我审」：出待拍板单，通过后才落盘', async (t) => {
   const { db, engine } = setup(t);
   const out = await engine.submit({
-    mode: 'direct', addressedTo: 'doubao', text: '写份译稿', reviewBy: 'human',
+    mode: 'direct', addressedTo: 'doubao', text: '写份交付文件', reviewBy: 'human',
   });
   await pumpAll(engine);
   const row = db.prepare('SELECT * FROM tasks WHERE taskId = ?').get(out.taskId);
@@ -283,7 +361,7 @@ test('R10 · 董事会指定「给我审」：出待拍板单，通过后才落�
   assert.ok(ap, '董事会亲审必须变成一张待拍板单，否则人根本不知道有活等他');
   const payload = JSON.parse(ap.requestJson).payload;
   assert.equal(payload.assignee, 'doubao');
-  assert.match(payload.summary, /完成：写份译稿/);
+  assert.match(payload.summary, /完成：写份交付文件/);
   assert.ok(Array.isArray(payload.artifacts) && payload.artifacts.length, '审批单里要能看到产物清单');
 
   engine.decideApproval(ap.approvalId, { decision: 'approved', decidedBy: 'board', reason: '可以' });
@@ -293,17 +371,17 @@ test('R10 · 董事会指定「给我审」：出待拍板单，通过后才落�
 test('R11 · 待拍板打回：退回执行人重做，人的意见原样带过去', async (t) => {
   const { db, engine } = setup(t);
   const out = await engine.submit({
-    mode: 'direct', addressedTo: 'doubao', text: '写份译稿', reviewBy: 'human',
+    mode: 'direct', addressedTo: 'doubao', text: '写份交付文件', reviewBy: 'human',
   });
   await pumpAll(engine);
   const ap = db.prepare("SELECT * FROM approvals WHERE kind = 'task_review' AND status = 'pending'").get();
-  engine.decideApproval(ap.approvalId, { decision: 'rejected', decidedBy: 'board', reason: '第二段漏译' });
+  engine.decideApproval(ap.approvalId, { decision: 'rejected', decidedBy: 'board', reason: '第二段漏写' });
 
   assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(out.taskId).status, 'in_progress');
   const rework = db.prepare("SELECT * FROM events WHERE taskId = ? AND processed = 0 AND type = 'issue_assigned'")
     .get(out.taskId);
   assert.ok(rework, '打回要重新叫醒执行人');
-  assert.match(rework.payloadJson, /第二段漏译/);
+  assert.match(rework.payloadJson, /第二段漏写/);
 });
 
 test('R12 · 执行者不能把审查人换成自己；换成上级可以并留痕', async (t) => {
@@ -331,14 +409,14 @@ test('R12 · 执行者不能把审查人换成自己；换成上级可以并留�
 test('R13 · 董事会原话里说「给我审」：自动转成董事会亲审（否定说法不算）', async (t) => {
   const { db, engine } = setup(t);
   const out = await engine.submit({
-    mode: 'direct', addressedTo: 'doubao', text: '翻译这一段，给我审一下再落盘',
+    mode: 'direct', addressedTo: 'doubao', text: '处理这一段，给我审一下再落盘',
   });
   await pumpAll(engine);
   assert.equal(db.prepare('SELECT reviewBy FROM tasks WHERE taskId = ?').get(out.taskId).reviewBy, 'human');
   assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'review_intent_detected'").get());
 
   const out2 = await engine.submit({
-    mode: 'direct', addressedTo: 'doubao', text: '整理一份术语表，不用给我看',
+    mode: 'direct', addressedTo: 'doubao', text: '整理一份词条表，不用给我看',
   });
   await pumpAll(engine);
   const row2 = db.prepare('SELECT * FROM tasks WHERE taskId = ?').get(out2.taskId);

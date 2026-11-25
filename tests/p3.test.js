@@ -217,10 +217,13 @@ test('P3-1 · 引擎：环境不过时不派活、任务补偿回 todo、写 env
 
 test('P3-2 · 源码零写死窗口标题 / 快捷键 / 按键；步骤只能由配置给出', () => {
   // 白名单是封闭集合：加动作必须同时改这里，防止配置里悄悄写进没实现的步骤。
-  // 7 = activate / newSession / hotkey / paste / press / verify / restoreFocus
-  assert.equal(SUPPORTED_STEP_ACTIONS.length, 7);
+  // 8 = activate / newSession / hotkey / focusInput / paste / press / verify / restoreFocus
+  assert.equal(SUPPORTED_STEP_ACTIONS.length, 8);
   assert.throws(() => normalizeSteps({}), /必须由配置提供 steps/);
   assert.throws(() => normalizeSteps({ steps: [{ action: 'click' }] }), /action 不合法/);
+  // focusInput 是合法步骤：唤醒后先点输入框再粘贴，避免命令贴到窗口外。
+  assert.deepEqual(normalizeSteps({ steps: [{ action: 'focusInput' }, { action: 'paste' }] }).map((s) => s.action),
+    ['focusInput', 'paste']);
   // 收尾动作必须排最后，否则「还给用户焦点」之后还要校验目标窗口，必然自相矛盾。
   assert.throws(
     () => normalizeSteps({ steps: [{ action: 'restoreFocus' }, { action: 'paste' }] }),

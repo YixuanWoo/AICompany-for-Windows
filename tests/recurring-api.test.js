@@ -1,7 +1,7 @@
 // 循环任务的 HTTP 接口：中文 jobId 必须能用。
 //
-// 事故：CEO 起的循环任务 id 是中文标题（JOB-yitai-每周体检-…），
-// 而 `url.pathname` 保持 URL 编码态，路由拿到的 jobId 是 `JOB-yitai-%E6%AF%8F…`，
+// 事故：CEO 起的循环任务 id 是中文标题（JOB-demo-editor-每周体检-…），
+// 而 `url.pathname` 保持 URL 编码态，路由拿到的 jobId 是 `JOB-demo-editor-%E6%AF%8F…`，
 // 查库永远查不到 —— 接口只回一句「循环任务不存在」，看板上点 pause / fire 全废。
 //
 // 这里同时守住「只读不越权」：不存在的 id 仍然是 404 之外的正常响应，不会误伤别的 job。
@@ -18,7 +18,7 @@ import { createServer } from '../src/server.js';
 import { createRecurring } from '../src/recurring.js';
 
 // CEO 真正会起的那种 id：带中文、带连字符、带空格
-const CN_JOB = 'JOB-yitai-每周体检-全量门禁-git-干净度';
+const CN_JOB = 'JOB-demo-editor-每周体检-全量门禁-git-干净度';
 
 function tmpRoot(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aicompany-recurring-api-'));

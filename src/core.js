@@ -127,6 +127,14 @@ export function migrate(db) {
   // P4-7：协作空间归档留痕（promote / TTL 归档都要写时间，缺列会直接报 no such column）。
   addColumn('threads', 'archivedAt', 'archivedAt TEXT');
   addColumn('tasks', 'originJson', 'originJson TEXT');
+  // 证据层（2026-11-18）：run 的「启动 / 回执 / 最近活动」时间戳。
+  // 老库补列后为 NULL = 还没观测过，等价于 L0，不改变任何老行为。
+  addColumn('runs', 'dispatchConfirmedAt', 'dispatchConfirmedAt TEXT');
+  addColumn('runs', 'ackAt', 'ackAt TEXT');
+  addColumn('runs', 'lastActivityAt', 'lastActivityAt TEXT');
+  addColumn('runs', 'evidenceLevel', 'evidenceLevel INTEGER DEFAULT 0');
+  addColumn('runs', 'evidenceKinds', 'evidenceKinds TEXT');
+  addColumn('runs', 'interruptedReason', 'interruptedReason TEXT');
   // G3：任务难度与席位难度上限。老库补列后旧任务一律按 normal 处理（不追溯改判）。
   addColumn('tasks', 'difficulty', "difficulty TEXT DEFAULT 'normal'");
   // P7：任务归属项目。老库补列后旧卡为 NULL（= 不属于任何项目，行为与以前一致）。
@@ -151,6 +159,21 @@ export function migrate(db) {
   addColumn('tasks', 'waitingChildren', 'waitingChildren INTEGER DEFAULT 0');
   // 挂起时暂存承接人交上来的原报告（summary/产物/验收结论）：重启后照样能拼总汇报。
   addColumn('tasks', 'parentReportJson', 'parentReportJson TEXT');
+  // 资产归口（2026-11-18）：交付验收通过 ≠ 资产已落地。
+  //   assetAck = ''（不需要）/ pending（已验收，等归口回执）/ done（已回执）/ failed（核对没过）
+  //   assetOwner = 归口岗位（仓库台账里的 reviewer，默认工程执行）
+  //   assetAckTaskId = 归口核对子卡；assetAckAt / assetAckNote 留痕
+  // 老库补列后为空 = 不启用归口，旧卡行为不变。
+  addColumn('tasks', 'assetAck', "assetAck TEXT DEFAULT ''");
+  addColumn('tasks', 'assetOwner', 'assetOwner TEXT');
+  addColumn('tasks', 'assetAckTaskId', 'assetAckTaskId TEXT');
+  addColumn('tasks', 'assetAckAt', 'assetAckAt TEXT');
+  addColumn('tasks', 'assetAckNote', 'assetAckNote TEXT');
+  // 等人配合（2026-11-23）。不新增状态枚举：卡仍用 blocked 停着（blocked 本来就不进重投路径），
+  // 这一位只用来区分「真卡住要上报」与「按流程等董事会给一句话」，让补审、卡住看门狗、看板都能认出来。
+  addColumn('tasks', 'humanWait', 'humanWait INTEGER DEFAULT 0');
+  addColumn('tasks', 'humanWaitNote', 'humanWaitNote TEXT');
+  addColumn('tasks', 'humanWaitAt', 'humanWaitAt TEXT');
   addColumn('agents', 'maxDifficulty', 'maxDifficulty TEXT');
   // 席位模型：岗位（postTitle）与担任者（holderName）分开记，老库补列后为空，下次启动由 seedAgents 回填。
   addColumn('agents', 'postTitle', 'postTitle TEXT');
@@ -226,7 +249,11 @@ export function nextEvent(db) {
 }
 
 export function markProcessed(db, eventId) {
-  db.prepare('UPDATE events SET processed = 1 WHERE eventId = ?').run(eventId);
+  // 用 WHERE processed = 0 做一次「原子认领」：泵可能不止一趟在跑（见 engine.js 的 pump 扇出），
+  // 两趟同时 SELECT 到同一条事件时，只有 UPDATE 成功的那一趟能处理它，另一趟必须跳过。
+  // 原来是无条件 UPDATE，多趟泵会各发一次活 —— 同一张卡派两趟。
+  return db.prepare('UPDATE events SET processed = 1 WHERE eventId = ? AND processed = 0')
+    .run(eventId).changes;
 }
 
 export function pendingEvents(db) {
@@ -266,7 +293,12 @@ export function transition(db, taskId, to, actor = 'control-plane', runId = null
   }
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.prepare('UPDATE tasks SET status = ?, updatedAt = ? WHERE taskId = ?').run(to, nowIso(), taskId);
+    // 2026-11-23：等人标记是「期间态」——卡一旦回到执行线（in_progress / todo），就自动清掉。
+    // 否则人答完了、卡继续跑，卡上还挂着「等你配合」，看门狗会把它当停着不动又去升级。
+    const clearHuman = (to === 'in_progress' || to === 'todo')
+      ? ', humanWait = 0, humanWaitNote = NULL'
+      : '';
+    db.prepare(`UPDATE tasks SET status = ?, updatedAt = ?${clearHuman} WHERE taskId = ?`).run(to, nowIso(), taskId);
     writeAudit(db, { actor, action: 'transition', oldValue: from, newValue: to, runId });
     emit(db, { type: 'state_changed', taskId, payload: { from, to } });
     db.exec('COMMIT');

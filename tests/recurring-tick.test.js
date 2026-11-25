@@ -1,6 +1,6 @@
 // 循环任务「到点触发」的回归测试 —— 2026-11-16 20:30 事故。
 //
-// 事故：yitai 周体检（FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=30，Asia/Shanghai）
+// 事故：demo-editor 周体检（FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=30，Asia/Shanghai）
 // 在 20:30:08 被 tick 处理，`lastFiredAt` 写进去了、`nextFireAt` 前进到下周，
 // 但 0 张卡、0 条审计、0 条 cycles —— 一声不响地跳过了第一次触发。
 //
@@ -144,18 +144,18 @@ test('RT-4 · 真到点却算不出触发点：必须留痕，不许静默推进
 
 test('RT-5 · 生产配置原样复刻：周一 20:30 到点那一刻进来的 tick 必须建卡', () => {
   const { db, rec } = makeRecurring();
-  rec.registerJob(makeJob({ jobId: 'JOB-yitai-每周体检', project: 'yitai', assignee: 'doubao' }));
-  const job = rec.getJob('JOB-yitai-每周体检');
+  rec.registerJob(makeJob({ jobId: 'JOB-demo-editor-每周体检', project: 'demo-editor', assignee: 'doubao' }));
+  const job = rec.getJob('JOB-demo-editor-每周体检');
   // 注册时算出的 nextFireAt 应落在未来；这里直接把它挪到「刚过」的那一刻，模拟 20:30:08 的 tick。
-  db.prepare('UPDATE recurring_jobs SET nextFireAt = ? WHERE jobId = ?').run(DUE, 'JOB-yitai-每周体检');
-  assert.equal(rec.getJob('JOB-yitai-每周体检').nextFireAt, DUE);
+  db.prepare('UPDATE recurring_jobs SET nextFireAt = ? WHERE jobId = ?').run(DUE, 'JOB-demo-editor-每周体检');
+  assert.equal(rec.getJob('JOB-demo-editor-每周体检').nextFireAt, DUE);
   assert.ok(job, 'job 要能注册成功');
 
   const sched = createScheduler({ recurring: rec, now: () => TICK_AT });
   assert.equal(sched.runOnce({ now: TICK_AT }).fired, 1);
 
   const card = db.prepare('SELECT * FROM tasks').get();
-  assert.equal(card.project, 'yitai', '循环卡必须带项目归属');
+  assert.equal(card.project, 'demo-editor', '循环卡必须带项目归属');
   assert.equal(card.assignee, 'doubao');
   assert.equal(card.mode, 'delegate');
   db.close();

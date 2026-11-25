@@ -23,18 +23,22 @@ import {
 import { createApproval, getApproval, listApprovals, closeApproval, pendingApprovals, stampRequestPayload } from './approvals.js';
 import { buildSnapshot } from './snapshot.js';
 import { assertProject, buildProjectContext, buildMemoryRecord, appendMemory,
-  listProjects as listProjectEntries, memoryLimitOf, readRecentMemory } from './projects.js';
+  listProjects as listProjectEntries, memoryLimitOf, readRecentMemory, archiveMemoryIfNeeded } from './projects.js';
 import { repoEntry, findRepoForPath, assertRepo } from './repos.js';
-import { looksLikeCode } from './org-chart.js';
+import { assetOwnerOf, needsAssetAck, assetAckInstructions } from './asset-ack.js';
+import { looksLikeCode, seatPreamble, reviewerBriefing } from './org-chart.js';
+import { buildScheduleJob } from './schedule-request.js';
 import { wakeSession } from './wake.js';
 import {
   recordMessage, listMessages, markMessagesRead as markReadInDb, unreadMessageCount, speakerLabel,
   composeDoneMessage, composeBlockedMessage, composeAnswerMessage, plainText,
 } from './messages.js';
 import {
-  deliverTask, runningProcesses, lastDeliveryOf, appendDeliveryLog, DELIVERY_SCHEMA,
+  deliverTask, runningProcesses, lastDeliveryOf, appendDeliveryLog, DELIVERY_SCHEMA, resolveDeliverDir,
 } from './deliver.js';
 import { nextFireAt } from './rrule.js';
+import { createGuiLock } from './gui-lock.js';
+import { probeRun, EVIDENCE_LEVEL, writeStopSignal } from './evidence.js';
 import {
   DEFAULT_SESSION_POLICY, describeCeoSession, markSessionWarned, readCeoSession, rotateCeoSession,
 } from './ceo-session.js';
@@ -45,6 +49,8 @@ export function createNotifier(kind = 'web') {
 }
 
 const shortId = () => randomUUID().slice(0, 8);
+// 事件处理超时的哨兵值：用唯一对象比较，绝不可能和 adapter 的正常返回值撞上。
+const TIMED_OUT = Symbol('pump-event-timeout');
 
 // 「交给董事会自己看」的各种写法：人不必记字段值，写哪个都认。
 const BOARD_ALIASES = new Set(['human', 'board', 'me', 'self', '我', '董事会', '本人']);
@@ -60,6 +66,21 @@ function pickSchemaFields(kind, data) {
   return out;
 }
 
+// 这单产物该落到哪个绝对路径（项目没配 rootDir → dir=null，提示词退回 output/）。
+// 2026-11-24 从 dispatch 里抽出来：派活和证据层必须共用同一口径，
+// 否则「让它写项目目录」和「只在 output/ 里找证据」会互相打架（T-5457e8a0）。
+function projectWriteDirOf(config, task) {
+  if (!task?.project) return { dir: null, error: 'PROJECT_UNSET' };
+  try {
+    const target = resolveDeliverDir({ config, id: task.project, subdir: task?.deliverSubdir ?? null });
+    return target.ok
+      ? { dir: target.targetDir, error: null }
+      : { dir: null, error: target.error ?? 'NOT_OK' };
+  } catch (error) {
+    return { dir: null, error: String(error?.message ?? error) };
+  }
+}
+
 export function createEngine({
   db, config, notifier = createNotifier('web'), maxSteps = 80,
   dispatchMode = 'inline', approvalHandlers = {}, workRoot = null, now = () => new Date(),
@@ -67,6 +88,9 @@ export function createEngine({
   gateRetryMs = 0,
   // G2：卡进终态时通知外部（由 server 接到循环引擎）。钩子失败只留审计，不影响卡的状态。
   taskTerminalHook = null,
+  // 2026-11-23：控制面关键路径日志。审计在 SQLite 里，翻起来要拷库；日志是给人翻的。
+  // log 是可选的函数 (text, level?)，不传就完全不写 —— 单测里建引擎不该碰文件系统。
+  log = null,
 }) {
   // inline = P1 单机直调 adapter（默认，本地演示一等公民）；
   // bridge = P2 拉模式，控制面只排队，等本机 bridge 来 checkout。两者共用同一套统一 API。
@@ -75,6 +99,10 @@ export function createEngine({
   }
   const clock = () => now();
   const clockIso = () => clock().toISOString();
+  // 日志永远不能反过来影响调度：写日志失败就吞掉，审计仍然照常写。
+  const logEvent = (text, level = 'info') => {
+    try { if (typeof log === 'function') log(text, level); } catch { /* ignore */ }
+  };
   const workDir = workRoot ?? config.workRoot ?? path.resolve(process.cwd(), 'work');
   seedAgents(db, config);
   // P4-1：开引擎时把本周期账本对齐（缺账开账、改配额跟上配置，旧账不删）。
@@ -179,29 +207,26 @@ export function createEngine({
     return reviewer;
   }
 
-  /** 排班时定审查人：CEO 显式写了就按它（可写 ceo / human / 岗位 id），没写就用日常默认。 */
+  /** 排班时定审查人：CEO 写了就按它（可写 ceo / human / 岗位 id），没写就用日常默认。
+   *  2026-11-18：撞车（审查人＝执行人）不再把整条建议拒掉，改成**自动上升一级**。
+   *  起因：CEO 提「工作台月度体检」，执行人写了工程岗、审查人也写了工程岗，
+   *  引擎判「不能自己审自己」→ 整条建议被丢、只写了一条审计，CEO 却在回话里说「已安排」。
+   *  这条规则在治理上是对的（不能自审），但拒绝的方式错了：该抬一级，而不是把活扔掉还不吭声。 */
   function resolveCycleReviewer({ wanted = null, assignee }) {
     const raw = String(wanted ?? '').trim();
+    const escalate = (from) => {
+      const boss = cfgFor(assignee)?.reportsTo;
+      const next = boss && boss !== assignee ? boss : 'human';
+      return { reviewer: next, explicit: Boolean(raw), escalatedFrom: from };
+    };
     if (raw) {
       const explicit = assertReviewSeat(raw);
-      if (explicit === assignee) throw new Error(`不能让自己审自己（${assignee}）`);
+      if (explicit === assignee) return escalate(explicit);
       return { reviewer: explicit, explicit: true };
     }
-    return { reviewer: defaultRoutineReviewer(assignee), explicit: false };
-  }
-
-  /** 派活人写错了路由参数：不炸整单，留痕后当没写（走默认推导）。 */
-  function softRoute(fn, { action, who, taskId, field, value }) {
-    try {
-      return fn();
-    } catch (error) {
-      writeAudit(db, {
-        actor: who ?? 'control-plane', action,
-        newValue: `${field}=${String(value ?? '').slice(0, 60)}|${String(error.message).slice(0, 200)}`.slice(0, 300),
-        taskId,
-      });
-      return null;
-    }
+    const fallback = defaultRoutineReviewer(assignee);
+    if (fallback === assignee) return escalate(fallback);
+    return { reviewer: fallback, explicit: false };
   }
 
   function buildCard({
@@ -675,6 +700,9 @@ export function createEngine({
       role: req.role ?? 'general', assignee: target, mode,
       addressedTo: mode === 'direct' ? target : null,
       assignedBy,
+      // 董事会也可以点仓库（代码类需求写 repo=仓库 id）：不点就按普通产物处理。
+      // 归口闸只认卡上的 repo，所以这一步漏了，代码卡就绕过了仓库台账。
+      repo: req.repo ? String(req.repo) : null,
       // 原始需求就是「任务说明」：不传 instructions 时用 text 兜底。
       // 缺了这一步，人写的那句话只会变成卡片标题，席位收到的指令是一句空话
       // （真机上第一次投产就踩到：产物内容跟需求无关）。
@@ -714,6 +742,24 @@ export function createEngine({
       throw new Error(`${assignerId} 没有 delegate 能力，不能往下派活（要派活请在 config 里加 capabilities: [delegate]）`);
     }
     if (!assignee) throw new Error('spawn 必须写 assignee（派给谁）');
+    // 「拆成 N 张全派给自己」不是拆活，是换个名字继续自己干。
+    // 2026-11-17 真机：工程岗把一张实现卡拆成 5 张「逐条复核与验收取证」全派给自己，
+    // 表面上走了拆解流程，实际一张都没落到执行岗手里。有下级就别自派。
+    if (assignee === assignerId) {
+      const subs = config.agents.filter((a) => a.reportsTo === assignerId && a.status !== 'disabled');
+      if (subs.length) {
+        writeAudit(db, {
+          actor: assignerId, action: 'spawn_self_rejected',
+          oldValue: null, newValue: `派给自己被拒（下级：${subs.map((a) => a.id).join('/')}）`,
+          taskId: parentTaskId,
+        });
+        throw new Error(
+          `${assignerId} 是管理岗，不能把子卡派给自己：请派给下级（${subs.map((a) => `${a.postTitle ?? a.id}=${a.id}`).join('、')}）。`
+          + '如果你判断这件事本来就该你自己做，那就别 spawn —— 直接在本卡上写方案/结论，'
+          + '需要动手实现的仍然派下去。',
+        );
+      }
+    }
     const allowed = assertMayAssign(config, assignerId, assignee);
     if (!allowed.ok) throw new Error(`跨子树派活被拒绝：${allowed.reason}`);
     if (!String(title ?? '').trim()) throw new Error('spawn 必须写 title');
@@ -755,7 +801,46 @@ export function createEngine({
     if (task.status === 'done' || task.status === 'cancelled') {
       return { taskId, status: task.status, cancelled: false, reason: '已经是终态，不需要取消' };
     }
+    // 发布者不许自己把子卡作废。2026-11-17 真机：工程岗派了子卡，等不到下级接单，
+    // 就自己 cancel 掉子卡、改由自己实施 —— 派活变成了「派了可以反悔」，
+    // 而且它作废的那一刻，下级根本还没机会被叫醒（它的会话占着引擎的手）。
+    // 要停子卡就按上报规则交上级决定：作废是治理动作，不是执行动作。
+    const parent = task.parentTaskId ? taskById(task.parentTaskId) : null;
+    if (parent && actor !== 'human' && actor === parent.assignee) {
+      writeAudit(db, {
+        actor, action: 'cancel_child_rejected',
+        newValue: `${task.taskId}|发布者不能自己作废子卡|${String(reason).slice(0, 120)}`, taskId,
+      });
+      return {
+        taskId, status: task.status, cancelled: false, code: 'PARENT_CANNOT_CANCEL',
+        reason: '你是这张子卡的发布者，不能自己把它作废。下级叫不起来请用 reportUpward 交上级处理；'
+          + '确实要停这张卡，让上级或董事会来取消。',
+      };
+    }
     transition(db, taskId, 'cancelled', actor);
+    // 光把卡标成 cancelled 不够：会话还在窗口里干、库里那一趟还挂着 running，
+    // reconcile 会一直等它交一个永远不会来的结果（T-a4d59e96：人取消了，系统还在等重派那趟）。
+    const liveRuns = db.prepare("SELECT runId, agentId FROM runs WHERE taskId = ? AND status = 'running'").all(taskId);
+    for (const live of liveRuns) {
+      db.prepare("UPDATE runs SET status = 'interrupted', finishedAt = ?, interruptedReason = ? WHERE runId = ?")
+        .run(clockIso(), 'task_cancelled', live.runId);
+      if (workDir) {
+        writeStopSignal({
+          workRoot: workDir, taskId, by: actor,
+          reason: `任务被人取消：${String(reason).slice(0, 120)}`,
+        });
+      }
+      try { releaseGuiLockForRun(live.agentId, live.runId); } catch { /* 非 GUI 席位没有锁 */ }
+    }
+    // 排队里的 issue_assigned 一并作废：取消九秒后还在 reconcile_requeue 就是这么来的。
+    const droppedEvents = db.prepare('UPDATE events SET processed = 1 WHERE taskId = ? AND processed = 0').run(taskId);
+    if (liveRuns.length || droppedEvents.changes) {
+      writeAudit(db, {
+        actor, action: 'cancel_settled',
+        newValue: `停掉 ${liveRuns.length} 趟在跑的会话｜作废 ${droppedEvents.changes} 条排队事件`.slice(0, 300),
+        taskId,
+      });
+    }
     // 卡没了就别再排重投了，否则几分钟后会给一张已作废的卡再发事件。
     clearGateRetry(taskId);
     writeAudit(db, { actor, action: 'cancel_task', newValue: String(reason).slice(0, 300), taskId });
@@ -826,6 +911,21 @@ export function createEngine({
         actor: 'control-plane', action: 'suspend_for_decision',
         oldValue: task.status, newValue: `awaiting_decision:${normalized.changeRequestId}`, taskId: task.taskId,
       });
+      // 决策者是员工（总经理 / 工程岗）时，不能只把卡挂着等人点按钮 —— 没人点它就永远躺着。
+      // 走同一套「向上汇报」：给决策者建一张处置卡并叫醒他；处置完原卡自动回执行人手上
+      // （见 resumeParentAfterEscalation）。只有决策者是董事会/人时，才真的进消息箱等人拍板。
+      const dmIsAgent = config.runPolicy?.escalateToBoss === true
+        && Boolean(requestedBy) && requestedBy !== 'human' && requestedBy !== 'board' && cfgFor(requestedBy);
+      if (dmIsAgent && !hasOpenEscalationCard(task.taskId)) {
+        const opened = openEscalation(task, { summary: '', reason: normalized.reason }, normalized.agentId, normalized.runId, {
+          reason: `变更请求 ${normalized.changeRequestId}：${normalized.reason ?? ''}`,
+          keepStatus: true, to: requestedBy,
+        });
+        writeAudit(db, {
+          actor: 'control-plane', action: 'change_request_handed_up',
+          newValue: `${requestedBy}｜处置卡 ${opened?.card ?? '(未建)'}`, taskId: task.taskId,
+        });
+      }
       const whyText = plainText(normalized.reason, 240) || '没说原因';
       // 只有真到董事会这一级才进消息箱；CEO 自己能定的不打扰人（挂起面板里还是能查到）。
       if (requestedBy === 'human' || requestedBy === 'board') {
@@ -958,6 +1058,14 @@ export function createEngine({
   const pendingMemory = new Map();
   // 只有「等一会儿就会好」的原因才自动重试。时段闸不算：差几个小时，重试没有意义。
   const TRANSIENT_GATE = new Set(['user-active', 'paused', 'session-locked']);
+  // 2026-11-22 董事会定规矩：这几个原因是**让路**（你在用电脑 / 人工暂停 / 锁屏），
+  // 不是「验收失败」。让路一次就扣一次补审额度的话，人一忙起来 5 次很快烧光，
+  // 卡就永久停在待验收（T-faf7ddf8 就是这么挂了两天）。所以让路单独记账、不计额度。
+  const YIELD_CODES = new Set(['user-active', 'paused', 'session-locked']);
+  // 这次验收被挡下，是「让路」还是「失败」：让路不扣补审额度，其余（额度、桥离线、真跑挂）才算。
+  function isReviewYield(code) {
+    return YIELD_CODES.has(String(code ?? ''));
+  }
   let gateRetrySeq = 0;
 
   function clearGateRetry(taskId) {
@@ -1028,6 +1136,13 @@ export function createEngine({
     const runningSame = db.prepare("SELECT runId FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1")
       .get(taskId);
     if (runningSame && runningSame.runId !== extra?.resumeRunId) {
+      // 这里原来完全静默：一条僵死的 run 会因此把同一张卡的**验收**也挡掉，
+      // 卡永远停在 in_review，看板只显示「待验收」（T-7a284ca4 事故）。至少要留一行账。
+      writeAudit(db, {
+        actor: 'scheduler', action: 'wake_deferred',
+        newValue: `${agentId}|same_run|${runningSame.runId} 仍在 running，本次 ${wakeReason} 让路`,
+        taskId,
+      });
       return { skipped: true, code: 'concurrent', reason: `这张卡已有 Run ${runningSame.runId} 在跑，不重复派` };
     }
     const agentRow = db.prepare('SELECT * FROM agents WHERE agentId = ?').get(agentId);
@@ -1108,6 +1223,14 @@ export function createEngine({
     const projectContext = task?.project
       ? buildProjectContext({ workRoot: workDir, config, id: task.project })
       : null;
+    // 落盘改造（2026-11-23）：把「这单产物该落到哪」直接算给席位，别让它猜项目目录。
+    // writeDir 是绝对路径；项目没配 rootDir 时为 null，提示词会退回「留在 output/」。
+    if (projectContext) {
+      const target = projectWriteDirOf(config, task);
+      projectContext.writeDir = target.dir;
+      projectContext.writeDirError = target.error;
+    }
+    logEvent(`dispatch ${taskId} → ${agentId} run=${runId} reason=${wakeReason} project=${task?.project ?? '-'} writeDir=${projectContext?.writeDir ?? '(output)'}`);
     const ctx = {
       runId, wakeReason, taskId,
       task: task ? {
@@ -1171,6 +1294,23 @@ export function createEngine({
       adapterConfig: { ...(cfg.adapter?.config ?? {}), workRoot: cfg.adapter?.config?.workRoot ?? workDir },
       extra,
     };
+    // 【统一前置】所有席位开工前先拿同一段话：我是谁 → 第 0 步先判断 → 怎么把活派下去。
+    // 2026-11-17：这段话原来由各 adapter 自己拼，只有 webhook-exec 与 gui-template 两份；
+    // process / http / cli-acp 是把 ctx 原样 JSON 丢给外部命令的，一句散文都没有，
+    // 换个 adapter 身份就整体消失（工程岗换轨那天就是这么丢的）。现在在引擎里算一次，
+    // adapter 只管用；ctx.briefing 还会跟着 JSON 一起透传给外部命令。
+    ctx.briefing = seatPreamble(config, agentId, {
+      task: ctx.task, repos: ctx.repos, artifacts: ctx.artifacts, workRoot: workDir,
+    });
+    // 验收请求发给「真审查人」之后，被叫醒的可能是一个中层席位：它这一趟不是干活，
+    // 而是给这张卡一个结论。不单列这一段，它会照着执行模板再改一遍代码（等于谁审谁重做）。
+    if (wakeReason === 'review_requested' && agentId !== ceoId()) {
+      const reviewBlock = reviewerBriefing(config, agentId, {
+        task: ctx.task, bridgeUrl: config.bridge?.url ?? null,
+      });
+      if (reviewBlock) ctx.briefing = [ctx.briefing, reviewBlock].filter(Boolean).join('\n\n');
+      ctx.review = { asReviewer: true, taskId, taskTitle: ctx.task?.title ?? null };
+    }
     let outcome;
     try {
       outcome = await mod.execute(ctx);
@@ -1180,8 +1320,18 @@ export function createEngine({
       if (task && task.status === 'in_progress') transition(db, taskId, 'blocked', 'scheduler', runId);
       return { failed: true, error: String(error.message), runId };
     }
-    db.prepare('UPDATE runs SET status = ?, finishedAt = ? WHERE runId = ?')
+    // 只关「自己开的那一趟」：这趟要是已经被判死（强制重派打断 / 收尸），
+    // 回来时不许把 interrupted 又改回 success —— 那会让看板显示「跑成功了」，
+    // 而实际上它的结果已经被丢掉，等于说假话。
+    const closed = db.prepare("UPDATE runs SET status = ?, finishedAt = ? WHERE runId = ? AND status = 'running'")
       .run(outcome.status ?? 'success', clockIso(), runId);
+    if (closed.changes === 0) {
+      writeAudit(db, {
+        actor: agentId, action: 'run_result_after_abandon',
+        newValue: `${runId}｜${String(outcome.status ?? '')}`.slice(0, 200), runId, taskId,
+      });
+      return { ignored: true, runId, agentId, wakeReason };
+    }
     consumeQuota(db, agentId, 1, { now: clock(), periodHours: config.quota?.periodHours });
     afterQuotaConsume(agentId);
     writeAudit(db, { actor: agentId, action: resumeRunId ? 'wake_resume' : 'wake', newValue: `${wakeReason}:${runId}`, runId, taskId });
@@ -1271,6 +1421,53 @@ export function createEngine({
     transition(db, task.taskId, 'in_review', 'ceo', runId);
     transition(db, task.taskId, 'done', 'ceo', runId);
     return { reported: true, chars: answer.length };
+  }
+
+  // ── 制度回执（2026-11-18）────────────────────────────────────
+  // 「引擎拒绝」的正确语义是**打回 + 告诉他怎么改**，不是「把这条删掉、当没发生」。
+  // 报告不合格早就这么做了（report_rejected → 重投 → 两轮后交人）；
+  // 排班建议、路由字段却是静默丢弃，于是 CEO 回话说「已经安排好了」、看板写「完成」，
+  // 库里其实什么都没落地。这里把后者归一到前者。
+  //
+  // 三条纪律：
+  //   ① 回执必须说清三件事：违反哪条（code）、为什么（撞了谁 / 缺什么）、正确写法（能照抄）；
+  //   ② 回执必须重新唤醒**同一个** agent（不是换个更弱的去猜），且这一轮不留任何副作用；
+  //   ③ 上限 2 次，第 3 次 blocked 并沿汇报线上报——和人类公司一样：改两遍还不对，就交给人定。
+  const RULE_RETRY_MAX = 2;
+
+  function formatRuleViolations(violations = []) {
+    const lines = ['【引擎打回：这一轮不合制度，一件事都没落地】'];
+    violations.forEach((v, i) => {
+      lines.push(`${i + 1}) ${v.reason}`);
+      if (v.hint) lines.push(`   正确写法：${v.hint}`);
+    });
+    lines.push('（上面这些都已经撤回，没有派卡、没有出审批单。按回执改完后重来一轮。）');
+    return lines.join('\n');
+  }
+
+  function feedbackRuleViolation({ task, agentId, violations, runId = null }) {
+    const attempt = (task.attempt ?? 0) + 1;
+    const why = violations.map((v) => `${v.code}：${v.reason}`).join(' / ').slice(0, 600);
+    db.prepare('UPDATE tasks SET attempt = ?, updatedAt = ? WHERE taskId = ?').run(attempt, nowIso(), task.taskId);
+    writeAudit(db, {
+      actor: agentId, action: 'rule_violation',
+      newValue: `第 ${attempt} 次：${why}`, runId, taskId: task.taskId,
+    });
+    if (attempt <= RULE_RETRY_MAX) {
+      emitEvent({
+        type: 'issue_assigned', taskId: task.taskId, agentId,
+        payload: { wakeReason: 'rule_retry', reviewNote: formatRuleViolations(violations) },
+        dedupeKey: `rule-retry:${task.taskId}:${attempt}`,
+      });
+      writeAudit(db, {
+        actor: 'control-plane', action: 'rule_retry',
+        newValue: `第 ${attempt}/${RULE_RETRY_MAX} 次打回，已带原因重新唤醒 ${agentId}`, runId, taskId: task.taskId,
+      });
+      return { retried: attempt };
+    }
+    transition(db, task.taskId, 'blocked', 'control-plane', runId);
+    escalateToRescue({ ...task, attempt }, `同一轮 ${violations.length} 处不合制度，改了两轮仍不对：${why}`);
+    return { blocked: true };
   }
 
   // G3：子卡派给谁。CEO 点了名且接得了 → 尊重；接不了 → 在它的子树里找一个「刚够用」的替补；
@@ -1365,12 +1562,6 @@ export function createEngine({
   function buildRecurringJob(sug = {}, { task, requestedBy = null } = {}) {
     const title = String(sug.title ?? '').trim().slice(0, 120);
     if (!title) return { error: '缺 title（这条循环任务叫什么）' };
-    const rrule = String(sug.rrule ?? '').trim();
-    if (!rrule) return { error: '缺 rrule（多久跑一次）' };
-    const timezone = String(sug.timezone ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai';
-    try { nextFireAt(rrule, nowIso(), timezone); } catch (error) {
-      return { error: `rrule 不合法：${error.message}` };
-    }
     const instructions = String(sug.instructions ?? '').trim();
     if (!instructions) return { error: '缺 instructions（每轮具体要干什么）' };
     const acceptance = (Array.isArray(sug.acceptance) ? sug.acceptance : [])
@@ -1389,6 +1580,10 @@ export function createEngine({
     } catch (error) {
       return { error: `reviewBy 不可用：${error.message}` };
     }
+    // 撞车被抬一级时把「原写的是谁」带回去，好让调用方留痕、也让董事会看见为什么审的人变了。
+    const reviewEscalated = review.escalatedFrom
+      ? `${review.escalatedFrom}→${review.reviewer}`
+      : null;
     // 归属项目：只认已有且配了规范的；写了不存在的就拒，别让循环卡落到野地里。
     let project = null;
     if (sug.project) {
@@ -1396,6 +1591,41 @@ export function createEngine({
       catch (error) { return { error: `项目不可用：${error.message}` }; }
     }
     const kind = RECURRING_KINDS.includes(sug.kind) ? sug.kind : 'maintenance';
+
+    // 一次性定时：CEO 写 at（几点）而不是 rrule ——「视频发完第二天复盘」这种活只需跑一次，
+    // 排成循环只会每周把董事会吵一遍。走同一条审批与注册通道，只是 maxCycles=1、overlap=queue。
+    const at = typeof sug.at === 'string' ? sug.at.trim() : '';
+    if (at) {
+      let built;
+      try {
+        built = buildScheduleJob({
+          text: instructions,
+          at,
+          date: typeof sug.date === 'string' && sug.date.trim() ? sug.date.trim() : null,
+          title,
+          project,
+          assignee: picked.assignee,
+          reviewBy: review.reviewer === 'human' ? 'human' : review.reviewer,
+          acceptance,
+          tz: String(sug.timezone ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai',
+        });
+      } catch (error) {
+        return { error: `at 不合法：${error.message}` };
+      }
+      built.kind = kind;
+      built.owner = ceoId() ?? 'ceo';
+      built.reportsTo = review.reviewer === 'human' ? null : review.reviewer;
+      built.reviewNote = String(sug.reviewNote ?? '').trim().slice(0, 300) || null;
+      built.taskTemplate.role = String(sug.role ?? 'execute');
+      return { job: built, reassignedFrom: picked.reassignedFrom ?? null, oneShot: true, reviewEscalated };
+    }
+
+    const rrule = String(sug.rrule ?? '').trim();
+    if (!rrule) return { error: '缺 rrule（多久跑一次）；一次性定时请写 at（几点）' };
+    const timezone = String(sug.timezone ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai';
+    try { nextFireAt(rrule, nowIso(), timezone); } catch (error) {
+      return { error: `rrule 不合法：${error.message}` };
+    }
     // 协议不允许「永不停」的循环：终止条件必须至少有一个。
     // 默认给一年有效期——长期任务也该有个到期复核点，到期自动暂停，董事会续期才继续跑。
     const validUntil = typeof sug.validUntil === 'string' && sug.validUntil
@@ -1437,6 +1667,7 @@ export function createEngine({
         dedupeWindowMin: 60,
       },
       reassignedFrom: picked.reassignedFrom ?? null,
+      reviewEscalated,
     };
   }
 
@@ -1464,11 +1695,20 @@ export function createEngine({
   }
 
   // 审批单正文：董事会要能一眼判断「该不该让它长期跑」——频率、干什么、谁干、归哪儿、烧多少。
-  function describeRecurringJob(job, reason) {
+  function describeRecurringJob(job, reason, { oneShot = false } = {}) {
     const seat = cfgFor(job.assignee);
+    const whenText = job.nextFireAt
+      ? new Date(job.nextFireAt).toLocaleString('zh-CN', { hour12: false })
+      : describeRRule(job.trigger.rrule);
     const lines = [
-      reason ? `为什么建：${String(reason).slice(0, 600)}` : '为什么建：CEO 判断这活是长期重复的，值得排班。',
-      `多久一次：${describeRRule(job.trigger.rrule)}（时区 ${job.trigger.timezone}）`,
+      reason
+        ? `为什么建：${String(reason).slice(0, 600)}`
+        : (oneShot
+          ? '为什么建：CEO 判断这活只做一次，但要在某个时间点做（不是长期重复）。'
+          : '为什么建：CEO 判断这活是长期重复的，值得排班。'),
+      oneShot
+        ? `什么时候跑：只跑一次，${whenText}（错过 12 小时内会补一次）`
+        : `多久一次：${describeRRule(job.trigger.rrule)}（时区 ${job.trigger.timezone}）`,
       `每轮干什么：${job.taskTemplate.instructions.slice(0, 400)}`,
       `谁干：${seat?.postTitle ?? job.assignee}（担任：${seat?.holderName ?? job.assignee}）`,
       `每轮谁来审：${job.reviewBy === 'human'
@@ -1477,61 +1717,114 @@ export function createEngine({
         + `${job.reviewNote ? `　←　${job.reviewNote}` : ''}`,
       `归属项目：${job.project ?? '不归属任何项目（产物只留在公司）'}`,
       `每轮怎么算干完：${job.taskTemplate.acceptance.join('；')}`,
-      `消耗：每轮最多 2 次唤醒；连续失败 3 轮会自动暂停等你处理。`,
-      `有效期：到 ${String(job.termination?.validUntil ?? '').slice(0, 10)} 自动暂停${job.termination?.maxCycles ? `；最多 ${job.termination.maxCycles} 轮` : ''}，要续再点一次。`,
+      '消耗：每轮最多 2 次唤醒；连续失败 3 轮会自动暂停等你处理。',
+      oneShot
+        ? '结束方式：跑完这一轮就自动结束，不会每周重复。'
+        : `有效期：到 ${String(job.termination?.validUntil ?? '').slice(0, 10)} 自动暂停${job.termination?.maxCycles ? `；最多 ${job.termination.maxCycles} 轮` : ''}，要续再点一次。`,
       '通过就按这个节奏自动跑；拒绝或改完再提交都行，有意见写在下面。',
     ];
     return lines.join('\n');
   }
 
   // CEO 提的排班建议 → 逐条出审批单。真正的注册发生在董事会点「通过」之后（server 的 handler）。
-  // 一轮最多 3 条；同一条已在等审批时不重复出单；不合协议的记审计后丢掉，绝不静默吞掉。
-  function requestRecurringApprovals(result, task, agentId) {
-    const list = [
-      ...(Array.isArray(result?.recurringSuggestions) ? result.recurringSuggestions : []),
-      ...(result?.recurringSuggestion ? [result.recurringSuggestion] : []),
-    ].filter((x) => x && typeof x === 'object').slice(0, 3);
-    for (const sug of list) {
-      const built = buildRecurringJob(sug, { task, requestedBy: agentId });
+   // 2026-11-18 拆成两段，因为「校验」必须能跑在「动手」之前：
+   //   ① planRecurringApprovals：纯读、可重复调用，只算「这条能不能出单、出成什么样」；
+   //   ② commitRecurringApprovals：把算好的单真的写进 approvals。
+   // 原来只有一个「边校验边写」的版本（另有一份一模一样的死代码），所以「有建议不合规」时
+   // 前面的单已经写了一半、后面的被静默丢掉，CEO 还以为自己排上班了。
+  // 一轮最多 3 条；同一条已在等审批时不重复出单。
+  function planRecurringApprovals(list = [], { task, requestedBy = null } = {}) {
+    const items = [];
+    const errors = [];
+    for (const sug of list.slice(0, 3)) {
+      const built = buildRecurringJob(sug, { task, requestedBy });
+      const label = String(sug?.title ?? '(无标题)').slice(0, 60);
       if (built.error) {
-        writeAudit(db, {
-          actor: agentId, action: 'recurring_suggestion_rejected',
-          newValue: `${String(sug.title ?? '(无标题)').slice(0, 60)}|${built.error}`.slice(0, 300),
-          taskId: task.taskId,
+        // 示例里的执行人取「公司里真有的执行席位」，不写死任何产品名/人名：
+        // 换一家公司、换一批席位，这份回执照样能照抄。
+        const sampleAssignee = firstWorker() ?? '<执行岗位 id>';
+        errors.push({
+          code: 'recurring_suggestion_invalid',
+          reason: `排班建议「${label}」不成立：${built.error}`,
+          hint: `照这个写：{"title":"月度项目体检","assignee":"${sampleAssignee}","rrule":"FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=20;BYMINUTE=0",`
+            + '"instructions":"每一轮照着做就能做完的完整说明",'
+            + '"acceptance":["怎么算这一轮干完"],"reason":"为什么值得长期排班"}'
+            + ' —— 不用写 reviewBy（审的人引擎按执行人的上级自动定）。',
         });
         continue;
       }
+      // 同一条循环任务已经在等董事会时不出第二张单（CEO 一轮可能重复提同一条）。
       const dup = db.prepare(`SELECT approvalId FROM approvals
         WHERE kind = 'recurring_create' AND status = 'pending' AND requestJson LIKE ?`)
         .get(`%"jobId":"${built.job.jobId}"%`);
-      if (dup) continue;
+      items.push({ sug, built, oneShot: built.oneShot === true, dup: dup?.approvalId ?? null });
+    }
+    return { items, errors };
+  }
+
+  function commitRecurringApprovals(plan, { task, requestedBy = null } = {}) {
+    const created = [];
+    for (const item of plan?.items ?? []) {
+      if (item.dup) continue;
+      const { built, sug, oneShot } = item;
       const approval = requestApproval({
         kind: 'recurring_create', taskId: task.taskId,
-        title: `循环任务申请：${built.job.title}`,
-        body: describeRecurringJob(built.job, sug.reason),
-        payload: { job: built.job, rruleText: describeRRule(built.job.trigger.rrule) },
-        requestedBy: agentId,
+        title: oneShot
+          ? `定时任务申请（只跑一次）：${built.job.title}`
+          : `循环任务申请：${built.job.title}`,
+        body: describeRecurringJob(built.job, sug.reason, { oneShot }),
+        payload: {
+          job: built.job,
+          oneShot,
+          rruleText: oneShot
+            ? `只跑一次 · ${built.job.nextFireAt
+              ? new Date(built.job.nextFireAt).toLocaleString('zh-CN', { hour12: false })
+              : describeRRule(built.job.trigger.rrule)}`
+            : describeRRule(built.job.trigger.rrule),
+        },
+        requestedBy,
       });
       writeAudit(db, {
-        actor: agentId, action: 'recurring_suggested',
+        actor: requestedBy ?? 'ceo', action: oneShot ? 'schedule_suggested' : 'recurring_suggested',
         newValue: `${built.job.jobId}|${approval.approvalId}`, taskId: task.taskId,
       });
+      // 审查人被抬了一级：留痕，让董事会知道「为什么审的人不是 CEO 写的那位」。
+      if (built.reviewEscalated) {
+        writeAudit(db, {
+          actor: 'control-plane', action: 'review_by_escalated',
+          newValue: `${built.job.jobId}|${built.reviewEscalated}`, taskId: task.taskId,
+        });
+      }
+      if (built.reassignedFrom && built.reassignedFrom !== built.job.assignee) {
+        writeAudit(db, {
+          actor: requestedBy ?? 'ceo', action: 'difficulty_reassigned',
+          oldValue: built.reassignedFrom, newValue: built.job.assignee, taskId: task.taskId,
+        });
+      }
+      created.push({
+        approvalId: approval.approvalId, jobId: built.job.jobId, oneShot,
+        assignee: built.job.assignee, reviewer: built.job.reviewBy,
+      });
     }
+    return { created };
   }
 
   // 阻塞 / 返工耗尽的统一上报：生成 escalation 事件，沿汇报线找决策者（§7.4）。
   function escalateTask(task, reason) {
     const dm = resolveDecisionMaker(config, task.assignee);
+    // 汇报线到顶时 resolveDecisionMaker 会把总经理自己再返回一遍（它就是最后一个节点）。
+    // 总经理自己卡住了，能拍板的只有董事会：必须映射成 human，否则「上报告诉自己」＝自己叫自己。
+    const target = dm === task.assignee ? 'human' : dm;
     emitEvent({
-      type: 'escalation', taskId: task.taskId, agentId: dm,
+      type: 'escalation', taskId: task.taskId, agentId: target,
       payload: { wakeReason: 'escalation', reason },
       dedupeKey: `blocked:${task.taskId}:${task.attempt ?? 0}`,
     });
     writeAudit(db, {
       actor: 'control-plane', action: 'blocked_escalated',
-      newValue: `${task.assignee}→${dm}:${reason}`, taskId: task.taskId,
+      newValue: `${task.assignee}→${target}:${reason}`, taskId: task.taskId,
     });
-    return { decisionMaker: dm };
+    return { decisionMaker: target };
   }
 
   function pendingApprovalFor(taskId, kind) {
@@ -1825,13 +2118,18 @@ export function createEngine({
             acceptanceResults: Array.isArray(payload.acceptanceResults) ? payload.acceptanceResults : [],
           });
         }
-        transition(db, task.taskId, 'done', decidedBy, null);
+        const fin = finalizeAccepted(task.taskId, decidedBy, null);
         writeAudit(db, {
           actor: decidedBy, action: 'board_accepted',
-          newValue: `${approvalId}|${String(reason ?? '').slice(0, 200) || '无意见'}`, taskId: task.taskId,
+          newValue: `${approvalId}|${String(reason ?? '').slice(0, 200) || '无意见'}`,
+          taskId: task.taskId,
         });
-        flushProjectMemory(fresh ?? task, null);
-        deliverAccepted(fresh ?? task, null);
+        if (!fin.closed) {
+          return {
+            approvalId, decision, applied: true, taskId: task.taskId,
+            status: 'in_review', pendingAssetAck: true, assetOwner: fin.owner,
+          };
+        }
         return { approvalId, decision, applied: true, taskId: task.taskId, status: 'done' };
       }
       // 打回：退回执行人重做，人的话原样带过去（这是它下一次唯一的依据）。
@@ -2079,11 +2377,31 @@ export function createEngine({
         return null;
       }
       appendMemory(workDir, task.project, built.record);
+      // 记忆只追加不淘汰会无限变长：超量时把最老的挪进 archive-YYYY-MM.jsonl（归档不是删除）。
+      const gc = archiveMemoryIfNeeded(workDir, task.project, { keep: memoryLimitOf(config, task.project) });
+      if (gc.archived > 0) {
+        writeAudit(db, {
+          actor: 'control-plane', action: 'memory_archived',
+          newValue: `${task.project}|归档 ${gc.archived} 条，现留 ${gc.count} 条`.slice(0, 300),
+          runId, taskId: task.taskId,
+        });
+      }
       writeAudit(db, {
         actor: 'control-plane', action: 'memory_written',
         newValue: `${task.project}|${built.record.lessons.length} 条教训 / ${built.record.nextHints.length} 条下次`.slice(0, 300),
         runId, taskId: task.taskId,
       });
+      // 2026-11-23 维护：实测 69 条记忆里 15 条 lessons/nextHints 双空（22%），
+      // 空条目照样占 memoryLimit 读窗口，把有用的老经验挤出去。
+      // 这里不拒绝入库（避免改动既有行为），只补一条可统计的审计，
+      // 用来回答「哪个席位一直在交白卷」。
+      if (built.record.lessons.length === 0 && built.record.nextHints.length === 0) {
+        writeAudit(db, {
+          actor: 'control-plane', action: 'memory_empty',
+          newValue: `${task.project}|${task.assignee ?? '-'}|教训与下次提示均为空`.slice(0, 300),
+          runId, taskId: task.taskId,
+        });
+      }
       return built.record;
     } catch (error) {
       writeAudit(db, {
@@ -2095,7 +2413,7 @@ export function createEngine({
   }
 
   // P7-5：卡真正 done 才把产物落到项目自己的文件夹。
-  // 三条纪律：没配 rootDir 的项目不落；别人占着（译台等）就先不落、等心跳重试；落盘失败不改卡状态。
+// 三条纪律：没配 rootDir 的项目不落；别人占着（独占进程）就先不落、等心跳重试；落盘失败不改卡状态。
   const deliverAttempts = new Map();
   function deliverAccepted(task, runId) {
     if (!task?.project || !task?.taskId) return null;
@@ -2111,11 +2429,18 @@ export function createEngine({
       amendDoneMessage(task.taskId, `文件先没放过去：${running.join('、')} 正占着那个文件夹，等它关掉我再自动放。`);
       return { deferred: true, running };
     }
-    const out = deliverTask({ workRoot: workDir, config, task, at: clockIso() });
+    // 落盘改造：把 completion 一起交给交付层 —— artifacts 是绝对路径说明产物已在项目目录，
+    // 只核验记账，不再复制副本。
+    let completion = null;
+    try {
+      completion = JSON.parse(fs.readFileSync(path.join(workDir, 'tasks', task.taskId, 'completion.json'), 'utf8'));
+    } catch { completion = null; }
+    const out = deliverTask({ workRoot: workDir, config, task, at: clockIso(), report: completion });
+    logEvent(`deliver ${task.taskId} project=${task.project} ok=${out.ok} mode=${out.mode ?? 'copy'} code=${out.code ?? '-'} target=${out.targetDir ?? '-'}`, out.ok ? 'info' : 'warn');
     if (out.ok) {
       writeAudit(db, {
         actor: 'control-plane', action: 'delivered',
-        newValue: `${task.project}|${out.copied.length} 个文件 → ${out.targetDir}`.slice(0, 300),
+        newValue: `${task.project}|${out.mode === 'in-place' ? `${out.files?.length ?? 0} 个文件已在项目目录（不复制）` : `${out.copied.length} 个文件 → ${out.targetDir}`}`.slice(0, 300),
         runId, taskId: task.taskId,
       });
       // 完成消息在状态流转时就发了，那时还不知道落没落成；这里回来补一句「放哪了」。
@@ -2123,7 +2448,9 @@ export function createEngine({
       const target = String(out.targetDir ?? '').split(/[\\/]/).filter(Boolean).slice(-1)[0];
       amendDoneMessage(
         task.taskId,
-        `已经放进「${projectName}」${target ? ` 的 ${target} 文件夹` : '的项目文件夹'}（${out.copied.length} 个文件）。`,
+        out.mode === 'in-place'
+          ? `产物已按项目规矩落在「${projectName}」${target ? ` 的 ${target}` : ''}（${out.files?.length ?? 0} 个文件，已核对，不再复制副本）。`
+          : `已经放进「${projectName}」${target ? ` 的 ${target} 文件夹` : '的项目文件夹'}（${out.copied.length} 个文件）。`,
       );
     } else if (out.code === 'NO_ARTIFACTS') {
       // 「这卡天生没有产物」（只排班 / 只给建议 / 只做验收）不是失败：
@@ -2170,6 +2497,7 @@ export function createEngine({
       // 已记过账就结案：要么真落成了（copied 有文件），要么是「天生没产物」（NO_ARTIFACTS）。
       // 后者以前会被当成失败反复重试，重启一次刷一轮，纯噪音。
       if (last && (last.code === 'NO_ARTIFACTS'
+        || (last.mode === 'in-place' && Array.isArray(last.failed) && last.failed.length === 0 && last.files?.length)
         || (Array.isArray(last.failed) && last.failed.length === 0 && last.copied?.length))) continue;
       const attempts = deliverAttempts.get(row.taskId) ?? 0;
       if (attempts >= 5) continue;
@@ -2274,6 +2602,10 @@ export function createEngine({
     // 子卡收尾 → 看看父卡是不是「拆出去的活全回来了」，是就拼总汇报送审。
     // 放在状态机之后：父卡能收束的前提是这张子卡已经真的到终态。
     if (to === 'done' || to === 'blocked' || to === 'cancelled') settleParent(taskId);
+    // 处置卡收尾 → 原卡不能继续躺着：回到执行人手上重跑，或再往上一层报。
+    // 只在公司档打开了 escalateToBoss 时生效（默认关，保持老语义）。
+    if (config.runPolicy?.escalateToBoss === true
+      && (to === 'done' || to === 'blocked' || to === 'cancelled')) resumeParentAfterEscalation(taskId);
     return out;
   }
 
@@ -2652,6 +2984,18 @@ export function createEngine({
   // G2：卡到终态时通知外部。循环引擎据此做「完成即触发下一轮」。
   // 钩子是外部注入的，失败绝不能把一张已经办完的卡拖回失败态——只留审计。
   function noteTaskTerminal(taskId, status, runId = null) {
+    // 归口核对卡到终态时，父卡要么收账、要么打回 —— 先结算，再走外部钩子。
+    if (['done', 'failed', 'blocked', 'cancelled'].includes(status)) {
+      logEvent(`task_terminal ${taskId} ${status} run=${runId ?? '-'}`, status === 'done' ? 'info' : 'warn');
+    }
+    if (['done', 'blocked', 'cancelled'].includes(status)) {
+      try { settleAssetAck(taskId); } catch (error) {
+        writeAudit(db, {
+          actor: 'control-plane', action: 'asset_ack_settle_failed',
+          newValue: String(error.message).slice(0, 300), taskId,
+        });
+      }
+    }
     if (typeof taskTerminalHook !== 'function') return;
     try {
       taskTerminalHook({ taskId, status, runId, at: clockIso() });
@@ -2678,6 +3022,135 @@ export function createEngine({
     if (codeFiles.length && looksLikeCode(task, config.artifacts)) return { kind: 'managed-code', inferred: true };
     if (codeFiles.length) return { kind: 'scratch-code', inferred: true };
     return { kind: 'document', inferred: true };
+  }
+
+  // ── 资产归口（2026-11-18）─────────────────────────────────────
+  // 交付验收管「结果对不对」，归口回执管「东西进没进仓库」。
+  // 代码卡（managed-code + 登记了 repo）由非归口人执行时，验收通过后自动派生一张
+  // 「归口核对」卡给仓库主人（默认工程执行）：它只核对 diff / 提交 / 推送，不重做实现。
+  function assetAckNeed(task, kindHint = null) {
+    const kind = kindHint ?? inferArtifactKind(task, pendingMemory.get(task.taskId) ?? {}).kind;
+    return needsAssetAck({ task, kind, config });
+  }
+
+  function openAssetAckCard(task, need) {
+    // 已经派过核对卡：还在跑就复用；已经完成就直接补结算（重启后也能接上）。
+    const existingId = String(task.assetAckTaskId ?? '').trim();
+    if (existingId) {
+      const existing = taskById(existingId);
+      if (existing && !['done', 'blocked', 'cancelled'].includes(existing.status)) return existingId;
+      if (existing?.status === 'done') {
+        settleAssetAck(existingId);
+        return existingId;
+      }
+    }
+    const report = pendingMemory.get(task.taskId) ?? {};
+    const artifacts = Array.isArray(report.artifacts) ? report.artifacts : [];
+    const owner = need.owner;
+    const ackTaskId = `T-${shortId()}`;
+    const card = buildCard({
+      taskId: ackTaskId,
+      requestId: task.requestId,
+      title: `归口核对：${String(task.title ?? '').slice(0, 60)}`,
+      role: 'general',
+      assignee: owner,
+      mode: 'delegate',
+      assignedBy: 'control-plane',
+      assignerId: owner,
+      parentTaskId: null,
+      instructions: assetAckInstructions({ task, owner, repo: need.repo, artifacts }),
+      acceptance: [
+        'completion.json 通过 schema 校验且 status = success',
+        'summary 必须写清落地结果：commit 短哈希 + 远端分支，或「无需变更」及依据',
+      ],
+      project: task.project ?? null,
+      repo: task.repo ?? null,
+      reviewBy: null,
+      // 归口人就是资产主人：它交的回执不需要再找人验收，落盘即关单。
+      handoff: 'land',
+      allowSelfLand: true,
+    });
+    insertCard(card, owner);
+    db.prepare(`UPDATE tasks SET assetAck = 'pending', assetOwner = ?, assetAckTaskId = ?, updatedAt = ?
+      WHERE taskId = ?`).run(owner, ackTaskId, nowIso(), task.taskId);
+    writeAudit(db, {
+      actor: 'control-plane', action: 'asset_ack_opened',
+      newValue: `${owner}|${need.repo?.id ?? task.repo}|${ackTaskId}`, taskId: task.taskId,
+    });
+    return ackTaskId;
+  }
+
+  /**
+   * 验收通过后的统一出口：需要归口的先挂起，不需要的才真的 done。
+   * 所有「通过即完成」的路径都必须走它，否则 CEO 直派代码活又能绕过仓库主人。
+   */
+  function finalizeAccepted(taskId, actor, runId = null, { kindHint = null } = {}) {
+    const task = taskById(taskId);
+    if (!task) return { closed: false, reason: '任务不存在' };
+    const need = assetAckNeed(task, kindHint);
+    if (need) {
+      const ackTaskId = openAssetAckCard(task, need);
+      writeAudit(db, {
+        actor, action: 'asset_ack_required',
+        newValue: `${taskId}|验收通过，待 ${need.owner} 归口回执（${need.repo?.id ?? task.repo}）|${ackTaskId}`,
+        runId, taskId,
+      });
+      return { closed: false, pendingAssetAck: true, owner: need.owner, ackTaskId };
+    }
+    transition(db, taskId, 'done', actor, runId);
+    const fresh = taskById(taskId) ?? task;
+    flushProjectMemory(fresh, runId);
+    deliverAccepted(fresh, runId);
+    return { closed: true };
+  }
+
+  /** 归口核对卡到终态：done → 父卡收账；blocked/cancelled → 父卡打回执行岗。 */
+  function settleAssetAck(ackTaskId) {
+    const ack = taskById(ackTaskId);
+    if (!ack) return false;
+    const parent = db.prepare("SELECT * FROM tasks WHERE assetAckTaskId = ? AND assetAck = 'pending'").get(ackTaskId);
+    if (!parent) return false;
+    if (ack.status === 'done') {
+      const note = db.prepare("SELECT body FROM board_messages WHERE taskId = ? AND kind = 'done' ORDER BY rowid DESC LIMIT 1")
+        .get(ackTaskId);
+      db.prepare(`UPDATE tasks SET assetAck = 'done', assetAckAt = ?, assetAckNote = ?, updatedAt = ?
+        WHERE taskId = ?`).run(nowIso(), String(note?.body ?? '').slice(0, 600), nowIso(), parent.taskId);
+      writeAudit(db, {
+        actor: 'control-plane', action: 'asset_ack_passed',
+        newValue: `${parent.taskId}|${ackTaskId}`, taskId: parent.taskId,
+      });
+      if (parent.status === 'in_review') {
+        transition(db, parent.taskId, 'done', 'control-plane');
+        const fresh = taskById(parent.taskId);
+        if (fresh) {
+          flushProjectMemory(fresh, null);
+          deliverAccepted(fresh, null);
+        }
+      }
+      return true;
+    }
+    if (['blocked', 'cancelled'].includes(ack.status)) {
+      db.prepare(`UPDATE tasks SET assetAck = 'failed', assetAckNote = ?, updatedAt = ?
+        WHERE taskId = ?`).run(`归口核对${ack.status === 'blocked' ? '卡住' : '被取消'}（${ackTaskId}）`, nowIso(), parent.taskId);
+      writeAudit(db, {
+        actor: 'control-plane', action: 'asset_ack_failed',
+        newValue: `${parent.taskId}|${ackTaskId}|${ack.status}`, taskId: parent.taskId,
+      });
+      if (!['done', 'cancelled'].includes(parent.status)) {
+        transition(db, parent.taskId, 'in_progress', 'control-plane');
+        emitEvent({
+          type: 'issue_assigned', taskId: parent.taskId, agentId: parent.assignee,
+          payload: {
+            wakeReason: 'rework',
+            reviewNote: `归口核对没过（${ackTaskId}）：改动没进仓库 / 提交推送失败。请按归口意见修正后重交，`
+              + '必要时先向工程执行确认落地方案。',
+          },
+          dedupeKey: `asset-ack-rework:${parent.taskId}:${Date.now()}`,
+        });
+      }
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -2823,12 +3296,13 @@ export function createEngine({
   }
 
   /** 执行岗主动上报：卡转 blocked，不重试；给上级建一张「处理升级」的卡，让他带着证据决定。 */
-  function openEscalation(task, report, agentId, runId, { reason }) {
-    const to = task.escalationTo
+  function openEscalation(task, report, agentId, runId, { reason, keepStatus = false, to: toOverride = null }) {
+    const to = toOverride ?? task.escalationTo
       ?? cfgFor(task.assignee)?.escalationTo
       ?? task.reportsTo
       ?? resolveDecisionMaker(config, task.assignee);
-    if (task.status !== 'blocked') transition(db, task.taskId, 'blocked', agentId, runId);
+    // keepStatus：原卡已经处在「等人处置」的状态（blocked / awaiting_decision），不要再把它改写成 blocked。
+    if (!keepStatus && task.status !== 'blocked') transition(db, task.taskId, 'blocked', agentId, runId);
     writeAudit(db, {
       actor: agentId, action: 'escalated',
       newValue: `${to ?? '(无上级)'}|${String(reason ?? '').slice(0, 400)}`, runId, taskId: task.taskId,
@@ -2843,10 +3317,25 @@ export function createEngine({
         ? `【产物】${report.artifacts.join(', ')}` : null,
       task.repo ? `【仓库】${task.repo}（别在没定方案前提交/推送）` : null,
       '',
+      '【第一步：先判它到底在不在动 —— 别把「看不到」当成「没干」】',
+      '1）产物：去它的交付目录（项目目录；没项目就看任务目录 output/）看有没有**本轮新文件**（改动时间晚于本次派单）。',
+      '2）进程：process / CLI 席位的活，隔十秒看两次 CPU，有增量就是在跑。',
+      '3）输出：桥接落了 cli-output.log 的话，看最后几行有没有新内容。',
+      '任何一条成立 → 判「在动」：结论写「判为在动：让它继续」，并写清你是靠哪一条判的。',
+      '  控制面会把原卡送回**同一个执行人**接着干（不是换人重做），它已经写下的产物都还在，不会白干。',
+      '  这种情况不要改派、不要改验收条件、更不要自己动手重做。',
+      '三条都不成立、或根本查不到 → 再按下面的三选一给处置。',
+      '',
       '【你要决定的一件事】',
+      ...(task.status === 'in_review' ? [
+        '0）代验收并收束（你有权代审这张卡）：核对产物 / 证据后，用 `node scripts/seat.js verdict --as <你的 agentId> '
+          + `--task ${task.taskId} --pass --reason "..." 通过；不同意就 --reject 并写清要改什么。`,
+      ] : []),
       '1）改方案返工：把「改成什么」写清，让原执行人重跑；',
       '2）改派给别人；',
       '3）如果这会改变项目方向/对外承诺，上报总经理（你只负责把技术事实说清，不要自己拍板）。',
+      '',
+      '【底线】不许你自己动手重做这张卡的活，也不许让流程停在这里：处置完给一条明确结论，原卡会自动往下走。',
     ].filter(Boolean).join('\n');
     const card = buildCard({
       requestId: task.requestId,
@@ -2854,11 +3343,273 @@ export function createEngine({
       role: 'escalation', assignee: to, mode: 'delegate', assignedBy: 'control-plane',
       parentTaskId: task.taskId,
       instructions: evidence,
-      acceptance: ['明确给出一条处置：返工（改什么）/ 改派（给谁）/ 上报总经理（为什么必须他拍板）'],
+      acceptance: ['明确给出一条处置：判为在动（写清依据，让它继续）/ 返工（改什么）/ 改派（给谁）/ 上报总经理（为什么必须他拍板）'],
       difficulty: task.difficulty, project: task.project, repo: task.repo,
     });
     insertCard(card, to);
     return { to, card: card.taskId };
+  }
+
+  // 已经有一张「处置卡」在跑：别为同一件事再建第二张（否则上级会被同一张卡反复叫醒）。
+  function hasOpenEscalationCard(taskId) {
+    return childrenOf(taskId)
+      .some((k) => k.role === 'escalation' && !CHILD_CLOSED.includes(k.status));
+  }
+
+  /**
+   * 所有「卡住」最终都要走到这里：向上汇报。
+   *
+   * 为什么必须是一个统一出口：以前卡住有三种去向 —— 转救火席位（重新派活）、
+   * 直接出审批单给人、或者什么都不做就挂着。三种混着用，结果就是「有时自己动、
+   * 有时等人、有时永远不动」，人根本猜不到下一次会不会有反应。
+   *
+   * 现在的规矩（对应董事会 2026-11-17 的要求）：
+   *   ① 上级是员工 → 给他建一张「处置卡」并叫醒他，原卡不动在原地干等；
+   *   ② 只有汇报线真的到人（board / human）才出审批单 —— 这是唯一合法的人工停点；
+   *   ③ 同一张卡不会重复建处置卡。
+   */
+  function reportUpward(task, { reason = '', agentId = 'control-plane', runId = null, report = null } = {}) {
+    const escalateToBoss = config.runPolicy?.escalateToBoss === true;
+    const rawTo = task.escalationTo
+      ?? cfgFor(task.assignee)?.escalationTo
+      ?? task.reportsTo
+      ?? resolveDecisionMaker(config, task.assignee);
+    // 汇报线到顶时，resolveDecisionMaker 会把总经理自己再返回一遍（它就是最后一个节点）。
+    // 那时候再「建一张卡给自己」没有意义，也不是「向上汇报」——只能交给董事会。
+    const to = rawTo === task.assignee ? 'human' : rawTo;
+    const isAgent = Boolean(to) && to !== 'human' && to !== 'board' && cfgFor(to);
+    if (escalateToBoss && isAgent) {
+      if (hasOpenEscalationCard(task.taskId)) {
+        return { to, card: null, skipped: '已有处置卡在跑' };
+      }
+      const opened = openEscalation(task, report ?? { summary: '' }, agentId, runId, {
+        reason: reason || '卡住了，需要你处置', keepStatus: true,
+      });
+      writeAudit(db, {
+        actor: 'control-plane', action: 'reported_upward',
+        oldValue: task.status, newValue: `${task.assignee}→${to}|${String(reason).slice(0, 260)}`,
+        runId, taskId: task.taskId,
+      });
+      if (opened?.card) {
+        notifier.send({
+          title: `已向上汇报：${task.title}`,
+          body: `${task.assignee} 的这张卡走不下去了（${String(reason).slice(0, 120)}），`
+            + `已交给 ${to} 处置（处置卡 ${opened.card}）。处置完原卡会自动回到执行人手上，不用你插手。`,
+          scene: 'escalation', taskId: task.taskId,
+        });
+      }
+      return opened;
+    }
+    // 汇报线到顶：这是唯一允许停下来等人的情况。
+    if (pendingApprovalFor(task.taskId, 'review_reject')) {
+      return { to: 'human', skipped: '已有待批单' };
+    }
+    requestApproval({
+      kind: 'review_reject', taskId: task.taskId,
+      title: `阻塞上报：${task.title}`,
+      body: `${task.assignee} 的任务卡在 ${task.status}（${String(reason).slice(0, 200)}）。`
+        + '按汇报线已经汇报到顶，只能由你定：通过 / 要求重写（换人）/ 驳回（放弃）。',
+      payload: { assignee: task.assignee, reason: String(reason).slice(0, 600) },
+      requestedBy: 'control-plane',
+    });
+    writeAudit(db, {
+      actor: 'control-plane', action: 'reported_to_board',
+      newValue: String(reason).slice(0, 300), runId, taskId: task.taskId,
+    });
+    return { to: 'human', card: null };
+  }
+
+  /**
+   * 处置卡收了 → 原卡自己活过来。
+   *
+   * 没有这一步，「向上汇报」就只是把停摆从下级搬到上级：上级写完处置意见，
+   * 原卡还躺在 blocked / awaiting_decision 里等人来推。现在由控制面收账：
+   * 上级说完了就让原执行人带着这段意见重跑；上级也办不下去就让再上一层接手。
+   */
+  function resumeParentAfterEscalation(childTaskId) {
+    const child = taskById(childTaskId);
+    if (!child || child.role !== 'escalation' || !child.parentTaskId) return false;
+    const parent = taskById(child.parentTaskId);
+    if (!parent || ['done', 'cancelled'].includes(parent.status)) return false;
+    if (!CHILD_CLOSED.includes(child.status)) return false;
+    const said = childOutcome(child) || (child.status === 'done' ? '上级已处置' : '上级也没办成');
+    if (child.status !== 'done') {
+      // 上级也办不下去：往再上一层报，不要停在中间层。
+      const up = reportUpward(parent, {
+        reason: `处置卡 ${child.taskId} 没办成：${said}`.slice(0, 500),
+        agentId: 'control-plane',
+      });
+      return Boolean(up?.to);
+    }
+    const fromStatus = parent.status;
+    // 同一张卡最多被处置卡「救活」两次：再往上就是上级也解决不了的问题，
+    // 无限复活会把同一张卡变成额度黑洞（一次处置 → 一轮返工 → 再上报 → 再返工）。
+    const resumedBefore = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE taskId = ? AND action = 'resumed_after_escalation'")
+      .get(parent.taskId).n;
+    if (resumedBefore >= 2) {
+      reportUpward(parent, { reason: `已经被处置卡救活 ${resumedBefore} 次，仍走不完`, agentId: 'control-plane' });
+      return false;
+    }
+    if (fromStatus === 'blocked') transition(db, parent.taskId, 'todo', 'control-plane');
+    else if (fromStatus === 'awaiting_decision') transition(db, parent.taskId, 'in_progress', 'control-plane');
+    // todo / in_progress：卡本来就在排队，只需叫一声 + 把上级的意见带进去。
+    db.prepare('UPDATE tasks SET attempt = 0, updatedAt = ? WHERE taskId = ?').run(nowIso(), parent.taskId);
+    emitEvent({
+      type: 'issue_assigned', taskId: parent.taskId, agentId: parent.assignee,
+      payload: { wakeReason: 'rework', reviewNote: `上级处置：${said}`.slice(0, 800) },
+      dedupeKey: `resume-after-escalation:${parent.taskId}:${child.taskId}`,
+    });
+    writeAudit(db, {
+      actor: 'control-plane', action: 'resumed_after_escalation',
+      oldValue: fromStatus, newValue: `${child.taskId}｜${said}`.slice(0, 300), taskId: parent.taskId,
+    });
+    return true;
+  }
+
+  /**
+   * 手动重新派单（看板按钮 / CLI / 接口共用）。
+   *
+   * 为什么必须有这个入口：卡会留在 in_progress / blocked 而没有 Run —— 配额刚好触顶、
+   * 临时闸拦下、上一趟异常退出，都会留下这种形状。自动补偿（看门狗、补投）要等阈值，
+   * 人在看板前看着它不动却没处下手。这个动作就是「我现在就要它再跑一趟」。
+   *
+   * 边界：
+   *   · done / cancelled 不给派（终态就是终态）；
+   *   · 还有子卡没做完不给派（该做的事在子卡手里，重派只会白烧一趟）；
+   *   · 已经在跑的卡默认不给派（INLINE 模式下控不住那趟执行），要打断得显式 force；
+   *   · 挂起待决策 / 待验收同样默认不给派，先处置那张单。
+   */
+  /**
+   * 手动重派验收（2026-11-22 真机事故后新增）。
+   *
+   * 背景：验收补审满 5 次仍走不完时会写 review_stuck 并停手 —— 那时自动补审判据用完了，
+   * 但卡本身可能是好的（活早干完了），只是当初连续几次都被「人正在用键鼠」挡下。
+   * 之前没有出口：卡就一直挂着「待验收」，人只能干看着。这个方法就是那个出口：
+   * 人看一眼，确认该由谁审，手动再发一次 review_requested（计数不再受限，审计留痕）。
+   *
+   * 边界：只处理 in_review；人审卡不代拍板；有 run 在跑时让路。
+   */
+  async function retryReview(taskId, { actor = 'human', reason = '董事会手动重派验收' } = {}) {
+    const task = taskById(taskId);
+    if (!task) return { ok: false, code: 'TASK_UNKNOWN', message: `没有这张卡：${taskId}` };
+    if (task.status !== 'in_review') {
+      return { ok: false, code: 'NOT_IN_REVIEW', message: `这张卡当前是 ${task.status}，不在待验收` };
+    }
+    const busy = db.prepare("SELECT runId FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1").get(taskId);
+    if (busy) {
+      return { ok: false, code: 'REVIEW_RUNNING', message: `已经有一趟验收在跑（${busy.runId}），等它出结果` };
+    }
+    const kind = inferArtifactKind(task, {}).kind;
+    const expect = reviewerOf(task, kind);
+    if (expect === 'human') {
+      return { ok: false, code: 'HUMAN_REVIEW', message: '这张卡等人审，请在看板的审批单里处理，agent 不替你拍板' };
+    }
+    emitEvent({
+      type: 'review_requested', taskId, agentId: expect,
+      payload: { wakeReason: 'review_requested', kind, via: 'manual_retry' },
+      // 手动重派只认「这一下」，不去跟自动补审的分钟桶去重（否则同一分钟点了没反应）。
+      dedupeKey: `review-retry:${taskId}:${clock().getTime()}`,
+    });
+    writeAudit(db, {
+      actor, action: 'review_retried',
+      newValue: `${expect}|${String(reason).slice(0, 200)}`, taskId,
+    });
+    // 按钮立刻回，泵在后台推进（验收也可能卡在 GUI 上几分钟）。
+    Promise.resolve(pump()).catch(() => {});
+    return { ok: true, taskId, reviewer: expect };
+  }
+
+  async function redispatchTask(taskId, {
+    reason = '董事会手动重派', actor = 'human', force = false,
+    // 看板接口传 false：按钮要立刻有反馈，泵在后台推进。
+    // 测试 / CLI 默认 true，等泵跑完再返回，断言才拿得到后续状态。
+    awaitPump = true,
+  } = {}) {
+    const task = taskById(taskId);
+    // 提示词里可能带着人写的多行理由，压成一行再落审计（看板/CLI 都按一行显示）。
+    const why = String(reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 200) || '董事会手动重派';
+    logEvent(`redispatch ${taskId} by=${actor} force=${force} reason=${why}`, 'warn');
+    if (!task) return { ok: false, code: 'TASK_UNKNOWN', message: `没有这张卡：${taskId}` };
+    if (['done', 'cancelled'].includes(task.status)) {
+      return { ok: false, code: 'TASK_TERMINAL', message: `这张卡已经 ${task.status}，不需要重派` };
+    }
+    const openKids = db.prepare(`SELECT taskId, status FROM tasks WHERE parentTaskId = ?
+      AND status NOT IN ('done', 'cancelled') ORDER BY rowid`).all(taskId);
+    if (openKids.length && !force) {
+      return {
+        ok: false, code: 'HAS_OPEN_CHILDREN',
+        message: `这张卡还在等 ${openKids.length} 张子卡（${openKids.map((k) => k.taskId).join(', ')}）做完；重派它不会推进任何事`,
+      };
+    }
+    const running = db.prepare(`SELECT runId, agentId, startedAt FROM runs
+      WHERE taskId = ? AND status = 'running' ORDER BY rowid DESC LIMIT 1`).get(taskId);
+    const runMinutes = running ? Math.round((clock().getTime() - Date.parse(running.startedAt)) / 60000) : 0;
+    if (running && !force) {
+      return {
+        ok: false, code: 'RUNNING', runId: running.runId,
+        message: `这张卡正在跑（${running.runId}，已 ${runMinutes} 分钟）。等它交活；确认它已经卡死，再点「强制重派」打断这一趟。`,
+      };
+    }
+    if (task.status === 'awaiting_decision' && !force) {
+      return { ok: false, code: 'AWAITING_DECISION', message: '这张卡在等拍板（变更请求或审批单）；先处置那张单，重派不会让任何人替它拍板' };
+    }
+    if (task.status === 'in_review' && !force) {
+      return { ok: false, code: 'IN_REVIEW', message: '这张卡已经交活、在等验收；先看验收，确认要重跑再用「强制重派」' };
+    }
+    if (running && force) {
+      // 只是把库里的这一趟判死：INLINE 模式下没人能真的掐断那个 promise，
+      // 它以后要是还回来了，wake 的「只关自己开的那一趟」与 handleResult 的护栏会把它丢掉。
+      db.prepare("UPDATE runs SET status = 'interrupted', finishedAt = ? WHERE runId = ? AND status = 'running'")
+        .run(nowIso(), running.runId);
+      writeAudit(db, {
+        actor, action: 'run_interrupted_by_redispatch',
+        newValue: `${running.runId}｜已 ${runMinutes} 分钟｜${why}`.slice(0, 300),
+        runId: running.runId, taskId,
+      });
+      // GUI 锁跟着放：不放的话新那一趟会被 env_check 拦在门外，人点了「强制重派」却什么也没发生。
+      if (releaseGuiLockForRun(running.agentId, running.runId)) {
+        writeAudit(db, {
+          actor, action: 'gui_lock_released_redispatch',
+          newValue: `${running.runId}|${running.agentId}`, taskId,
+        });
+      }
+      // 只改库不改现场，等于「假装这一趟死了」：会话还在干，交回结果又被丢掉（T-a4d59e96）。
+      // 落一个停手信号，适配器下一轮轮询看到就自己退，旧会话不再和新会话抢同一个目录。
+      if (workDir) {
+        writeStopSignal({
+          workRoot: workDir, taskId, by: actor,
+          reason: `被强制重派，这一趟停止：${String(why).slice(0, 100)}`,
+        });
+      }
+    }
+    clearGateRetry(taskId);
+    const fromStatus = task.status;
+    db.prepare("UPDATE tasks SET status = 'todo', attempt = 0, updatedAt = ? WHERE taskId = ?").run(nowIso(), taskId);
+    writeAudit(db, {
+      actor, action: 'manual_redispatch',
+      oldValue: fromStatus, newValue: why, taskId,
+    });
+    // 同一张卡已经有一条还没消费的派活事件时不再叠一条：连点两下按钮不该排出两趟。
+    const pending = db.prepare(`SELECT eventId FROM events WHERE taskId = ?
+      AND processed = 0 AND type = 'issue_assigned' LIMIT 1`).get(taskId);
+    if (!pending) {
+      emitEvent({
+        type: 'issue_assigned', taskId, agentId: task.assignee ?? null,
+        payload: { wakeReason: 'manual_redispatch', redispatch: true, reason: why, by: actor },
+      });
+    }
+    // 泵在后台跑，不在这里等：一次重派可能要去抢 GUI、等上游服务好几分钟，
+    // 让人点完按钮盯着转圈没意义 —— 卡和事件都已落库，泵还有维护心跳兜底。
+    let pumped = { steps: 0, pending: pendingEvents(db), brief: null };
+    if (awaitPump) {
+      pumped = await pump();
+    } else {
+      Promise.resolve(pump()).catch(() => {});
+    }
+    return {
+      ok: true, taskId, from: fromStatus, to: 'todo',
+      interruptedRun: running?.runId ?? null, deduped: Boolean(pending), pumped,
+    };
   }
 
   /**
@@ -2866,6 +3617,76 @@ export function createEngine({
    * 为什么单独成一个动作而不是「再唤醒一次」：拉模式席位（工程岗）不能被直调，
    * 它只能自己来查、自己来判。把审查做成动作，谁审都一样。
    */
+  /**
+   * 让「真审查人」（中层席位）自己去审一张卡（2026-11-17）。
+   *
+   * 为什么不能只是发个通知：拉模式席位不会被任何东西叫醒，它的「下次」可能是几小时后；
+   * 而验收卡停在 in_review 时没人会再推进它。所以这里直接把它叫起来跑一趟验收会话，
+   * 结论有两条合法来路：
+   *   ① 会话里执行 `seat.js verdict`（走 reviewTask，已经落库）——这趟回来时卡已不在 in_review；
+   *   ② 报告里给 verdict 字段 —— 由这里补调 reviewTask。
+   * 两条都没有 = 它跑了一趟但没给结论：不猜、不替它判，卡留在 in_review 交给心跳兜底。
+   */
+  async function seatReview(task, reviewer, payload = {}) {
+    const outcome = await wake(task.taskId, reviewer, 'review_requested', {
+      ...payload, asReviewer: true,
+    });
+    if (!outcome || outcome.skipped || outcome.failed) {
+      // 被闸门挡下（席位在忙 / 人在用键鼠 / 额度）不是错误：卡留在 in_review，
+      // 心跳（reconcile 的补审）会再来一次，超时再转 CEO。这里只留账。
+      // 2026-11-22：让路（你在用电脑等）记成 review_yielded —— 它不扣补审额度。
+      const code = outcome?.code ?? outcome?.status ?? 'skipped';
+      writeAudit(db, {
+        actor: 'scheduler', action: isReviewYield(code) ? 'review_yielded' : 'review_deferred',
+        newValue: `${task.taskId}|${reviewer}|${code}|${
+          String(outcome?.reason ?? outcome?.error ?? '')}`.slice(0, 300),
+        taskId: task.taskId,
+      });
+      return { deferred: true, reviewer, yielded: isReviewYield(code) };
+    }
+    const fresh = taskById(task.taskId) ?? task;
+    if (fresh.status !== 'in_review') {
+      // 席位在会话里已经用 verdict 把结论落了库 —— 这是首选路径，不用引擎替它判。
+      writeAudit(db, {
+        actor: reviewer, action: 'seat_review_settled',
+        newValue: `${task.taskId}|${fresh.status}`, runId: outcome.runId, taskId: task.taskId,
+      });
+      return { settled: true, status: fresh.status, reviewer };
+    }
+    const raw = String(
+      outcome.result?.verdict ?? outcome.result?.review?.verdict ?? '',
+    ).trim().toLowerCase();
+    if (raw !== 'pass' && raw !== 'reject') {
+      // 它跑完了却没给结论：不替它判（谁审谁负责），留账让心跳补审、超时再转 CEO。
+      writeAudit(db, {
+        actor: reviewer, action: 'seat_review_no_verdict',
+        newValue: `${task.taskId}|${String(outcome.result?.summary ?? '').slice(0, 120)}`,
+        runId: outcome.runId, taskId: task.taskId,
+      });
+      return { pending: true, reviewer };
+    }
+    const reason = String(
+      outcome.result?.reason ?? outcome.result?.note ?? outcome.result?.summary ?? '',
+    ).trim().slice(0, 800);
+    try {
+      const out = reviewTask(task.taskId, { reviewer, verdict: raw, reason });
+      writeAudit(db, {
+        actor: reviewer, action: 'seat_review_verdict',
+        newValue: `${task.taskId}|${raw}|${reason.slice(0, 120)}`,
+        runId: outcome.runId, taskId: task.taskId,
+      });
+      return { ...out, reviewer };
+    } catch (error) {
+      // 状态在两条路之间被改过（比如会话里已经 verdict 了又写了报告）：以库里为准，不重复落。
+      writeAudit(db, {
+        actor: reviewer, action: 'seat_review_rejected_result',
+        newValue: `${task.taskId}|${String(error.message ?? error).slice(0, 200)}`,
+        runId: outcome.runId, taskId: task.taskId,
+      });
+      return { ignored: true, reviewer };
+    }
+  }
+
   function reviewTask(taskId, {
     reviewer, verdict, reason = '', summary = '', commit = null,
   } = {}) {
@@ -2890,9 +3711,13 @@ export function createEngine({
       taskId,
     });
     if (pass) {
-      transition(db, taskId, 'done', actor);
-      flushProjectMemory(taskById(taskId) ?? task);
-      deliverAccepted(taskById(taskId) ?? task);
+      const fin = finalizeAccepted(taskId, actor, null, { kindHint: task.repo ? 'managed-code' : null });
+      if (!fin.closed) {
+        return {
+          taskId, status: 'in_review', verdict: 'pass',
+          pendingAssetAck: true, assetOwner: fin.owner, ackTaskId: fin.ackTaskId,
+        };
+      }
       return { taskId, status: 'done', verdict: 'pass' };
     }
     transition(db, taskId, 'in_progress', actor);
@@ -2955,6 +3780,47 @@ export function createEngine({
     // 卡在跑的过程中被人工取消：结果照样留档，但不再推进状态机。
     // 不加这道护栏会撞「cancelled → in_review」的非法跳转，日志里全是假错误，
     // 而人看到的只是「我按了取消，系统却在报状态机异常」。
+    // 同理：这一趟已经被「强制重派」判死（run.interrupted），它后来的产物只留档不推进 ——
+    // 否则新一趟刚开跑，旧一趟的迟到结果会把卡直接推到 in_review。
+    if (outcome.runId) {
+      const runRow = db.prepare('SELECT status FROM runs WHERE runId = ?').get(outcome.runId);
+      if (runRow && runRow.status === 'interrupted') {
+        const live = taskById(task.taskId);
+        // 这一趟是被「强制重派」判死的，但会话并没人真的掐断 —— 它可能还在窗口里干，
+        // 而且真干完了。旧逻辑一律把结果丢掉，于是新那一趟永远等不到自己的回执、卡挂着不动
+        // （T-a4d59e96 二次事故：人看到「工程做完了」，系统还在等重派那趟）。
+        // 这里改成「任务级」认领：报告合规、status=success，就是这张卡的交付。
+        const adoptable = outcome.status === 'success' && live && !['done', 'cancelled'].includes(live.status);
+        if (!adoptable) {
+          writeAudit(db, {
+            actor: agentId, action: 'run_result_after_abandon',
+            newValue: `${outcome.runId}｜${String(outcome.status ?? '')}`.slice(0, 200),
+            runId: outcome.runId, taskId: task.taskId,
+          });
+          return { dropped: true, reason: '这一趟已被判死，结果只留档不推进' };
+        }
+        // 认领之前先让别的会话停手：同一张卡两个会话同时往一个目录写，谁都不干净。
+        const liveRuns = db.prepare("SELECT runId, agentId FROM runs WHERE taskId = ? AND status = 'running'").all(task.taskId);
+        for (const other of liveRuns) {
+          db.prepare("UPDATE runs SET status = 'interrupted', finishedAt = ?, interruptedReason = ? WHERE runId = ?")
+            .run(nowIso(), 'adopted_by_older_run', other.runId);
+          if (workDir) {
+            writeStopSignal({
+              workRoot: workDir, taskId: task.taskId, by: 'control-plane',
+              reason: `另一趟 ${outcome.runId} 已交回合格结果，本趟不用再做`,
+            });
+          }
+          try { releaseGuiLockForRun(other.agentId, other.runId); } catch { /* 不是 GUI 席位就没有锁 */ }
+        }
+        writeAudit(db, {
+          actor: agentId, action: 'run_result_adopted_after_abandon',
+          newValue: `${outcome.runId}｜被判死的会话交回合格结果，按任务级认领｜停掉 ${liveRuns.length} 趟`.slice(0, 300),
+          runId: outcome.runId, taskId: task.taskId,
+        });
+        // 重派已经把卡退回 todo 了：认领时要把它接回 in_progress，否则后面对不上状态机。
+        if (live.status === 'todo') transition(db, task.taskId, 'in_progress', agentId, outcome.runId);
+      }
+    }
     const fresh = taskById(task.taskId);
     if (!fresh || fresh.status === 'cancelled') {
       writeAudit(db, {
@@ -2963,6 +3829,8 @@ export function createEngine({
       });
       return { dropped: true, reason: '任务已取消，结果只留档不推进' };
     }
+    // 席位明确停手的分支放在下面「主动上报」之后：带 handoff=escalate 的停手要先走建处置卡，
+    // 不能被这里截走只写一条等人消息（R6 回归）。
     // P3-4：GUI 轮询先发现 needsDecision 的变更请求 —— 不当成超时或失败、不重试（§8.3 4b / §8.6）。
     if (outcome.status === 'change_requested') {
       // adapter 会在 result 里带上自己的 status / usage 等元字段；变更请求协议不接受这些，
@@ -3016,6 +3884,40 @@ export function createEngine({
           // 没卡没排班，但有答复 → 这就是「只汇报」。真的什么都没有才算空产出。
           return closeAsReport(task, result, outcome.runId);
         }
+        // ★ 先全量校验，再动手（2026-11-18 结构性修复）
+        // 一轮里既有「要派卡的任务」又有「排班建议」时，必须先把「会不会被引擎打回」全部算清：
+        // 否则会出现「一半的审批单已经写进库、另一半被静默丢掉」，CEO 回话里说「已经安排好了」，
+        // 而库里什么都没落地（T-51a0595b 真机事故）。校验是纯读的，错了就整轮不落任何东西，
+        // 带回执重新唤醒同一个 agent —— 与「报告不合格 → 重投」同一条脾气。
+        const violations = [];
+        const recurringPlan = planRecurringApprovals(recList, { task, requestedBy: agentId });
+        violations.push(...recurringPlan.errors);
+        requested.forEach((c, i) => {
+          const n = i + 1;
+          const label = String(c.title ?? '无标题').slice(0, 40);
+          if (c.reviewBy !== undefined && c.reviewBy !== null && String(c.reviewBy).trim()) {
+            try { assertReviewSeat(c.reviewBy); } catch (error) {
+              violations.push({
+                code: 'review_by_invalid',
+                reason: `第 ${n} 张卡（${label}）的 reviewBy=${c.reviewBy} 不可用：${error.message}`,
+                hint: '派卡不必写 reviewBy：不写就按「执行人的上级」自动定审查人（代码类活会落到工程岗）；'
+                  + '只有「必须董事会自己看」才写 human。',
+              });
+            }
+          }
+          if (c.handoff !== undefined && c.handoff !== null && String(c.handoff).trim()) {
+            try { assertHandoff(c.handoff); } catch (error) {
+              violations.push({
+                code: 'handoff_invalid',
+                reason: `第 ${n} 张卡（${label}）的 handoff=${c.handoff} 不合法：${error.message}`,
+                hint: 'handoff 只能写 land / review / escalate，或者不写（引擎按「谁派的活」自动定）。',
+              });
+            }
+          }
+        });
+        if (violations.length) {
+          return feedbackRuleViolation({ task, agentId, violations, runId: outcome.runId });
+        }
         // 项目归属：人没指定时由 CEO 改判（这是「不逼人选项目」的另一半）。
         // 但它只能指向「已有且配了规范」的项目；写了不存在的项目照样拒，绝不让产物落到野地里。
         let childProject = task.project ?? null;
@@ -3032,6 +3934,7 @@ export function createEngine({
           }
         }
         // 建议新建项目 → 只出一张审批单。CEO 不许自己改公司配置，董事会点头才真建。
+        let projectApprovalId = null;
         const suggestion = result.projectSuggestion
           ?? requested.find((c) => c.projectSuggestion)?.projectSuggestion;
         if (suggestion && typeof suggestion === 'object' && suggestion.id
@@ -3055,6 +3958,7 @@ export function createEngine({
               + '项目信息与规范草案已由 CEO 填好，董事会只需选「通过」或「拒绝」，有意见写在下面。',
             payload: { project: s }, requestedBy: 'ceo',
           });
+          projectApprovalId = approval.approvalId;
           writeAudit(db, {
             actor: 'ceo', action: 'project_suggested',
             newValue: `${s.id}|${approval.approvalId}`, taskId: task.taskId,
@@ -3098,36 +4002,11 @@ export function createEngine({
           });
           return { gated: 'project_pending', project: blockedOn, approvalId: pendingAp?.approvalId ?? null };
         }
-        // 建议「这活是长期的，得按节奏反复做」→ 组装成完整循环任务，出审批单。
-        // 循环任务会长期反复消耗额度（GUI 席位还抢键鼠），所以必须董事会点头才真注册；
-        // CEO 只能提，不能自己排班。一次最多提 3 条，多的截掉不静默堆积。
-        for (const sug of recList.slice(0, 3)) {
-          const built = buildRecurringJob(sug, { task, requestedBy: agentId });
-          if (built.error) {
-            writeAudit(db, {
-              actor: 'ceo', action: 'recurring_suggestion_rejected',
-              newValue: `${String(sug.title ?? '(无标题)').slice(0, 60)}|${built.error}`.slice(0, 300),
-              taskId: task.taskId,
-            });
-            continue;
-          }
-          // 同一条循环任务已经在等董事会时不出第二张单（CEO 一轮可能重复提同一条）。
-          const dup = db.prepare(`SELECT approvalId FROM approvals
-            WHERE kind = 'recurring_create' AND status = 'pending' AND requestJson LIKE ?`)
-            .get(`%"jobId":"${built.job.jobId}"%`);
-          if (dup) continue;
-          const approval = requestApproval({
-            kind: 'recurring_create', taskId: task.taskId,
-            title: `循环任务申请：${built.job.title}`,
-            body: describeRecurringJob(built.job, sug.reason),
-            payload: { job: built.job, rruleText: describeRRule(built.job.trigger.rrule) },
-            requestedBy: 'ceo',
-          });
-          writeAudit(db, {
-            actor: 'ceo', action: 'recurring_suggested',
-            newValue: `${built.job.jobId}|${approval.approvalId}`, taskId: task.taskId,
-          });
-        }
+        // 建议已经在上面的预校验里全部算过（能不能建、建给谁、审的人是谁）；
+        // 这里只做「写审批单」这一件有副作用的事，重复单在 plan 里已标掉。
+        // 循环任务会长期反复消耗额度（GUI 席位还抢键鼠），所以必须董事会点头才真注册：
+        // CEO 有「提」的权，没有「直接排」的权。
+        const recurringCreated = commitRecurringApprovals(recurringPlan, { task, requestedBy: agentId }).created;
         // 拆解说明：看板「运行与审计」里能查到 CEO 当时是怎么想的，不是黑盒。
         if (result.summary) {
           writeAudit(db, {
@@ -3163,14 +4042,10 @@ export function createEngine({
             after: Array.isArray(c.after) ? c.after : (c.after === undefined || c.after === null ? [] : [c.after]),
             // 代码类活：CEO 可以指定仓库和验收人；没指定就走引擎的默认（受管代码默认工程岗审）。
             repo: c.repo ? String(c.repo) : null,
-            // 写错了不炸整单：留痕后当没写，走默认推导（拆卡不能因为一个字段名写错就全废）。
-            reviewBy: softRoute(() => assertReviewSeat(c.reviewBy), {
-              action: 'route_field_rejected', who: 'ceo', taskId: task.taskId, field: 'reviewBy', value: c.reviewBy,
-            }),
+            // 这两个字段已在预校验阶段验过：不合法的写法会整轮回执重来，不会被静默当没写。
+            reviewBy: assertReviewSeat(c.reviewBy),
             // 交付路由：CEO 可以在派活时就定死（land = 干完直接落盘、不用回来看）。
-            handoff: softRoute(() => assertHandoff(c.handoff), {
-              action: 'route_field_rejected', who: 'ceo', taskId: task.taskId, field: 'handoff', value: c.handoff,
-            }),
+            handoff: assertHandoff(c.handoff),
             // 授权执行者自己判落盘。默认不给：上级派的活，员工无权替上级免审。
             allowSelfLand: c.allowSelfLand === true,
           });
@@ -3241,15 +4116,49 @@ export function createEngine({
           newValue: `${created.length} 张（先派 ${dispatched} 张）：${created.map((c) => c.taskId).join(', ')}｜项目 ${childProject ?? '(一次性)'}`.slice(0, 400),
           taskId: task.taskId,
         });
+        // ★ 零落地不许标「完成」（2026-11-18）
+        // 这一轮如果既没建卡、也没出审批单，它本质上就是「回话」，不是「办完了一件事」。
+        // 原来不管落没落地都走「完成：…」，于是写下「已安排好」、看板显示已完成、
+        // 库里却连一条 job 都没有（T-51a0595b 真机事故）。宁可措辞保守，也不给假回执。
+        const delivered = created.length + recurringCreated.length + (projectApprovalId ? 1 : 0);
+        if (delivered === 0) {
+          const said = String(result.answer ?? result.summary ?? '').trim();
+          if (said) {
+            writeAudit(db, {
+              actor: 'ceo', action: 'ceo_no_delivery',
+              newValue: '本轮只回话：没有新卡、没有审批单', runId: outcome.runId, taskId: task.taskId,
+            });
+            // 合法的产出（只是没落地）→ 把「连续不合规」计数清零，别让一次回话拖累下一单。
+            if ((task.attempt ?? 0) !== 0) {
+              db.prepare('UPDATE tasks SET attempt = 0, updatedAt = ? WHERE taskId = ?').run(nowIso(), task.taskId);
+            }
+            return closeAsReport(task, result, outcome.runId);
+          }
+          return feedbackRuleViolation({
+            task, agentId,
+            violations: [{
+              code: 'empty_round',
+              reason: '这一轮既没有可落地的任务，也没有审批单，而且没有给董事会的回话',
+              hint: '三选一：派卡（tasks 至少一张）；提排班 / 项目建议；把话写进 summary 或 answer 直接回话。',
+            }],
+            runId: outcome.runId,
+          });
+        }
+        if ((task.attempt ?? 0) !== 0) {
+          db.prepare('UPDATE tasks SET attempt = 0, updatedAt = ? WHERE taskId = ?').run(nowIso(), task.taskId);
+        }
         transition(db, task.taskId, 'in_review', 'ceo', outcome.runId);
         transition(db, task.taskId, 'done', 'ceo', outcome.runId);
       } else if (result.type === 'review') {
         if (result.verdict === 'pass') {
-          transition(db, task.taskId, 'done', 'ceo', outcome.runId);
-          // CEO 放行了才算这张卡真的收账，这时才把这次的经验写进项目记忆。
-          flushProjectMemory(task, outcome.runId);
-          // 同一时刻把产物落进项目自己的文件夹（不落盘不影响卡的状态）。
-          deliverAccepted(task, outcome.runId);
+          // 验收通过只是「交付没问题」；代码卡还要等仓库主人回执才算收账。
+          const fin = finalizeAccepted(task.taskId, 'ceo', outcome.runId);
+          if (!fin.closed) {
+            writeAudit(db, {
+              actor: 'ceo', action: 'ceo_accepted_waiting_asset',
+              newValue: `${task.taskId}|待 ${fin.owner} 归口回执`, runId: outcome.runId, taskId: task.taskId,
+            });
+          }
         } else {
           transition(db, task.taskId, 'in_progress', 'ceo', outcome.runId);
           emitEvent({
@@ -3273,6 +4182,26 @@ export function createEngine({
       return { escalated: true, ...opened };
     }
 
+    // 席位明确停手（写了 blocked.json / 桥接判断环境不允许）：这是有效信号，不是报告格式错误。
+    // 旧逻辑把它当「报告不合格」重试两次再转救火席位 —— 白烧两趟额度还换人（T-a4d59e96）。
+    // 放在 handoff=escalate 之后，是为了不截走「主动上报」那条路（R6）。
+    if (outcome.status === 'blocked') {
+      const why = String(outcome.result?.summary ?? outcome.result?.reason ?? '席位停手但没写原因').slice(0, 300);
+      if (fresh.status !== 'blocked') transition(db, task.taskId, 'blocked', agentId, outcome.runId);
+      db.prepare('UPDATE tasks SET humanWait = 1, humanWaitNote = ?, humanWaitAt = ?, updatedAt = ? WHERE taskId = ?')
+        .run(why, nowIso(), nowIso(), task.taskId);
+      writeAudit(db, {
+        actor: agentId, action: 'run_blocked_human_wait',
+        newValue: why, runId: outcome.runId, taskId: task.taskId,
+      });
+      recordMessage(db, {
+        from: agentId, kind: 'decision', taskId: task.taskId,
+        title: `它停下来等人：${task.title}`,
+        body: `原因：${why}\n它已经停手，不会再自己乱试；卡停在 blocked、标了「等人」，等处理完再派。`,
+      });
+      return { blocked: true, reason: why };
+    }
+
     const passed = checked.ok && report.status === 'success';
     if (!passed) {
       const attempt = (task.attempt ?? 0) + 1;
@@ -3281,19 +4210,62 @@ export function createEngine({
       const why = checked.errors.join('; ')
         || [report.status, report.reason].filter(Boolean).join('：')
         || '无原因';
+      // 上一次为什么被拒，必须带回去 —— 不带原因的重试，等于让席位把同一个错再犯一遍。
+      const prevReject = db.prepare(`SELECT newValue FROM audit WHERE taskId = ? AND action = 'report_rejected'
+        ORDER BY createdAt DESC, rowid DESC LIMIT 1`).get(task.taskId);
+      const prevWhy = prevReject?.newValue ? String(prevReject.newValue).replace(/^第 \d+ 次：/, '') : null;
+      // 只有「同一轮派活里紧挨着的上一次」才算连犯。上一轮被处置卡救活后重新开跑，
+      // 哪怕错的还是同一处，也必须给它一次正常重试 —— 否则一救活就立刻再上报，变成死循环。
+      const prevAttemptNo = prevReject?.newValue
+        ? Number(/^第 (\d+) 次：/.exec(String(prevReject.newValue))?.[1] ?? NaN) : NaN;
+      const repeatSame = prevWhy !== null && prevWhy === why
+        && Number.isFinite(prevAttemptNo) && prevAttemptNo === attempt - 1;
       writeAudit(db, {
         actor: agentId, action: 'report_rejected',
         newValue: `第 ${attempt} 次：${why}`, runId: outcome.runId, taskId: task.taskId,
       });
-      if (attempt < 2) {
+      // C2 轻量版：窗口里「说做完了」却一处产物都没落 —— 这种完成在控制面这里不成立。
+      // 不读屏、不动状态机，只把它显式标出来：否则这类情况只会表现为「静默等满超时才失败」，
+      // 人看到的只是一张迟迟不动的卡。
+      const draftIssue = String(outcome.sessionParams?.draftIssue ?? '');
+      if (attempt === 1 && (draftIssue === 'no_artifacts' || draftIssue === 'no_draft')) {
+        writeAudit(db, {
+          actor: agentId, action: 'claimed_done_no_artifact',
+          newValue: `${outcome.runId}｜${draftIssue === 'no_artifacts' ? 'draft 说成功但 output 空' : '没有 report.draft.json'}`.slice(0, 300),
+          runId: outcome.runId, taskId: task.taskId,
+        });
+        recordMessage(db, {
+          from: 'control-plane', kind: 'notice', taskId: task.taskId,
+          title: `疑似「嘴上完成」：${task.title}`,
+          body: draftIssue === 'no_artifacts'
+            ? '它在窗口里说做完了，但 output/ 里一个非空文件都没有 —— 要么只在对话里说了，要么产物写到别处去了。这趟不能按成功收账。'
+            : '它这趟没写 report.draft.json：窗口里可能说了「已完成」，但控制面只认文件，交不上就等于没交。',
+        });
+      }
+      if (attempt < 2 && !repeatSame) {
         emitEvent({
           type: 'issue_assigned', taskId: task.taskId, agentId,
-          payload: { wakeReason: 'retry' }, dedupeKey: `retry:${task.taskId}:${attempt}`,
+          payload: {
+            wakeReason: 'retry',
+            reviewNote: `上一趟报告被打回，原因：${why}。先把格式改对再交，别把同一处错误再犯一遍。`,
+          },
+          dedupeKey: `retry:${task.taskId}:${attempt}`,
         });
       } else {
         transition(db, task.taskId, 'blocked', 'control-plane', outcome.runId);
         // P4-3 / P4-5：连续两次不合格 → 先试救火席位，没配就出人审批卡（§7.4 / §7.6）。
-        escalateToRescue({ ...task, attempt }, '报告连续两次不合格');
+        // 但「两趟错在同一处」不是偶发，是格式或能力问题：换个人也照样错，得让人看一眼。
+        if (repeatSame) {
+          recordMessage(db, {
+            from: 'control-plane', kind: 'decision', taskId: task.taskId,
+            title: `报告格式卡住了：${task.title}`,
+            body: `同一处错误连犯两次，已停在 blocked，不再自动重试。\n原因：${why}\n`
+              + '要么改席位/桥接的输出，要么点「强制重派」时把这条原因带上，别让它再撞一次。',
+          });
+        }
+        escalateToRescue({ ...task, attempt }, repeatSame
+          ? '报告两趟错在同一处（不是偶发，是格式或能力问题）'
+          : '报告连续两次不合格');
       }
       return;
     }
@@ -3386,16 +4358,16 @@ export function createEngine({
     if (task.mode === 'direct' && handoff !== 'review') {
       // 直投跳过 CEO：验收条件由人写清、机器判定，合格即完成，不产生 CEO 的 Run。
       // 只对董事会负责——这就是「直投不上报」的落地。执行者要求审时走下一条。
-      transition(db, task.taskId, 'done', 'control-plane', outcome.runId);
+      const fin = finalizeAccepted(task.taskId, 'control-plane', outcome.runId, { kindHint: kind });
+      if (!fin.closed) return;
       writeAudit(db, { actor: 'human', action: 'machine_acceptance', newValue: task.taskId, runId: outcome.runId });
-      flushProjectMemory(task, outcome.runId);
-      deliverAccepted(task, outcome.runId);
       return;
     }
     // ③ 直接落盘：发布者（或获授权的执行者）判断「这活不需要第二个人再看」，
     //    就不叫任何人跑一轮验收（省一次按量计费的 Run）。
     if (handoff === 'land') {
-      transition(db, task.taskId, 'done', 'control-plane', outcome.runId);
+      const fin = finalizeAccepted(task.taskId, 'control-plane', outcome.runId, { kindHint: kind });
+      if (!fin.closed) return;
       const issuer = handoffInfo.issuer;
       writeAudit(db, {
         actor: agentId, action: 'handoff_land',
@@ -3408,8 +4380,6 @@ export function createEngine({
         ].filter(Boolean).join('｜').slice(0, 400),
         runId: outcome.runId, taskId: task.taskId,
       });
-      flushProjectMemory(task, outcome.runId);
-      deliverAccepted(task, outcome.runId);
       return;
     }
     // ④ 交审：谁发布谁审（上级派的活回上级）；代码类仍走工程岗。
@@ -3447,10 +4417,18 @@ export function createEngine({
       });
       return;
     }
-    // 拉模式席位（工程岗）不能被直调：卡留在 in_review，等它自己来审（seat.js reviews / verdict）。
+    // 中层的活：它是这张卡的审查人，卡就留在 in_review 等它给结论。
+    // 2026-11-17 补：以前这里只写一条 review_queued 就撒手，等着它「下次被叫醒时顺手看一眼」——
+    // 而它下次被叫醒可能是几小时后，中间心跳补审又把卡塞给了 CEO（中层名义上审，实际从没审过）。
+    // 现在直接把验收请求发给真审查人，它立刻被叫起来审这一张。
     writeAudit(db, {
       actor: 'control-plane', action: 'review_queued',
       newValue: `${reviewer}|${kind}|${task.repo ?? '无仓库'}`, runId: outcome.runId, taskId: task.taskId,
+    });
+    emitEvent({
+      type: 'review_requested', taskId: task.taskId, agentId: reviewer,
+      payload: { wakeReason: 'review_requested', kind, asReviewer: true },
+      dedupeKey: `review-seat:${task.taskId}:${outcome.runId}`,
     });
     // 循环轮次卡在「人叫才醒」的席位手上时，必须提醒董事会一句：
     // 这一轮不收账，下一轮到点就会被 overlapPolicy=skip 当成「上一轮还没完」跳掉，
@@ -3532,16 +4510,48 @@ export function createEngine({
     if (ev.type === 'review_requested') {
       const task = taskById(ev.taskId);
       if (!task || task.status !== 'in_review') return;
+      // 验收事件可能被补审重发、也可能在途中换了审查人：投递地址优先，
+      // 但「该由谁审」仍以库里为准（人能拍板的卡，任何 agent 都不许代审）。
+      //   地址是 CEO = 兜底/补审明确交给总经理 → 就走总经理那一趟（中层超时后不再回踢给它）；
+      //   地址不是 CEO → 只认真实审查人，防止事件过期把卡塞给一个不该审的人。
+      const kind = inferArtifactKind(task, {}).kind;
+      const reviewer = reviewerOf(task, kind);
+      if (reviewer === 'human') {
+        // 人审的卡已经出了「待我拍板」单：任何 agent 都不许代审。
+        // 不拦这一下，人还没点，CEO 那一轮验收就把卡判过了（审批单还挂着没人收）。
+        writeAudit(db, {
+          actor: 'scheduler', action: 'review_skip_human',
+          newValue: `${task.taskId}|审批单已出，等董事会拍板`, taskId: task.taskId,
+        });
+        return;
+      }
+      const target = ev.agentId === ceoId() ? ceoId() : reviewer;
+      // 中层自己审：叫醒它、拿它的结论落库。它不再把卡转给 CEO 代审。
+      if (target !== ceoId()) {
+        await seatReview(task, target, payload);
+        return;
+      }
       const outcome = await wake(task.taskId, ceoId(), 'review_requested', payload);
-      if (!outcome || outcome.skipped || outcome.failed) return;
+      if (!outcome || outcome.skipped || outcome.failed) {
+        // 验收事件是**一次性**的：泵已经把它标成 processed，这里一 return 就再也没人叫 CEO 审，
+        // 卡会永远停在 in_review（T-7a284ca4：干完了、看板一直「待验收」）。
+        // 所以被挡下必须出声；真正的补审交给维护心跳（reconcile 的 review_requeued），
+        // 不能在这里立刻重发事件，否则同一 tick 里会自旋。
+        // 让路（你在用电脑等）记 review_yielded：不扣这张卡的补审额度。
+        const deferCode = outcome?.code ?? outcome?.status ?? 'skipped';
+        writeAudit(db, {
+          actor: 'scheduler', action: isReviewYield(deferCode) ? 'review_yielded' : 'review_deferred',
+          newValue: `${task.taskId}|${deferCode}|${String(outcome?.reason ?? outcome?.error ?? '')}`.slice(0, 300),
+          taskId: task.taskId,
+        });
+        return;
+      }
       assertCeoOutput(outcome.result ?? {});
       if (outcome.result.verdict === 'pass') {
-        transition(db, task.taskId, 'done', 'ceo', outcome.runId);
         // 验收通过才算真收账。这里原来只改了状态：卡显示「完成」，产物却一直留在任务目录里，
         // 项目记忆也没落——跟 reviewTask / 审批通过两条路不一致（真机上是「说办完了，文件没进项目」）。
-        const accepted = taskById(task.taskId) ?? task;
-        flushProjectMemory(accepted, outcome.runId);
-        deliverAccepted(accepted, outcome.runId);
+        // 2026-11-18：统一过归口闸，代码卡先等仓库主人回执。
+        finalizeAccepted(task.taskId, 'ceo', outcome.runId);
       } else {
         transition(db, task.taskId, 'in_progress', 'ceo', outcome.runId);
         // CEO 的打回意见绝不能丢：只说「rework」等于让人猜要改什么（T-906d3686 事故）。
@@ -3588,11 +4598,22 @@ export function createEngine({
       return;
     }
     if (ev.type === 'escalation') {
-      // §7.4 阻塞上报：沿汇报线给出审批卡，交给决策者 / 董事会，不额外烧一次模型。
+      // §7.4 阻塞上报：先沿汇报线交给「人」（上级 agent）处置，实在到顶才出人审批单。
+      // 以前这里直接 requestApproval（人审）—— 结果每一张走不下去的卡都要人接手，
+      // 上级形同虚设，而人又看不懂技术细节（2026-11-17 董事会反馈）。
       const task = taskById(ev.taskId);
       if (!task) return;
+      const dmRaw = resolveDecisionMaker(config, task.assignee);
+      const dm = dmRaw === task.assignee ? 'human' : dmRaw;
+      const dmIsAgent = Boolean(dm) && dm !== 'human' && dm !== 'board' && cfgFor(dm);
+      if (config.runPolicy?.escalateToBoss === true && dmIsAgent) {
+        reportUpward(task, {
+          reason: payload.reason ?? '执行席位报阻塞，需要你处置',
+          agentId: 'control-plane',
+        });
+        return;
+      }
       if (pendingApprovalFor(task.taskId, 'review_reject')) return;
-      const dm = resolveDecisionMaker(config, task.assignee);
       requestApproval({
         kind: 'review_reject', taskId: task.taskId,
         title: `阻塞上报：${task.title}`,
@@ -3661,18 +4682,57 @@ export function createEngine({
     return { accepted: checked.ok, errors: checked.errors, ...pumped };
   }
 
-  // 事件泵在同一进程里只能有一个在跑：GUI 任务一次几分钟，这期间维护心跳 / HTTP 都可能来叫，
-  // 两个 pump 并发跑同一批事件会把同一张卡派两次（真机上踩过：两个 Run 抢一个窗口）。
-  let pumping = null;
+  // 事件泵：默认单趟在跑（两个 pump 并发跑同一批事件会把同一张卡派两次 —— 真机上踩过）。
+  // 但 2026-11-18 真机事故暴露了单趟的代价：GUI 一趟活要跑 5～20 分钟，handleEvent 里 await 着
+  // adapter 不放，**整条队列就被这一张卡堵死** —— 新下单的任务连事件都排不上，看起来像宕机。
+  // 现在：一趟泵占住超过 pumpUnblockMs（默认 20 秒）且外面还有排队事件、还有并发名额时，
+  // 允许再开一趟。事件认领是原子的（core.markProcessed 的 WHERE processed=0），不会重复处理；
+  // 单卡不并行由 wake() 的 runningSame 检查兜住。
+  const activePumps = [];
+  const pumpUnblockMs = () => {
+    const raw = Number(process.env.AICOMPANY_PUMP_UNBLOCK_MS ?? 20_000);
+    return Number.isFinite(raw) && raw > 0 ? raw : 20_000;
+  };
+  // 一趟泵里单条事件最多处理多久（2026-11-20 真机事故）：
+  // GUI adapter 的派发一旦挂死（窗口抢不到 / 应用不响应），handleEvent 会永远 await，
+  // pumpOnce 就永远不返回 → activePumps 里那一条永远不摘 → 后面所有事件（审批返工、手动重派）
+  // 全部排着没人处理，看板点「通过」像什么都没发生。
+  // 超时只放弃「等这一条」，不杀 run：run 仍由证据看门狗按无回执/无进度收账。
+  // 默认 3 分钟：证据看门狗本身就在 2 分钟左右判「没送到」，泵没必要比它更能忍。
+  // 卡死的派发放掉之后，run 照样由看门狗收账；正常的长活（webhook 轮询）也只会等 3 分钟就放泵，
+  // 后面的卡不会陪着一起排队。
+  const pumpEventTimeoutMs = () => {
+    const raw = Number(process.env.AICOMPANY_PUMP_EVENT_TIMEOUT_MS ?? 3 * 60_000);
+    return Number.isFinite(raw) && raw > 0 ? raw : 3 * 60_000;
+  };
+  const pumpStaleMs = () => {
+    const raw = Number(process.env.AICOMPANY_PUMP_STALE_MS ?? (pumpEventTimeoutMs() + 60_000));
+    return Number.isFinite(raw) && raw > 0 ? raw : pumpEventTimeoutMs() + 60_000;
+  };
+
   async function pumpOnce() {
     let steps = 0;
     while (steps < maxSteps) {
       const ev = nextEvent(db);
       if (!ev) break;
-      markProcessed(db, ev.eventId);
+      // 认领失败 = 别的泵已经拿走这条事件，跳过（绝不重复处理）。
+      if (!markProcessed(db, ev.eventId)) continue;
       steps += 1;
+      const timeoutMs = pumpEventTimeoutMs();
+      let timer = null;
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+        timer.unref?.();
+      });
       try {
-        await handleEvent(ev);
+        const outcome = await Promise.race([handleEvent(ev), timeout]);
+        if (outcome === TIMED_OUT) {
+          // 事件已经认领过，不会再被重放；这里只保证「泵能继续走下一张卡」。
+          writeAudit(db, {
+            actor: 'control-plane', action: 'pump_event_timeout',
+            newValue: `${ev.type}|${ev.taskId ?? '-'}|等 ${Math.round(timeoutMs / 1000)}s 未返回，先放泵（run 交给证据看门狗收账）`,
+          });
+        }
       } catch (error) {
         // 一个坏事件不能拖死整条队列： pump() 的调用方很多是 .catch(() => {})（后台触发），
         // 异常一旦从 pumpOnce 逃出去，泵就没人再拉，后面的事件永远排队（T-af72158d 事故）。
@@ -3681,6 +4741,8 @@ export function createEngine({
           actor: 'control-plane', action: 'pump_step_failed',
           newValue: `${ev.type}|${ev.taskId ?? '-'}|${String(error.message ?? error).slice(0, 300)}`,
         });
+      } finally {
+        if (timer) clearTimeout(timer);
       }
     }
     const brief = maybeBrief();
@@ -3688,9 +4750,46 @@ export function createEngine({
   }
 
   async function pump() {
-    if (pumping) return pumping;
-    pumping = pumpOnce();
-    try { return await pumping; } finally { pumping = null; }
+    const nowMs = clock().getTime();
+    // 僵尸泵清理：某条 entry 超过 stale 阈值还没返回，就当它已经挂死，先摘掉再判断。
+    // 不摘的话，newest 永远是它，pump() 就一直返回那个 never 的 promise —— 点按钮也像没反应。
+    for (let i = activePumps.length - 1; i >= 0; i -= 1) {
+      const staleFor = nowMs - activePumps[i].startedAt;
+      if (staleFor > pumpStaleMs()) {
+        const victim = activePumps.splice(i, 1)[0];
+        writeAudit(db, {
+          actor: 'control-plane', action: 'pump_stale_released',
+          newValue: `一趟泵 ${Math.round(staleFor / 1000)}s 未返回，已从并发里摘掉（事件认领是原子的，不会重复派）`,
+        });
+      }
+    }
+    const newest = activePumps[activePumps.length - 1];
+    if (newest) {
+      const age = nowMs - newest.startedAt;
+      const pending = pendingEvents(db);
+      const running = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE status = 'running'").get().n;
+      const maxConcurrent = config.runPolicy?.maxConcurrent ?? DEFAULTS.maxConcurrent;
+      // 扇出条件：手上这趟泵被慢活占住 + 外面还有事件排队 + 并发名额没用满。
+      // 只放行到这个上限，不会因为扇出把 maxConcurrent 冲爆。
+      const canFanout = pending > 0 && age >= pumpUnblockMs() && running < maxConcurrent
+        && activePumps.length < maxConcurrent;
+      if (!canFanout) return newest.promise;
+      writeAudit(db, {
+        actor: 'control-plane', action: 'pump_fanout',
+        newValue: `已有 ${activePumps.length} 趟泵在跑（最老 ${Math.round(age / 1000)}s），`
+          + `外面还排着 ${pending} 条事件，再开一趟免得全公司等一张卡`,
+      });
+    }
+    const entry = { startedAt: nowMs, promise: null };
+    const run = pumpOnce();
+    entry.promise = run;
+    activePumps.push(entry);
+    // 收尾时把自己摘掉；失败也摘（错误交给真正的调用方去记）。
+    run.then(
+      () => { const i = activePumps.indexOf(entry); if (i >= 0) activePumps.splice(i, 1); },
+      () => { const i = activePumps.indexOf(entry); if (i >= 0) activePumps.splice(i, 1); },
+    );
+    return run;
   }
 
   async function submit(req, { defer = false } = {}) {
@@ -3712,6 +4811,413 @@ export function createEngine({
   // P6-5：维护心跳。为什么必须有：闸门拦下 / 配额触顶 这类「暂时派不出去」的卡会退回 todo，
   // 但退回 todo 之后没有任何事件再叫它 —— 没人扫就永远停在那儿（看着像卡死）。
   // 这里只补「既没有待处理事件、又确实躺了一会儿」的卡，避免每轮都往审计里灌垃圾。
+  // 重启后收尸：进程没了，库里还挂着 status='running' 的 run 就是死的。
+  // 不清掉会一直占着两个地方：runPolicy.maxConcurrent 的并发名额、以及「这台席位正忙」的判断，
+  // 结果就是重启后新的卡一直不派、看板显示「干活中」但什么都没动。
+  // 只改 run 的账，不动任务卡状态（卡该怎么等还是怎么等，交给 reconcile 去补投）。
+  //
+  // GUI 锁必须一起放：文件锁按 runId 记 owner，还带 30 分钟 stale 保护。
+  // 进程已经死了，锁却还写着「被 R-xxx 占用」—— 重启之后新卡全被 env_check 拦下（20:50 真机踩到）。
+  function releaseGuiLockForRun(agentId, runId) {
+    const lockPath = cfgFor(agentId)?.adapter?.config?.lockPath;
+    if (!lockPath || !runId) return false;
+    try {
+      const lock = createGuiLock({ lockPath, now: nowIso });
+      const holder = lock.isHeld();
+      if (holder && holder !== runId) return false; // 是别人的锁，不许越权
+      lock.release(runId);
+      return true;
+    } catch { return false; }
+  }
+
+  // 「锁的主人不在了」也要放：重启时先把跑着的 run 收尸（上一段），但有些锁是**更早一次重启**
+  // 留下的 —— 那时 run 已经被判成 interrupted，这一次启动扫不到 running，锁就跟着留了下来。
+  // 不改的话，锁要等 30 分钟 stale 才自愈，中间派什么都被 env_check 拦住。
+  function releaseStaleGuiLocks() {
+    const released = [];
+    for (const agent of config.agents) {
+      const lockPath = agent.adapter?.config?.lockPath;
+      if (!lockPath) continue;
+      try {
+        const lock = createGuiLock({ lockPath, now: nowIso });
+        const holder = lock.isHeld();
+        if (!holder) continue;
+        const row = db.prepare('SELECT status, taskId FROM runs WHERE runId = ?').get(holder);
+        if (row && row.status === 'running') continue; // 真在跑，不许动
+        lock.release(holder);
+        writeAudit(db, {
+          actor: 'control-plane', action: 'gui_lock_released_stale',
+          newValue: `${holder}|${agent.id}|那一趟已经不在跑了，锁却还挂着`,
+          taskId: row?.taskId ?? null,
+        });
+        released.push({ agentId: agent.id, holder });
+      } catch { /* 锁文件坏了不阻断启动：下次 acquire 会自己接管 */ }
+    }
+    return released;
+  }
+
+  function recoverOrphanRuns() {
+    const rows = db.prepare("SELECT runId, taskId, agentId, startedAt FROM runs WHERE status = 'running'").all();
+    for (const row of rows) {
+      db.prepare("UPDATE runs SET status = 'interrupted', finishedAt = ? WHERE runId = ?").run(nowIso(), row.runId);
+      writeAudit(db, {
+        actor: 'control-plane', action: 'run_orphaned',
+        newValue: `${row.runId}|${row.agentId ?? '?'}|重启时仍在 running（起于 ${row.startedAt ?? '?'}），按中断收账`,
+        taskId: row.taskId,
+      });
+      if (releaseGuiLockForRun(row.agentId, row.runId)) {
+        writeAudit(db, {
+          actor: 'control-plane', action: 'gui_lock_released_orphan',
+          newValue: `${row.runId}|${row.agentId}|锁跟着死掉的 Run 一起放掉，否则重启后谁都派不出去`,
+          taskId: row.taskId,
+        });
+      }
+    }
+    releaseStaleGuiLocks();
+    return rows.length;
+  }
+
+  /**
+   * 证据看门狗（2026-11-18，L1/L2/L3 三步合一的机械兜底）。
+   *
+   * 解决的老毛病：run 只要在表里写着 running，引擎就一律当「在干活」。
+   * 于是「提示词粘歪了 / 窗口没激活 / agent 卡在自我确认」全都能伪装成干活，
+   * 直到 2 小时的僵死收尸才发现 —— 这中间没有任何人会收到消息。
+   *
+   * 现在的判定链（不看 agent 说了什么，只看盘上留下了什么）：
+  *   L0 没证据 → 派出去 ackTimeoutSec 还没 dispatch.json → 判「没启动」→ 中断重派；
+  *   L1 已启动 → 有 dispatch.json / 心跳（只代表进程/窗口起来了，**不代表 agent 开工**）；
+  *   L2 在动   → ack / progress / output 产物 / 草稿 任一有新鲜 mtime；
+  *   L3 已交活 → completion.json / report.draft.json 本轮已写。
+   *
+   * 2026-11-19 补一条（B1）：**心跳还在就不重派**。心跳只证明「这一趟还在 adapter 的轮询里」，
+   * 不证明「agent 在写盘」，所以它只用来推迟重派、不抬证据等级；但也不能无限续命 ——
+   * 席位自己承诺的 maxMinutes 到了再宽限一会儿仍无产出，就直接收掉并向上收束。
+   *
+   * 缺证据不判死，只做两件事：先探一次盘（探到就继续等），探不到就重派一次；
+   * 重派次数用尽 → 走 reportUpward 开处置卡交给上级 agent（L3），不许停在这儿等人。
+   */
+  function evidenceWatch({ limit = 20 } = {}) {
+    if (config.runPolicy?.evidenceEnabled !== true) {
+      return { checked: 0, redispatched: 0, escalated: 0 };
+    }
+    const ackMs = Math.max(1000, Number(config.runPolicy?.ackTimeoutSec ?? DEFAULTS.ackTimeoutSec) * 1000);
+    const idleMs = Math.max(1000, Number(config.runPolicy?.idleTimeoutSec ?? DEFAULTS.idleTimeoutSec) * 1000);
+    const maxAttempts = Math.max(1, Number(config.runPolicy?.maxDispatchAttempts ?? DEFAULTS.maxDispatchAttempts));
+    // 心跳续命的两个参数（2026-11-19，见下面 B1 段的真机误伤说明）。
+    const heartbeatGraceMs = Math.max(30_000, Number(config.runPolicy?.heartbeatGraceSec ?? DEFAULTS.heartbeatGraceSec) * 1000);
+    const budgetSlackMs = Math.max(0, Number(config.runPolicy?.seatBudgetSlackSec ?? DEFAULTS.seatBudgetSlackSec) * 1000);
+    // 席位自己承诺的最长跑法（gui-template 的 maxMinutes）。有它才谈得上「超预算」；
+    // 没配的席位（cli / http）没有这个承诺，就只按心跳判。
+    const seatBudgetMs = (agentId) => {
+      const minutes = Number(cfgFor(agentId)?.adapter?.config?.maxMinutes);
+      return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
+    };
+    const rows = db.prepare(`SELECT runId, taskId, agentId, wakeReason, startedAt, evidenceLevel
+      FROM runs WHERE status = 'running'`).all();
+    let checked = 0;
+    let redispatched = 0;
+    let escalated = 0;
+
+    const attemptsOf = (taskId) => db.prepare(`SELECT COUNT(*) AS n FROM audit
+      WHERE taskId = ? AND action IN ('redispatch_no_dispatch','redispatch_no_evidence')`).get(taskId).n;
+
+    const persist = (run, probe) => {
+      const nowTxt = clockIso();
+      if (probe.dispatch.confirmed) {
+        db.prepare('UPDATE runs SET dispatchConfirmedAt = COALESCE(dispatchConfirmedAt, ?) WHERE runId = ?')
+          .run(probe.dispatch.at ?? nowTxt, run.runId);
+      }
+      if (probe.ackAt) {
+        db.prepare('UPDATE runs SET ackAt = COALESCE(ackAt, ?) WHERE runId = ?').run(probe.ackAt, run.runId);
+      }
+      if (probe.activityAt) {
+        db.prepare('UPDATE runs SET lastActivityAt = ? WHERE runId = ?').run(probe.activityAt, run.runId);
+      }
+      db.prepare('UPDATE runs SET evidenceLevel = ?, evidenceKinds = ? WHERE runId = ?')
+        .run(probe.level, JSON.stringify(probe.kinds), run.runId);
+    };
+
+    const interrupt = (task, run, reason, action) => {
+      const changed = db.prepare(`UPDATE runs SET status = 'interrupted', finishedAt = ?, interruptedReason = ?
+        WHERE runId = ? AND status = 'running'`).run(clockIso(), String(reason).slice(0, 300), run.runId);
+      if (!Number(changed.changes ?? 0)) return false;
+      if (releaseGuiLockForRun(run.agentId, run.runId)) {
+        writeAudit(db, { actor: 'control-plane', action: 'gui_lock_released', newValue: run.runId, taskId: task.taskId, runId: run.runId });
+      }
+      writeAudit(db, {
+        actor: 'control-plane', action,
+        newValue: `${run.runId}|${run.agentId}|${String(reason).slice(0, 400)}`,
+        taskId: task.taskId, runId: run.runId,
+      });
+      return true;
+    };
+
+    const requeue = (task, run, reason, opts = {}) => {
+      const attempt = attemptsOf(task.taskId);
+      // maxDispatchAttempts 的口径是「一共派几次（含首次）」，不是「重派几次」。
+      // attempt 记的是已经重派过几次：首次失败 attempt=0 → 还能再派一次；再失败 attempt=1 → 用尽。
+      // 「再派一次也一样」时也能直接跳升级：心跳在、但席位已经跑穿了自己的预算。
+      const exhausted = opts.escalate === true || (attempt + 1 >= maxAttempts);
+      if (exhausted) {
+        // L3：自动手段用尽 → 先把这趟假跑的 run 收掉（否则它会一直占并发、并让卡看起来「在干活」），
+        // 再向上收束，带证据包，让上级 agent 决定代验收还是打回。
+        // 这一步以前漏了中断：第三趟没起来的 run 会一直挂着 running，直到 2 小时僵死收尸。
+        interrupt(task, run, reason, opts.action ?? 'run_interrupted_by_evidence');
+        if (!hasOpenEscalationCard(task.taskId)) {
+          const summary = [
+            `【证据】level=${opts.level ?? 0} kinds=${(opts.kinds ?? []).join(',') || '(无)'}`,
+            `【判断】${String(reason).slice(0, 500)}`,
+            opts.evidence ? `【现场】${String(opts.evidence).slice(0, 500)}` : null,
+          ].filter(Boolean).join('\n');
+          // 执行卡：置为 blocked（等上级处置）再开处置卡。保持 todo 的话，常规补投每分钟会再派一次，
+          // 等于「边等上级、边继续烧额度」。验收卡不能置 blocked：验收动作只认 in_review。
+          let waiting = task;
+          if (task.status !== 'in_review'
+            && (task.status === 'todo' || task.status === 'in_progress')) {
+            db.prepare(`UPDATE tasks SET status = 'blocked', updatedAt = ?
+              WHERE taskId = ? AND status IN ('todo','in_progress')`)
+              .run(clockIso(), task.taskId);
+            writeAudit(db, {
+              actor: 'control-plane', action: 'blocked_by_evidence',
+              oldValue: task.status, newValue: 'blocked', taskId: task.taskId, runId: run.runId,
+            });
+            waiting = taskById(task.taskId) ?? task;
+          }
+          const up = reportUpward(waiting, {
+            reason: `证据看门狗：重派 ${attempt} 次仍无有效证据（${String(reason).slice(0, 240)}）`,
+            agentId: 'control-plane', runId: run.runId,
+            report: { summary, artifacts: [] },
+          });
+          writeAudit(db, {
+            actor: 'control-plane', action: 'evidence_escalated',
+            newValue: `${task.taskId}|第 ${attempt + 1} 次派单用尽|${up?.to ?? 'human'}`, taskId: task.taskId, runId: run.runId,
+          });
+        }
+        return true;
+      }
+      // 卡还在跑（库里 running）→ 先中断这一趟，再把卡送回待派状态；否则 wake 会被并发上限挡住。
+      interrupt(task, run, reason, opts.action ?? 'run_interrupted_by_evidence');
+      if (task.status === 'in_review') {
+        const expect = reviewerOf(task, null);
+        if (!expect || expect === 'human') {
+          reportUpward(task, { reason: `验收 run 无证据可看：${reason}`, agentId: 'control-plane', runId: run.runId });
+          return false;
+        }
+        emitEvent({
+          type: 'review_requested', taskId: task.taskId, agentId: expect,
+          payload: { wakeReason: 'review_requested', via: 'evidence-watchdog' },
+          dedupeKey: `evidence-review:${task.taskId}:${run.runId}`,
+        });
+      } else {
+        // 走和「人工强制重派」同一条写路径：in_progress → todo 不是合法的用户态跳转，
+        // 但引擎自己有资格把「已被判死的那一趟」撤掉、把卡放回待派队列。
+        if (task.status === 'in_progress') {
+          db.prepare("UPDATE tasks SET status = 'todo', attempt = 0, updatedAt = ? WHERE taskId = ?")
+            .run(clockIso(), task.taskId);
+          writeAudit(db, {
+            actor: 'control-plane', action: 'requeue_by_evidence',
+            oldValue: task.status, newValue: 'todo', taskId: task.taskId, runId: run.runId,
+          });
+        }
+        emitEvent({
+          type: 'issue_assigned', taskId: task.taskId, agentId: task.assignee,
+          payload: { wakeReason: 'redispatch', evidenceReason: String(reason).slice(0, 300), attempt: attempt + 1 },
+          dedupeKey: `evidence-requeue:${task.taskId}:${run.runId}`,
+        });
+      }
+      writeAudit(db, {
+        actor: 'control-plane', action: opts.auditAction ?? 'redispatch_no_evidence',
+        newValue: `${task.taskId}|第 ${attempt + 1} 次派单|${String(reason).slice(0, 360)}`,
+        taskId: task.taskId, runId: run.runId,
+      });
+      return true;
+    };
+
+    for (const run of rows) {
+      if (redispatched >= limit) break;
+      const task = taskById(run.taskId);
+      if (!task) continue;
+      // 拉模式席位（人自己来领 / 桥接客户端来 checkout）没有「引擎启动回执」这回事：
+      // 它领走之前本来就不会有 dispatch.json，拿启动超时去杀它等于把 pull 席位全判死。
+      if (cfgFor(run.agentId)?.dispatch === 'pull') continue;
+      // 不看板上的卡：已 done/cancelled 的 run 由收尸逻辑处理。
+      if (['done', 'cancelled'].includes(task.status)) continue;
+      checked += 1;
+      const probe = probeRun({
+        workRoot: workDir, taskId: run.taskId, run, now: clock,
+        // 产物可能写在项目交付目录（落盘改造后的默认），只盯任务目录 output/ 会看不见它在干活。
+        extraDirs: [projectWriteDirOf(config, task).dir].filter(Boolean),
+      });
+      persist(run, probe);
+      const ageMs = clock().getTime() - Date.parse(run.startedAt ?? clockIso());
+
+      // A）连启动都没确认：这不是「干得慢」，是「进程根本没起来」。
+      if (!probe.dispatch.confirmed && ageMs > ackMs) {
+        const ok = requeue(task, run, `派出去 ${Math.round(ageMs / 1000)} 秒仍无启动回执（dispatch.json 不存在，进程没起来）`, {
+          action: 'run_interrupted_no_dispatch',
+          auditAction: 'redispatch_no_dispatch',
+          level: probe.level,
+          kinds: probe.kinds,
+          evidence: `machineAt=${probe.machineAt ?? '(无)'} activityAt=${probe.activityAt ?? '(无)'}`,
+        });
+        if (ok) redispatched += 1;
+        continue;
+      }
+      if (!probe.dispatch.confirmed) continue;
+
+      // B）起来了（dispatch.json / 心跳有），但多久都看不到 agent 侧的任何痕迹。
+      //    耐心的口径（2026-11-19 二次修正）：**不再按「有没有 ack」减半**。
+      //    真机：GUI 席位的 agent 常整趟不写 ack.md；再叠加 idleTimeoutSec 减半 → 7.5 分钟就掀翻，
+      //    而它接的实际是一小时的活，七八分钟可能才把文件读完。接入的模型/工具/运营商各不相同，
+      //    慢是常态不是故障 —— 拿「没回执」当「不干活」，等于用最不靠谱的信号做最贵的决定（重派 = 同一件活干两遍）。
+      //    所以耐心按「座位自己承诺的预算」给：有预算的席位给到预算的一半（最多 2×idle），没预算的退回 idle。
+      const budgetMs = seatBudgetMs(run.agentId);
+      const patienceMs = budgetMs
+        ? Math.max(idleMs, Math.min(budgetMs / 2, idleMs * 2))
+        : idleMs;
+      const lastAgentMs = probe.activityAt ? Date.parse(probe.activityAt) : null;
+      const quietMs = lastAgentMs == null ? ageMs : clock().getTime() - lastAgentMs;
+      if (quietMs > patienceMs) {
+        // B1）心跳还在 → 这一趟仍在 adapter 的轮询里，窗口还开着，只是还没写盘。
+        //   2026-11-19 真机误伤（T-6493fc51）：执行席位这趟 dispatch✓ heartbeat✓，7.9 分钟没写 progress，
+        //   被按「无 ack 耐心减半 = 7.5 分钟」砍掉；重派的那一趟 3 分钟就干完了 —— 说明第一趟本来就在干，
+        //   我们只是看不到它在写什么。看门狗比干活的人还不耐烦，根因在这儿。
+        //   所以只要心跳新鲜就继续等：心跳只证明「机器还在跑这一趟」，不证明「agent 在产出」，
+        //   因此它只用来**推迟重派**，不给它抬证据等级（level 仍是 1）。
+        // 判活体只认心跳：dispatch.json 是「送出去那一下」的回执，不是持续心跳。
+        const hbMs = probe.heartbeatAt ? Date.parse(probe.heartbeatAt) : null;
+        const hbFresh = hbMs != null && (clock().getTime() - hbMs) <= heartbeatGraceMs;
+        const overBudget = budgetMs != null && ageMs > budgetMs + budgetSlackMs;
+        // P1（2026-11-23）：心跳只证明「适配器还在轮询」。产出心跳（run-progress.json）
+        // 只在本轮产物真的增长时才更新，它过期 = 这一趟可能没在长东西（在长考，或在等人）。
+        // 两个阈值都默认 0 = 关闭，老配置行为不变。
+        const pbMs = probe.progressBeatAt ? Date.parse(probe.progressBeatAt) : null;
+        const noProgressMs = pbMs == null ? ageMs : clock().getTime() - pbMs;
+        const alertMin = Number(config.runPolicy?.noProgressAlertMinutes ?? 0);
+        const stopMin = Number(config.runPolicy?.noProgressStopMinutes ?? 0);
+
+        if (hbFresh && !overBudget) {
+          // P1-5（2026-11-23）：心跳在、产出心跳过期 —— 分两档处理，不把「长考」当「等人」误杀。
+          //   ① 过 alert 线：报一次董事会（不改状态、不打断）；
+          //   ② 过 stop 线：判「疑似中途等人」，收掉这一趟、把卡挂起并置 humanWait，不再耗到 60 分钟。
+          if (alertMin > 0 && noProgressMs > alertMin * 60_000) {
+            const alerted = db.prepare(`SELECT 1 AS x FROM audit
+              WHERE runId = ? AND action = 'no_progress_alert' LIMIT 1`).get(run.runId);
+            if (!alerted) {
+              writeAudit(db, {
+                actor: 'control-plane', action: 'no_progress_alert',
+                newValue: `${run.runId}|心跳在，但 ${Math.round(noProgressMs / 60_000)} 分钟没有新产物（可能长考，也可能在等人）`,
+                taskId: task.taskId, runId: run.runId,
+              });
+              notifier.send({
+                title: `这趟很久没产出：${task.taskId}`,
+                body: `心跳还在，但任务目录 ${Math.round(noProgressMs / 60_000)} 分钟没有新文件。`
+                  + '可能它还在长考，也可能在会话里等人回答。先不动它，只是让你知道。',
+                scene: 'decision', taskId: task.taskId,
+              });
+            }
+          }
+          if (stopMin > 0 && noProgressMs > stopMin * 60_000
+            && (task.status === 'todo' || task.status === 'in_progress')) {
+            const stopped = interrupt(task, run,
+              `心跳在，但 ${Math.round(noProgressMs / 60_000)} 分钟零产出，判疑似中途等人`,
+              'run_interrupted_no_progress');
+            if (stopped) {
+              db.prepare(`UPDATE tasks SET status = 'blocked', humanWait = 1, humanWaitNote = ?, humanWaitAt = ?, updatedAt = ?
+                WHERE taskId = ? AND status IN ('todo','in_progress')`).run(
+                `心跳在但 ${Math.round(noProgressMs / 60_000)} 分钟零产出，系统判为「等人配合」并停手`,
+                clockIso(), clockIso(), task.taskId,
+              );
+              writeAudit(db, {
+                actor: 'control-plane', action: 'no_progress_human_wait',
+                newValue: `${task.taskId}|${run.runId}|停手，置等人配合，等董事会一句话再放行`,
+                taskId: task.taskId, runId: run.runId,
+              });
+              recordMessage(db, {
+                from: run.agentId, kind: 'decision', taskId: task.taskId,
+                project: task.project ?? null,
+                title: `它停下来等人：${task.title}`,
+                body: [
+                  `${speakerLabel(config, run.agentId)} 已经 ${Math.round(noProgressMs / 60_000)} 分钟没有任何产出，`
+                    + '心跳还在，判断是在会话里等人回答（不是在干活）。',
+                  '我已经替你把这趟停手、把卡挂起，不再空耗到 60 分钟超时。',
+                  '你看一眼它的窗口（任务目录 screenshots/ 里有截图），把要它做的事写进答复，再点重派，它就会带着答复继续。',
+                ].join('\n'),
+              });
+              continue;
+            }
+          }
+          // 每分钟写一条会把审计刷满；每一趟只记一次「看见了，所以没动手」，事后能答「为什么它没被砍」。
+          const seen = db.prepare(`SELECT 1 AS x FROM audit
+            WHERE runId = ? AND action = 'stall_wait_heartbeat' LIMIT 1`).get(run.runId);
+          if (!seen) {
+            writeAudit(db, {
+              actor: 'control-plane', action: 'stall_wait_heartbeat',
+              newValue: `${run.runId}|安静 ${Math.round(quietMs / 60000)} 分钟，但心跳在（${
+                Math.round((clock().getTime() - hbMs) / 1000)} 秒前）→ 不重派`,
+              taskId: task.taskId, runId: run.runId,
+            });
+          }
+          continue;
+        }
+
+        if (hbFresh && overBudget) {
+          // 心跳在、席位承诺的 maxMinutes 都过了还是一个字没产出：这不是「慢」，是这趟失控了。
+          // 重派只会再失控一次，所以直接收掉，向汇报线上的上级收束（L3 同一出口）。
+          const ok = requeue(task, run,
+            `席位已跑超自身预算 ${Math.round(budgetMs / 60000)} 分钟（+${Math.round(budgetSlackMs / 60000)} 分钟宽限）仍无任何产出，心跳尚在但已不可能是正常慢`,
+            {
+              escalate: true,
+              level: probe.level,
+              kinds: probe.kinds,
+              evidence: `ageMin=${Math.round(ageMs / 60000)} budgetMin=${Math.round(budgetMs / 60000)} heartbeatAgeSec=${Math.round((clock().getTime() - hbMs) / 1000)}`,
+            });
+          if (ok) escalated += 1;
+          continue;
+        }
+
+        // B2）心跳也没有了（adapter 死了 / 这一趟根本没在轮询）→ 老逻辑：探不到证据就重派。
+        const ok = requeue(task, run, `进程已起来但 ${Math.round(quietMs / 60000)} 分钟没有任何产出痕迹（ack=${probe.ackAt ?? '无'}，level=${probe.level}，心跳=${hbMs ? '有但不新鲜' : '无'}）`, {
+          auditAction: 'redispatch_no_evidence',
+          level: probe.level,
+          kinds: probe.kinds,
+          evidence: `machineAt=${probe.machineAt ?? '(无)'} deliverable=${probe.deliverable.kind ?? '(无)'}`,
+        });
+        if (ok) redispatched += 1;
+      }
+    }
+    if (redispatched > 0) {
+      writeAudit(db, { actor: 'control-plane', action: 'evidence_watch', newValue: `checked=${checked} redispatched=${redispatched}` });
+    }
+    return { checked, redispatched, escalated };
+  }
+
+  // P1-3（2026-11-23）：每趟 run 落一条结构化记录，出问题不用再翻五个文件拼时间线。
+  // 只回填最近几趟已结束的；已写过就跳过（幂等），绝不碰正在跑的 run。
+  function writeRunRecords({ limit = 10 } = {}) {
+    const rows = db.prepare(`SELECT runId, taskId, agentId, wakeReason, status, revision, quotaUnits,
+      startedAt, finishedAt, dispatchConfirmedAt, ackAt, lastActivityAt, evidenceLevel,
+      evidenceKinds, interruptedReason
+      FROM runs WHERE status != 'running' ORDER BY COALESCE(finishedAt, startedAt) DESC LIMIT ${Number(limit)}`).all();
+    const dir = path.join(workDir, 'runs');
+    let wrote = 0;
+    for (const r of rows) {
+      const file = path.join(dir, `${r.runId}.json`);
+      if (fs.existsSync(file)) continue;
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        const durationSec = r.startedAt && r.finishedAt
+          ? Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt)) / 1000) : null;
+        let kinds = [];
+        try { kinds = JSON.parse(r.evidenceKinds ?? '[]'); } catch { kinds = []; }
+        fs.writeFileSync(file, `${JSON.stringify({ ...r, evidenceKinds: kinds, durationSec, writtenAt: clockIso() }, null, 2)}\n`, 'utf8');
+        wrote += 1;
+      } catch { /* 记录失败不影响引擎 */ }
+    }
+    return wrote;
+  }
+
   async function reconcile({ olderThanMs = 60_000, limit = 20 } = {}) {
     // 先把「上游已完成、下游该放行」的补投掉：同一轮心跳里的 pump 就能直接推进，
     // 不用拖到下一分钟。重启后卡在依赖上的链，靠这一步自己活过来。
@@ -3727,6 +5233,23 @@ export function createEngine({
       const active = db.prepare("SELECT 1 AS n FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1")
         .get(row.taskId);
       if (active) { waiting += 1; continue; }
+      // 父卡还有子卡没收尾：它现在的职责是「等子卡回来」，不是重新开跑。
+      // 2026-11-17 真机：父卡派完子卡、交活没成功（报告被判退）→ 卡回 todo →
+      // 补投又把它叫起来 → 它照着原指令再拆一遍，子卡越派越多、活没人收。
+      // 这里顺手把它正式置为「等子卡」，等最后一张收尾时 settleParent 才会拼总汇报。
+      const openKids = childrenOf(row.taskId).filter((k) => !CHILD_CLOSED.includes(k.status));
+      if (openKids.length) {
+        const marked = db.prepare('UPDATE tasks SET waitingChildren = 1, updatedAt = ? WHERE taskId = ? AND waitingChildren = 0')
+          .run(nowIso(), row.taskId);
+        if (Number(marked.changes ?? 0)) {
+          writeAudit(db, {
+            actor: 'scheduler', action: 'parent_marked_waiting',
+            newValue: `还有 ${openKids.length} 张子卡没收尾，父卡改为等子卡（不再重投）`, taskId: row.taskId,
+          });
+        }
+        waiting += 1;
+        continue;
+      }
       // 依赖没满足的卡也不是「躺着」：它在等上游。重投只会被 runPolicy 拦下来白记一条。
       if (unmetDependencies(row).length) { waiting += 1; continue; }
       // 拉模式席位的卡更不是「躺着」：它在等那个人来领。重投只会每 60 秒刷一条 pull 拦截。
@@ -3741,6 +5264,229 @@ export function createEngine({
       });
       requeued += 1;
       if (requeued >= limit) break;
+    }
+    // ① 僵死 run 收尸：进程被 kill / 卡在适配器里，表里还挂着 running 的 run 会同时做三件坏事 ——
+    //    占全局并发名额、让同一张卡的重投与验收全部「让路」、看板显示「干活中」但其实没人干活。
+    //    超过 runPolicy.maxRunHours（默认 2h）的一律按中断收账。真在跑的长任务不会超过这个上限。
+    const maxRunHours = config.runPolicy?.maxRunHours ?? DEFAULTS.maxRunHours;
+    const runCutoff = clock().getTime() - maxRunHours * 3600 * 1000;
+    let recoveredRuns = 0;
+    for (const r of db.prepare("SELECT runId, taskId, agentId, startedAt FROM runs WHERE status = 'running'").all()) {
+      if (Date.parse(r.startedAt) > runCutoff) continue;
+      db.prepare("UPDATE runs SET status = 'interrupted', finishedAt = ? WHERE runId = ?").run(clockIso(), r.runId);
+      writeAudit(db, {
+        actor: 'control-plane', action: 'run_timeout',
+        newValue: `${r.runId}|${r.agentId ?? '?'}|running 超过 ${maxRunHours}h（起于 ${r.startedAt ?? '?'}），按中断收账`,
+        taskId: r.taskId,
+      });
+      recoveredRuns += 1;
+    }
+    // ①b 证据看门狗：先按「盘上证据」判断 run 是真跑还是假跑，再走 ② 的补审 / ③ 的状态看门狗。
+    //    放在这里是因为它要赶在补审之前把假跑的 run 收掉，否则「有 run 在跑」会一直让补审让路。
+    const evidence = evidenceWatch({ limit });
+    // P1-3：顺手把最近几趟已结束的 run 落成 run.json（幂等，几毫秒）。
+    writeRunRecords({ limit: 10 });
+    // ② 验收补审：in_review 但既没 Run 在跑、也没有排队中的验收事件 —— 说明那次 review_requested
+    //    被吞掉了（并发让路 / 适配器失败 / 进程重启）。事件是一次性的，不补就永远停在「待验收」。
+    //    60 秒一次心跳补，按分钟去重；补满 5 次仍走不完就停下来交给董事会，别再自动烧 CEO 额度。
+    let reviewRequeued = 0;
+    const reviewMs = Math.max(30_000, olderThanMs);
+    // 补审该发给「真审查人」，不是一律发给 CEO（2026-11-17）。
+    //   原来的写法让中层的验收职责形同虚设：子卡交活 60 秒后，本该工程岗审的活就摆到了 CEO 面前，
+    //   工程岗既没被叫醒也没机会审，CEO 的额度却被代审吃掉。
+    //   新规矩：人审 → 不补（审批单已经出了）；中层 → 先叫它，等 seatReviewFallbackMinutes 还不审才转 CEO；
+    //   CEO → 照旧。0 = 不等待，立即归 CEO（保持老配置语义）。
+    const seatFallbackMs = Number(config.runPolicy?.seatReviewFallbackMinutes ?? 0) * 60 * 1000;
+    for (const row of db.prepare("SELECT taskId, updatedAt FROM tasks WHERE status = 'in_review'").all()) {
+      if (Date.parse(row.updatedAt) > clock().getTime() - reviewMs) continue;
+      const busy = db.prepare("SELECT 1 AS n FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1").get(row.taskId);
+      if (busy) continue;
+      const queued = db.prepare(`SELECT 1 AS n FROM events
+        WHERE taskId = ? AND processed = 0 AND type = 'review_requested' LIMIT 1`).get(row.taskId);
+      if (queued) continue;
+      const reviewTaskRow = taskById(row.taskId);
+      if (!reviewTaskRow) continue;
+      // P0-1（2026-11-23）：等归口回执 / 等人配合，是「有正当理由不动」，不是验收事件被吞。
+      // 真机事故：父卡验收 pass 后在等归口，补审循环把它当成「没人审」反复补，5 次后停手，
+      // 白烧了 4 次验收 run（每次 3～4 分钟），卡却一步没动。
+      if (String(reviewTaskRow.assetAck ?? '') === 'pending') continue;
+      if (Number(reviewTaskRow.humanWait ?? 0) === 1) continue;
+      // 这张卡的验收已经交给上级处置（证据层升级卡在跑）：不要再自动补审。
+      // 否则「上级在审」和「引擎每 5 分钟再派一次验收」会同时发生，额度白烧、结论还可能打架。
+      if (hasOpenEscalationCard(row.taskId)) continue;
+      const reviewKind = inferArtifactKind(reviewTaskRow, {}).kind;
+      const expect = reviewerOf(reviewTaskRow, reviewKind);
+      // 人审：审批单已经在看板上等人了，agent 不许替人拍板。
+      if (expect === 'human') continue;
+      const waitingMs = clock().getTime() - Date.parse(row.updatedAt);
+      let target = expect;
+      let fallbackNote = null;
+      if (expect !== ceoId()) {
+        if (!(seatFallbackMs > 0) || waitingMs > seatFallbackMs) {
+          target = ceoId();
+          fallbackNote = `${expect}|待验收 ${Math.round(waitingMs / 60_000)} 分钟仍未审，转总经理兜底`;
+        }
+      }
+      // 补审额度只算「真失败」：被你正在用电脑让路（review_yielded）的不算。
+      // 2026-11-22 董事会定规矩 —— 人一忙，5 次很快烧光，卡就永久停在待验收。
+      const requeuedN = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE taskId = ? AND action = 'review_requeued'")
+        .get(row.taskId).n;
+      const yieldedN = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE taskId = ? AND action = 'review_yielded'")
+        .get(row.taskId).n;
+      const attempts = Math.max(0, requeuedN - yieldedN);
+      if (attempts >= 5) {
+        // 2026-11-22 真机事故：这里原本是「attempts === 5 时记一条」，但那只是计数，
+        // 下个 60 秒心跳 attempts 依然是 5 → 每分钟又记一条 review_stuck + 又转一次 CEO，
+        // 一张卡两天刷了 1600 多条审计、一直在刷 updatedAt。现在按「是否已经记过」去重：
+        // 只要卡上已经有 review_stuck，就彻底静默，等董事会手工处理（或调 review-retry）。
+        const alreadyStuck = db.prepare(
+          "SELECT 1 AS n FROM audit WHERE taskId = ? AND action = 'review_stuck' LIMIT 1",
+        ).get(row.taskId);
+        if (!alreadyStuck) {
+          writeAudit(db, {
+            actor: 'control-plane', action: 'review_stuck',
+            newValue: `补审 ${attempts} 次仍停在待验收（当前该由 ${target} 审；另有 ${yieldedN} 次因让路未计额度），`
+              + '已停止自动补审，请董事会手工处理',
+            taskId: row.taskId,
+          });
+          notifier.send({
+            title: `这张卡验收走不完：${row.taskId}`,
+            body: `自动补了 ${attempts} 次验收都没走完（该由 ${cfgFor(target)?.postTitle ?? target} 审）。已停止自动补审，`
+              + '请你看一眼它到底做完了没，手工验收或打回。',
+            scene: 'decision', taskId: row.taskId,
+          });
+        }
+        continue;
+      }
+      // 第二道兜底：就算额度还没用完，等得实在太久了（默认 12 小时）也要有人知道 ——
+      // 只让路不失败的话额度永远用不完，卡就能无声地等下去。
+      const escalateMin = Number(config.runPolicy?.reviewEscalateMinutes ?? 0);
+      if (escalateMin > 0 && waitingMs > escalateMin * 60_000) {
+        const told = db.prepare(
+          "SELECT 1 AS n FROM audit WHERE taskId = ? AND action = 'review_escalated' LIMIT 1",
+        ).get(row.taskId);
+        if (!told) {
+          writeAudit(db, {
+            actor: 'control-plane', action: 'review_escalated',
+            newValue: `待验收已 ${Math.round(waitingMs / 60_000)} 分钟（让路 ${yieldedN} 次、真失败 ${attempts} 次），`
+              + `已报董事会；自动补审继续，该由 ${target} 审`,
+            taskId: row.taskId,
+          });
+          notifier.send({
+            title: `这张卡挂了很久没人审：${row.taskId}`,
+            body: `等了 ${Math.round(waitingMs / 60_000)} 分钟还在待验收（让路 ${yieldedN} 次多是你正在用电脑，`
+              + `真失败 ${attempts} 次）。自动补审我没停，但它一直没走完，你看一眼。`,
+            scene: 'decision', taskId: row.taskId,
+          });
+        }
+      }
+      // 席位不是人喊就到的：叫它一次别每分钟刷一遍（被挡下也只是白记一条账）。
+      const bucketMs = target === ceoId() ? 60_000 : 5 * 60_000;
+      const minuteBucket = Math.floor(clock().getTime() / bucketMs);
+      emitEvent({
+        type: 'review_requested', taskId: row.taskId, agentId: target,
+        payload: { wakeReason: 'review_requested', kind: reviewKind, via: 'reconcile' },
+        dedupeKey: `review-requeue:${row.taskId}:${target}:${minuteBucket}`,
+      });
+      writeAudit(db, {
+        actor: 'scheduler', action: 'review_requeued',
+        newValue: `第 ${attempts + 1} 次补审：发给 ${target}（该审的人 ${expect}${
+          yieldedN ? `；让路 ${yieldedN} 次未计额度` : ''}）`, taskId: row.taskId,
+      });
+      // 只有真的补审了才记「为什么转给 CEO」—— 之前写在判断分支里，卡住以后每分钟都记一条。
+      if (fallbackNote) {
+        writeAudit(db, {
+          actor: 'scheduler', action: 'review_fallback_ceo',
+          newValue: fallbackNote, taskId: row.taskId,
+        });
+      }
+      reviewRequeued += 1;
+      if (reviewRequeued >= limit) break;
+    }
+    // ★ 派了子卡却守在会话里等（2026-11-17 真机父子互卡）。
+    //   事件泵是一趟一趟串行跑的：一次 GUI 会话在跑的时候，别的席位的唤醒事件只能排队。
+    //   于是「父卡派完子卡留在会话里等下级接单」必然等不到 —— 它等的正是被它自己挡住的那条队列。
+    //   真机结局：等了 6 分钟，自己判定「叫不起来」，把子卡取消、改自己干。
+    //   制度层面已经把「派完即交活」写死了（org-chart），这一条是机械兜底：规矩被无视时引擎自己动手 ——
+    //   父卡有未收尾子卡、却还占着一趟 run 超过 parentWaitMinutes，就把那趟 run 按中断收账，
+    //   并把父卡正式置为「等子卡」（waitingChildren=1），子卡随后就能被补投唤醒。
+    const parentWaitMinutes = Number(config.runPolicy?.parentWaitMinutes ?? 0);
+    let parentWaitCut = 0;
+    if (parentWaitMinutes > 0) {
+      const parentCutoff = clock().getTime() - parentWaitMinutes * 60 * 1000;
+      for (const row of db.prepare(`SELECT taskId, updatedAt FROM tasks
+        WHERE status IN ('todo','in_progress') AND waitingChildren = 0`).all()) {
+        const kids = childrenOf(row.taskId).filter((k) => !CHILD_CLOSED.includes(k.status));
+        if (!kids.length) continue;
+        const run = db.prepare("SELECT runId, agentId, startedAt FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1")
+          .get(row.taskId);
+        if (!run) continue;
+        if (Date.parse(run.startedAt) > parentCutoff) continue;
+        const ranMin = Math.floor((clock().getTime() - Date.parse(run.startedAt)) / 60_000);
+        db.prepare("UPDATE runs SET status = 'interrupted', finishedAt = ? WHERE runId = ?").run(clockIso(), run.runId);
+        releaseGuiLockForRun(run.agentId, run.runId);
+        db.prepare('UPDATE tasks SET waitingChildren = 1, updatedAt = ? WHERE taskId = ? AND waitingChildren = 0')
+          .run(nowIso(), row.taskId);
+        writeAudit(db, {
+          actor: 'control-plane', action: 'parent_wait_cut',
+          newValue: `${run.runId}|${run.agentId}|派了 ${kids.length} 张子卡却还占着会话 ${ranMin} 分钟，`
+            + '按中断收账并置为「等子卡」；子卡现在才排得上队',
+          taskId: row.taskId,
+        });
+        parentWaitCut += 1;
+      }
+    }
+    // ③ 卡住看门狗（董事会 2026-11-17：卡长时间停在同一状态，必须有跳出机制）。
+    //    为什么放在心跳里：它不需要谁记得点按钮。每分钟扫一遍，停久了就自己往上推。
+    //    · blocked / awaiting_decision：正常重投路径根本不管这两种状态（它们本就不是「该派」的卡），
+    //      所以只有这里会把它们捞出来 —— 没有待处置的卡、也没待批单，就向上汇报。
+    //    · todo / in_progress：常规补投一分钟一次已经在推；这里只在「叫过 ≥3 次仍没动」时升级，
+    //      避免和常规补投互相打架（以前两条路同时补投，等于一分钟叫它三次）。
+    //    · 有人在跑 / 依赖没满足 / 已有处置卡 / 已经报过 → 跳过，不刷噪音。
+    const stuckMinutes = Number(config.runPolicy?.stuckMinutes ?? 0);
+    const stuckMs = stuckMinutes * 60 * 1000;
+    let stuckRequeued = 0;
+    let stuckEscalated = 0;
+    const stuckRows = stuckMinutes > 0 ? db.prepare(`SELECT taskId, status, updatedAt, assignee FROM tasks
+      WHERE status IN ('todo','in_progress','blocked','awaiting_decision')`).all() : [];
+    for (const row of stuckRows) {
+      if (Date.parse(row.updatedAt) > clock().getTime() - stuckMs) continue;
+      const stuckTask = taskById(row.taskId);
+      if (!stuckTask) continue;
+      // P0-2（2026-11-23）：等人配合的卡是「按规矩停着」，不是卡住，别每分钟往上汇报一遍。
+      // 解除方式：看板点重派 / 人给答复后派发时自动清零（见 markHumanWait 与派发路径）。
+      if (Number(stuckTask.humanWait ?? 0) === 1) continue;
+      const busy = db.prepare("SELECT 1 AS n FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1").get(row.taskId);
+      if (busy) continue;
+      const alreadyEscalated = db.prepare("SELECT 1 AS n FROM audit WHERE taskId = ? AND action = 'stuck_escalated'").get(row.taskId);
+      if (alreadyEscalated) continue;
+      if (row.status === 'blocked' || row.status === 'awaiting_decision') {
+        if (hasOpenEscalationCard(row.taskId) || pendingApprovalFor(row.taskId, 'review_reject')) continue;
+        reportUpward(stuckTask, { reason: `停在 ${row.status} 超过 ${stuckMinutes} 分钟没有任何动静` });
+        writeAudit(db, {
+          actor: 'scheduler', action: 'stuck_escalated',
+          oldValue: row.status, newValue: `${stuckMinutes} 分钟无进展，已向上汇报`, taskId: row.taskId,
+        });
+        stuckEscalated += 1;
+        if (stuckEscalated >= limit) break;
+        continue;
+      }
+      if (unmetDependencies(row.taskId).length) continue;
+      if (cfgFor(row.assignee)?.dispatch === 'pull') continue;
+      const pendingIssue = db.prepare(`SELECT 1 AS n FROM events
+        WHERE taskId = ? AND processed = 0 AND type = 'issue_assigned' LIMIT 1`).get(row.taskId);
+      if (pendingIssue) continue;
+      // 已经被叫过几次还不动（wake 审计按卡计），说明不是「没叫醒」而是「叫不醒」。
+      const tries = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE taskId = ? AND action = 'wake'")
+        .get(row.taskId).n;
+      if (tries < 3) continue;
+      reportUpward(stuckTask, { reason: `叫过 ${tries} 次仍停在 ${row.status}（${stuckMinutes} 分钟阈值）` });
+      writeAudit(db, {
+        actor: 'scheduler', action: 'stuck_escalated',
+        oldValue: row.status, newValue: `${tries} 次唤醒无效，已向上汇报`, taskId: row.taskId,
+      });
+      stuckEscalated += 1;
+      if (stuckEscalated >= limit) break;
     }
     // 主动唤醒的兜底：排队那一刻叫过一次但没叫醒（凭据还没刷新 / 会话宿主重启 /
     // 引擎重启丢了排队定时器）的卡，靠心跳周期补叫。冷却在 wakePullSeat 里面。
@@ -3774,9 +5520,14 @@ export function createEngine({
     if (requeued) {
       writeAudit(db, { actor: 'scheduler', action: 'reconcile_requeue', newValue: String(requeued) });
     }
-    // P7-5：顺手补落盘 —— 被译台挡住、或上次落盘失败的卡，在这里重试。
+// P7-5：顺手补落盘 —— 被占用进程挡住、或上次落盘失败的卡，在这里重试。
     const deliveries = retryPendingDeliveries();
-    return { scanned: rows.length, requeued, waiting, wakes, deliveries, releasedDeps, ...pumped };
+    return {
+      scanned: rows.length, requeued, waiting, wakes, deliveries, releasedDeps,
+      recoveredRuns, reviewRequeued, stuckRequeued, stuckEscalated, parentWaitCut,
+      evidenceChecked: evidence.checked, evidenceRedispatched: evidence.redispatched,
+      ...pumped,
+    };
   }
 
   async function onProgressReport() {
@@ -3807,6 +5558,10 @@ export function createEngine({
     },
     submit, pump, route, emitEvent, wake, submitChangeRequest, onProgressReport,
     cancelTask,
+    // 看板/CLI：卡停住了，人要能立刻让它再跑一趟（不是只有等补偿扫描）。
+    redispatchTask,
+    // 看板/CLI：验收补满 5 次被判「卡住」之后，人看一眼确认该由谁审，手动再发一次验收。
+    retryReview,
     // 子派活与审查：工程岗既是执行者也是工头，还要当代码审查人。
     spawnChild, reviewTask, reviewerOf,
     // 看板/CLI 用：现在有哪些卡在等「我」审（拉模式席位靠它知道该干活了）。
@@ -3819,6 +5574,7 @@ export function createEngine({
       }).map((t) => ({ ...t, reviewer: reviewerOf(t, inferArtifactKind(t, {}).kind) }));
     },
     reconcile,
+    recoverOrphanRuns,
     // 短延迟自检：测试要能看到「还有哪张卡排着等重试」。
     clearGateRetry,
     pendingGateRetries: () => [...gateRetries.keys()],
@@ -3934,3 +5690,5 @@ export function createEngine({
     adapterTypes: availableAdapterTypes,
   };
 }
+
+

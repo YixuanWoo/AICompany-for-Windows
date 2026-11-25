@@ -74,6 +74,22 @@ export const DEFAULTS = Object.freeze({
   cooldownSec: 0,
   maxRunHours: 2,
   staleEventMinutes: 10,
+  // 证据层默认值（2026-11-18）。默认全关 = 老配置行为不变；
+  // 公司档里显式打开，测试里也显式给数值，不靠默认值生效。
+  evidenceEnabled: false,
+  ackTimeoutSec: 120,
+  idleTimeoutSec: 600,
+  maxDispatchAttempts: 2,
+  // 2026-11-19 真机误伤：GUI 席位在干活但没写 progress，被当宕机重派（重派的活 3 分钟就干完了，
+  // 说明第一趟本来就在干）。心跳只能「续命」，不能无限续 —— 所以还给一个席位预算作封顶。
+  // grace 给到 10 分钟：adapter 等一次长模型回复时本来就不轮询，三分钟就判「心跳没了」等于逼它秒回。
+  heartbeatGraceSec: 600,
+  seatBudgetSlackSec: 300,
+  // 2026-11-23 产出心跳两条线（默认 0 = 关闭，老配置行为不变）。
+  // alert：心跳在但产物零增长超过这么多分钟 → 报一次董事会提醒，不打断。
+  // stop：再久这么多分钟仍零产出 → 判疑似中途等人，收掉 run 并把卡置「等人配合」，不再等满 60 分钟。
+  noProgressAlertMinutes: 0,
+  noProgressStopMinutes: 0,
 });
 
 export function isPlainObject(value) {

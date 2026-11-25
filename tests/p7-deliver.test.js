@@ -26,9 +26,9 @@ function tmpRoot(t) {
 }
 
 // 造一个「公司根 + 项目文件夹」，输出目录里放一份产物。
-function scene(t, { withRoot = true, files = { 'note.md': '译文内容' } } = {}) {
+function scene(t, { withRoot = true, files = { 'note.md': '交付文本内容' } } = {}) {
   const workRoot = tmpRoot(t);
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'benny-'));
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'demo-'));
   t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
   const taskId = 'T-test0001';
   const outputDir = path.join(workRoot, 'tasks', taskId, 'output');
@@ -40,14 +40,14 @@ function scene(t, { withRoot = true, files = { 'note.md': '译文内容' } } = {
   }
   const config = {
     projects: {
-      benny: {
-        displayName: '小王子翻译',
+      demo: {
+        displayName: '文档处理项目',
         ...(withRoot ? { rootDir: projectDir } : {}),
-        deliverSubdir: '04-译稿',
+        deliverSubdir: '04-out',
       },
     },
   };
-  return { workRoot, projectDir, taskId, outputDir, config, task: { taskId, project: 'benny' } };
+  return { workRoot, projectDir, taskId, outputDir, config, task: { taskId, project: 'demo' } };
 }
 
 // ---------------------------------------------------------------- ① 正常落盘
@@ -55,7 +55,7 @@ function scene(t, { withRoot = true, files = { 'note.md': '译文内容' } } = {
 test('P7-5 · 落盘：文件到位、校验和与源一致、清单落一行、不在项目里删改任何东西', (t) => {
   const s = scene(t);
   // 目标目录里先放一个无关文件，落盘绝不能动它。
-  const existingDir = path.join(s.projectDir, '04-译稿');
+  const existingDir = path.join(s.projectDir, '04-out');
   fs.mkdirSync(existingDir, { recursive: true });
   fs.writeFileSync(path.join(existingDir, '别人的稿.md'), '不要动我', 'utf8');
 
@@ -64,11 +64,11 @@ test('P7-5 · 落盘：文件到位、校验和与源一致、清单落一行、
   assert.equal(out.code, 'DELIVERED');
 
   const target = path.join(existingDir, 'note.md');
-  assert.equal(fs.readFileSync(target, 'utf8'), '译文内容');
+  assert.equal(fs.readFileSync(target, 'utf8'), '交付文本内容');
   const src = path.join(s.outputDir, 'note.md');
   assert.equal(sha256File(target), sha256File(src), '落进去的那份必须和公司留档同一内容');
-  assert.equal(out.copied[0].sha256, sha(Buffer.from('译文内容', 'utf8')));
-  assert.equal(out.copied[0].bytes, Buffer.byteLength('译文内容'));
+  assert.equal(out.copied[0].sha256, sha(Buffer.from('交付文本内容', 'utf8')));
+  assert.equal(out.copied[0].bytes, Buffer.byteLength('交付文本内容'));
   assert.equal(out.copied[0].renamed, false);
 
   // 公司原件还在（复制不是移动）
@@ -76,15 +76,15 @@ test('P7-5 · 落盘：文件到位、校验和与源一致、清单落一行、
   // 别人的文件一个字节都没变
   assert.equal(fs.readFileSync(path.join(existingDir, '别人的稿.md'), 'utf8'), '不要动我');
 
-  const log = lastDeliveryOf(s.workRoot, 'benny', s.taskId);
+  const log = lastDeliveryOf(s.workRoot, 'demo', s.taskId);
   assert.equal(log.schema, 'aicompany.delivery/v1');
-  assert.equal(log.targetDir, path.join(s.projectDir, '04-译稿'));
+  assert.equal(log.targetDir, path.join(s.projectDir, '04-out'));
   assert.deepEqual(log.failed, []);
 });
 
 test('P7-5 · 同名不覆盖：原来那份不动，新的一份带任务号', (t) => {
   const s = scene(t);
-  const targetDir = path.join(s.projectDir, '04-译稿');
+  const targetDir = path.join(s.projectDir, '04-out');
   fs.mkdirSync(targetDir, { recursive: true });
   fs.writeFileSync(path.join(targetDir, 'note.md'), '老版本', 'utf8');
 
@@ -92,7 +92,7 @@ test('P7-5 · 同名不覆盖：原来那份不动，新的一份带任务号', 
   assert.equal(out.ok, true);
   assert.equal(fs.readFileSync(path.join(targetDir, 'note.md'), 'utf8'), '老版本', '同名文件绝不能被覆盖');
   const renamed = path.join(targetDir, `note-${s.taskId}.md`);
-  assert.equal(fs.readFileSync(renamed, 'utf8'), '译文内容');
+  assert.equal(fs.readFileSync(renamed, 'utf8'), '交付文本内容');
   assert.equal(out.copied[0].renamed, true);
 });
 
@@ -105,14 +105,14 @@ test('P7-5 · 四个拒绝各有 code：没配 rootDir / 文件夹不存在 / �
   assert.equal(r1.code, 'PROJECT_NO_ROOT_DIR');
 
   const s2 = scene(t);
-  s2.config.projects.benny.rootDir = path.join(s2.projectDir, '根本没这个文件夹');
+  s2.config.projects.demo.rootDir = path.join(s2.projectDir, '根本没这个文件夹');
   const r2 = deliverTask({ workRoot: s2.workRoot, config: s2.config, task: s2.task });
   assert.equal(r2.code, 'ROOT_DIR_MISSING');
   // 关键：盘符或路径写错时不许自己在错的地方建目录
   assert.equal(fs.existsSync(path.join(s2.projectDir, '根本没这个文件夹')), false);
 
   const s3 = scene(t);
-  s3.config.projects.benny.deliverSubdir = '../跑出去';
+  s3.config.projects.demo.deliverSubdir = '../跑出去';
   const r3 = deliverTask({ workRoot: s3.workRoot, config: s3.config, task: s3.task });
   assert.equal(r3.code, 'TARGET_OUTSIDE_PROJECT');
   assert.equal(fs.existsSync(path.join(s3.projectDir, '..', '跑出去')), false);
@@ -144,7 +144,7 @@ function companyConfig(root, projectExtra = {}) {
     version: 1,
     company: { name: 'p7d-company', timezone: 'Asia/Shanghai' },
     workRoot: root,
-    projects: { benny: { displayName: '小王子翻译', ...projectExtra } },
+    projects: { demo: { displayName: '文档处理项目', ...projectExtra } },
     interaction: { defaultMode: 'direct', defaultTarget: 'ceo', autoAssign: false },
     agents: [
       {
@@ -162,12 +162,12 @@ function companyConfig(root, projectExtra = {}) {
               const paths = buildTaskPaths(root, ctx.task.taskId);
               fs.mkdirSync(paths.outputDir, { recursive: true });
               const file = path.join(paths.outputDir, 'note.md');
-              fs.writeFileSync(file, '译文内容', 'utf8');
+              fs.writeFileSync(file, '交付文本内容', 'utf8');
               return {
                 schema: 'aicompany.completion/v1',
                 taskId: ctx.task.taskId, runId: ctx.runId, agent: 'worker-01',
                 revision: ctx.task.revision, status: 'success',
-                summary: '译完一章，产物是 output/note.md',
+                summary: '处理完一章，产物是 output/note.md',
                 artifacts: ['output/note.md'],
                 checksum: { 'output/note.md': sha256File(file) },
                 acceptanceResults: [{ rule: '产物非空', pass: true }],
@@ -191,52 +191,52 @@ function writeSpec(root, id) {
 
 test('P7-5 · 直投单 done 之后，产物出现在项目文件夹里，审计与清单都有据', async (t) => {
   const root = tmpRoot(t);
-  writeSpec(root, 'benny');
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'benny-'));
+  writeSpec(root, 'demo');
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'demo-'));
   t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
-  const cfg = companyConfig(root, { rootDir: projectDir, deliverSubdir: '04-译稿' });
+  const cfg = companyConfig(root, { rootDir: projectDir, deliverSubdir: '04-out' });
   const db = openDb(':memory:');
   const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
 
-  const r = await engine.submit({ text: '译第八章', mode: 'direct', addressedTo: 'worker-01', project: 'benny' });
+  const r = await engine.submit({ text: '处理第八章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
   assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(r.taskId).status, 'done');
 
-  const target = path.join(projectDir, '04-译稿', 'note.md');
-  assert.equal(fs.readFileSync(target, 'utf8'), '译文内容', '验收通过后产物必须落在项目自己的文件夹里');
+  const target = path.join(projectDir, '04-out', 'note.md');
+  assert.equal(fs.readFileSync(target, 'utf8'), '交付文本内容', '验收通过后产物必须落在项目自己的文件夹里');
   const delivered = engine.getAudit().filter((a) => a.action === 'delivered');
   assert.equal(delivered.length, 1);
-  assert.match(delivered[0].newValue, /04-译稿/);
+  assert.match(delivered[0].newValue, /04-out/);
   db.close();
 });
 
 test('P7-5 · 被占用时先不落：审计记 deferred、项目里没文件；占用解除后心跳重试补上', async (t) => {
   const root = tmpRoot(t);
-  writeSpec(root, 'benny');
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'benny-'));
+  writeSpec(root, 'demo');
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'demo-'));
   t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
-  // 测试进程本身就是 node：拿它当「译台开着」的替身，必然命中。
-  const cfg = companyConfig(root, { rootDir: projectDir, deliverSubdir: '04-译稿', deliverBlockers: ['node*'] });
+  // 测试进程本身就是 node：拿它当「外部编辑器开着」的替身，必然命中。
+  const cfg = companyConfig(root, { rootDir: projectDir, deliverSubdir: '04-out', deliverBlockers: ['node*'] });
   const db = openDb(':memory:');
   const engine = createEngine({ db, config: cfg, notifier: createNotifier('noop') });
 
-  const r = await engine.submit({ text: '译第九章', mode: 'direct', addressedTo: 'worker-01', project: 'benny' });
+  const r = await engine.submit({ text: '处理第九章', mode: 'direct', addressedTo: 'worker-01', project: 'demo' });
   assert.equal(db.prepare('SELECT status FROM tasks WHERE taskId = ?').get(r.taskId).status, 'done', '落盘挡不住卡收账');
-  assert.equal(fs.existsSync(path.join(projectDir, '04-译稿')), false, '被占用时一个文件都不许写');
+  assert.equal(fs.existsSync(path.join(projectDir, '04-out')), false, '被占用时一个文件都不许写');
   assert.ok(engine.getAudit().some((a) => a.action === 'deliver_deferred'));
-  assert.equal(lastDeliveryOf(root, 'benny', r.taskId), null);
+  assert.equal(lastDeliveryOf(root, 'demo', r.taskId), null);
 
-  // 模拟译台关掉：去掉占用名单，心跳重试应该把它补上。
-  engine.config.projects.benny.deliverBlockers = [];
+  // 模拟外部编辑器关掉：去掉占用名单，心跳重试应该把它补上。
+  engine.config.projects.demo.deliverBlockers = [];
   const retried = engine.retryPendingDeliveries();
   assert.equal(retried, 1);
-  assert.equal(fs.readFileSync(path.join(projectDir, '04-译稿', 'note.md'), 'utf8'), '译文内容');
+  assert.equal(fs.readFileSync(path.join(projectDir, '04-out', 'note.md'), 'utf8'), '交付文本内容');
   db.close();
 });
 
 test('P7-5 · 天生没产物的卡（只排班 / 只给建议）：记一次账结案，心跳不再刷失败', (t) => {
   const root = tmpRoot(t);
-  writeSpec(root, 'benny');
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'benny-'));
+  writeSpec(root, 'demo');
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'demo-'));
   t.after(() => fs.rmSync(projectDir, { recursive: true, force: true }));
   const cfg = companyConfig(root, { rootDir: projectDir });
   const db = openDb(':memory:');
@@ -245,7 +245,7 @@ test('P7-5 · 天生没产物的卡（只排班 / 只给建议）：记一次账
   // 真实现场（T-a7d8471f 只排班不派卡）：卡 done，output 目录是空的。
   const taskId = 'T-nofiles1';
   db.prepare(`INSERT INTO tasks (taskId, requestId, title, assignee, status, mode, project, createdAt, updatedAt, revision, attempt)
-    VALUES (?, 'REQ-nofiles', '为项目定运行节奏（只排班）', 'worker-01', 'done', 'direct', 'benny',
+    VALUES (?, 'REQ-nofiles', '为项目定运行节奏（只排班）', 'worker-01', 'done', 'direct', 'demo',
             '2026-11-16T10:00:00Z', '2026-11-16T10:00:00Z', 1, 0)`).run(taskId);
 
   const first = engine.retryPendingDeliveries();
@@ -253,7 +253,7 @@ test('P7-5 · 天生没产物的卡（只排班 / 只给建议）：记一次账
   // 记一条「跳过」，不是失败
   assert.equal(engine.getAudit().filter((a) => a.action === 'deliver_skipped').length, 1);
   assert.equal(engine.getAudit().filter((a) => a.action === 'deliver_failed').length, 0);
-  assert.equal(lastDeliveryOf(root, 'benny', taskId).code, 'NO_ARTIFACTS');
+  assert.equal(lastDeliveryOf(root, 'demo', taskId).code, 'NO_ARTIFACTS');
 
   // 维护心跳（包括重启后的第一轮）不许再重试这张卡
   assert.equal(engine.retryPendingDeliveries(), 0);

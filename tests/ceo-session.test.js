@@ -130,6 +130,54 @@ test('S4 · 同一会话串行：两轮并发也绝不重叠', async (t) => {
   assert.deepEqual(order, ['task:T-A-plan', 'result:T-A-plan', 'task:T-B-plan', 'result:T-B-plan']);
 });
 
+test('S6 · CEO 长回合也要留证据：回执写在真任务号目录，不是 -plan 键', async (t) => {
+  const root = tmpRoot(t);
+  const a = adapter();
+
+  const out = await a.execute(ceoCtx(root, {
+    task: { taskId: 'T-9fk2e11', title: '长回合', instructions: 'x', revision: 1 },
+    runId: 'R-abc123',
+  }));
+  assert.equal(out.status, 'success');
+
+  // 看门狗找证据只看 workRoot/tasks/<真任务号>/：键带 -plan 后缀的那份等于没写。
+  const receiptFile = path.join(root, 'tasks', 'T-9fk2e11', 'dispatch.json');
+  assert.equal(fs.existsSync(receiptFile), true, 'CEO 派出去了就得有送达回执');
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  assert.equal(receipt.runId, 'R-abc123');
+  assert.equal(receipt.via, 'webhook');
+  assert.equal(fs.existsSync(path.join(root, 'tasks', 'T-9fk2e11-plan', 'dispatch.json')), false,
+    '证据不能落在 API 任务键那个目录，看门狗看不见');
+});
+
+test('S7 · 上游一轮卡死不返回：超时后必须换新会话，别再往死任务后面排队', async (t) => {
+  const root = tmpRoot(t);
+  const before = ensureCeoSession(root, 'dsh-planner', DEFAULT_SESSION_POLICY);
+  const a = createWebhookExecAdapter({
+    request: async (base, endpoint, payload) => {
+      if (endpoint === '/aiceo/api/task') {
+        return { statusCode: 200, body: { ok: true, value: { taskId: payload.taskId, sessionId: 's-dead' } } };
+      }
+      // 上游一直说 running、一个字都不吐：模拟 2026-11-20 那次卡死
+      return { statusCode: 200, body: { ok: true, value: { status: 'running', text: '', turn: 0 } } };
+    },
+    sleep: async () => {},
+  });
+
+  await assert.rejects(
+    a.execute(ceoCtx(root, {
+      adapterConfig: {
+        mode: 'ceo', workRoot: root, baseUrl: 'http://fake', token: 't', timeoutMs: 300, pollMs: 0,
+      },
+    })),
+    /超时/,
+  );
+
+  const after = readCeoSession(root, 'dsh-planner');
+  assert.notEqual(after.sessionId, before.sessionId, '超时后必须换新会话，否则重派会排在那条死任务后面');
+  assert.match(String(after.previous?.reason ?? ''), /超时/);
+});
+
 test('S5 · 人话摘要：轮次、时长、短码都算得出来', async (t) => {
   const root = tmpRoot(t);
   ensureCeoSession(root, 'ceo');

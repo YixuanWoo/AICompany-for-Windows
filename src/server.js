@@ -12,12 +12,15 @@ import { createRecurring } from './recurring.js';
 import { createScheduler } from './scheduler.js';
 import { cleanupScan } from './cleanup.js';
 import { buildObservation, detectDirty, renderObservationMarkdown } from './observe.js';
+import { createGateWatch } from './gate-watch.js';
+import { createLogger } from './logger.js';
 import { tune, tuneHistory, TUNABLE, TuneError, readOverrides, writeOverrides } from './tune.js';
 import { createProject } from './projects.js';
 import { listOutputs, readOutput, OutputsError } from './outputs.js';
 import { readPauseFlag, writePauseFlag } from './gui-adapter.js';
 import { createSeatClaim, guiSeatAgents } from './gui-seat.js';
 import { allRepos, gitStatus } from './repos.js';
+import { buildScheduleJob } from './schedule-request.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BOARD_HTML = path.join(ROOT, 'src', 'web', 'board.html');
@@ -47,7 +50,7 @@ export function createServer({
   engine, port = 3100, host = '127.0.0.1', bridgeToken = null, onlineWindowSec = 60,
   recurring = null, scheduler = null, logger = null, now = () => new Date(),
   overridesPath = OVERRIDES_PATH, guiPauseFile = null, guiSeat = null,
-  deferRequests = false,
+  deferRequests = false, gateWatch = null,
 }) {
   const sseClients = new Set();
   const bridgeApi = createBridgeApi({ engine, token: bridgeToken, onlineWindowSec });
@@ -143,6 +146,34 @@ export function createServer({
       }
       // bridge 子集仍然挂在统一 API 下面，不是另一套协议（§9.2）。
       if (pathname.startsWith('/api/bridge/')) {
+        // 2026-11-18 董事会决定：桥接停用，工程执行岗位一律走 GUI 直派。
+        // 代码与路由全部保留（不删），只加一道开关。
+        // 只挡「会领活 / 改状态」的动作（POST：checkout、heartbeat、progress、complete…），
+        // 只读的 GET（status 等）照旧放行 —— 看板初始化要用它画桥接面板，
+        // 一挡到底会把整个看板初始化拖黑（真机当场踩到：任务卡区整块不渲染）。
+        // 例外一：`POST /api/bridge/review` —— 不是领活，而是**交验收结论**的通道。
+        // 工程岗是 GUI 席位，报告里没有结构化 verdict，`seat.js verdict` 是它唯一能落库的路；
+        // 关掉它，验收就变成「跑完给了结论、引擎读不到」的死循环（T-4292b0fa 真机事故）。
+        //
+        // 例外二：`POST /api/bridge/spawn` —— 不是领活，而是**向下派活**的通道。
+        // 2026-11-18 真机事故：工程岗（CTO）拿到卡、写好方案后要派给执行岗，
+        // 一调 spawn 就吃 BRIDGE_DISABLED，于是它判断「派不出去」，退回自己动手 ——
+        // 恰恰把这个岗位最该干的事（拆解与派发）废掉了，人还得回头查为什么中层不下场。
+        // 开关的本意是防「桥接客户端把卡领走、和 GUI 直派抢同一张卡」，
+        // 而 spawn 既不 checkout 也不改别人的卡状态，只是新建一张子卡；
+        // 且 engine.spawnChild 自带三道闸（必须是本卡承接人 / 必须有 delegate / 只能进自己子树），
+        // 所以它必须留在开关外面 —— 关了它等于关了组织本身。
+        const managementChannel = method === 'POST'
+          && (pathname === '/api/bridge/review' || pathname === '/api/bridge/spawn');
+        if (engine.config?.bridge?.enabled === false && method !== 'GET' && !managementChannel) {
+          json(res, 503, {
+            code: 'BRIDGE_DISABLED',
+            error: '桥接已停用（公司档 bridge.enabled=false）：任务一律由控制面直派 GUI 席位，'
+              + '不再走 bridge / seat 拉模式（checkout / heartbeat / 回写一律不认）。'
+              + '交验收结论（/api/bridge/review）与向下派活（/api/bridge/spawn）不受此开关影响。',
+          });
+          return;
+        }
         const auth = assertBridgeToken(req.headers ?? {}, bridgeToken);
         if (!auth.ok) { json(res, auth.status, { error: auth.reason }); return; }
         const body = method === 'GET' ? {} : JSON.parse((await readBody(req)) || '{}');
@@ -152,11 +183,21 @@ export function createServer({
       }
       // 循环任务 / 定时例程：与 Web Board、bridge 共用同一套统一 API。
       if (pathname.startsWith('/api/recurring') || pathname.startsWith('/api/cycle')
-        || pathname.startsWith('/api/scheduler')) {
+        || pathname.startsWith('/api/scheduler') || pathname === '/api/schedule') {
         const body = method === 'GET' ? {} : JSON.parse((await readBody(req)) || '{}');
         const match = pathname.match(/^\/api\/recurring\/([^/]+)\/(pause|resume|fire|complete-cycle)$/);
         if (method === 'GET' && pathname === '/api/recurring') { json(res, 200, rec.listJobs()); return; }
         if (method === 'POST' && pathname === '/api/recurring') { json(res, 201, rec.registerJob(body)); return; }
+        // 看板「定时下达」：董事会填需求+时间，这里翻成一条只跑一轮的循环任务。
+        // 构建逻辑与命令行（scripts/schedule.js）共用 src/schedule-request.js，两处产出必须一致。
+        if (method === 'POST' && pathname === '/api/schedule') {
+          try {
+            json(res, 201, rec.registerJob(buildScheduleJob(body)));
+          } catch (error) {
+            json(res, 400, { error: String(error?.message ?? error) });
+          }
+          return;
+        }
         if (method === 'POST' && match) {
           // jobId 常带中文（CEO 起的标题就是 id），url.pathname 是**编码后**的：
           // 不解码就永远查不到这个 job，接口只会回「循环任务不存在」。
@@ -207,6 +248,31 @@ export function createServer({
       if (method === 'POST' && /^\/api\/tasks\/[^/]+\/cancel$/.test(pathname)) {
         const body = JSON.parse((await readBody(req)) || '{}');
         json(res, 200, engine.cancelTask(pathname.split('/')[3], { reason: body.reason ?? '人工取消' }));
+        return;
+      }
+      // 手动重新派单：卡停在 in_progress / blocked 而自动补偿还没到点时的即时出口。
+      if (method === 'POST' && /^\/api\/tasks\/[^/]+\/redispatch$/.test(pathname)) {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const out = await engine.redispatchTask(pathname.split('/')[3], {
+          reason: body.reason ?? '看板手动重派',
+          actor: body.actor ?? 'human',
+          force: body.force === true,
+          // 按钮立刻回：泵在后台推进，别让董事会等一次可能几分钟的派发。
+          awaitPump: false,
+        });
+        // 拒绝也是 200：这是业务判断（正在跑 / 已终态），不是服务端错误 ——
+        // 看板据此把原因原样显示给人，而不是弹一个 "500 Internal Server Error"。
+        json(res, 200, out);
+        return;
+      }
+      // 验收补满 5 次被判「卡住」之后的手动出口：人确认一下，再发一次验收。
+      if (method === 'POST' && /^\/api\/tasks\/[^/]+\/review-retry$/.test(pathname)) {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const out = await engine.retryReview(pathname.split('/')[3], {
+          actor: body.actor ?? 'human',
+          reason: body.reason ?? '董事会手动重派验收',
+        });
+        json(res, 200, out);
         return;
       }
       // ---- P6：任务产物查看（看板「看结果」与命令行 --wait 用同一套口径）----
@@ -386,7 +452,10 @@ export function createServer({
           decidedBy: body.decidedBy ?? 'human',
           reason: body.reason ?? null,
         });
-        json(res, 200, { ...out, ...(await engine.pump()) });
+        // 按钮要立刻有反馈：泵在后台推进（派发可能卡在 GUI / 上游服务上几分钟）。
+        // 之前这里 await pump()，一旦派发挂死，董事会点「通过」就是转圈到超时，看起来像没反应。
+        Promise.resolve(engine.pump()).catch(() => {});
+        json(res, 200, out);
         return;
       }
       if (method === 'POST' && pathname === '/api/runs/now') {
@@ -395,8 +464,8 @@ export function createServer({
           type: 'issue_assigned', taskId: body.taskId, agentId: body.agentId,
           payload: { wakeReason: 'manual' },
         });
-        const pumped = await engine.pump();
-        json(res, 200, pumped);
+        Promise.resolve(engine.pump()).catch(() => {});
+        json(res, 200, { ...body, queued: true });
         return;
       }
       if (method === 'GET') {
@@ -490,10 +559,13 @@ export function createServer({
           }),
           // 等我审的卡：谁该审、卡在哪一步，一眼能看见（不叫醒任何人，纯读）。
           '/api/reviews': () => ({ tasks: engine.pendingReviews() }),
-          // P5-1 / P5-3：试运行观察（五项指标 + 四项结论 + 脏状态）。
-          '/api/observe': () => buildObservation({
-            db: engine.db, config: engine.config, workRoot: engine.workRoot, now: now(),
-          }),
+          // P5-1 / P5-3：常驻观测（五项指标 + 四项结论 + 脏状态 + 累计门禁进度）。
+          '/api/observe': () => {
+            const obs = buildObservation({
+              db: engine.db, config: engine.config, workRoot: engine.workRoot, now: now(),
+            });
+            return gateWatch ? { ...obs, gate: gateWatch.snapshot() } : obs;
+          },
           '/api/observe/dirty': () => detectDirty({
             db: engine.db, config: engine.config, workRoot: engine.workRoot, now: now(),
           }),
@@ -510,8 +582,9 @@ export function createServer({
           const obs = buildObservation({
             db: engine.db, config: engine.config, workRoot: engine.workRoot, now: now(),
           });
+          const md = renderObservationMarkdown(obs) + (gateWatch ? `\n\n${gateWatch.markdown()}\n` : '');
           res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store' });
-          res.end(renderObservationMarkdown(obs));
+          res.end(md);
           return;
         }
         if (pathname === '/api/activity') {
@@ -607,12 +680,20 @@ if (isMain) {
   const seatAgents = guiSeatAgents(config);
   let seat = null;
   if (seatAgents.length) {
+    // 占位文件跨档位共享（config/profiles.json 的 guiSeatFile 一律指向 work/gui-seat.json）：
+    // 键鼠只有一副，prod 和 demo 不能各占一份自欺欺人。
     const seatFile = env.AICOMPANY_GUI_SEAT ?? path.join(ROOT, 'work', 'gui-seat.json');
     seat = createSeatClaim({ file: seatFile });
     const claimed = seat.claim({
       port, configPath: env.AICOMPANY_CONFIG ?? EXAMPLE_CONFIG_PATH,
       extra: { seats: seatAgents, dbPath },
     });
+    if (claimed.tookOver) {
+      // 接管要说清楚接管了谁：跨开机遗留 / 上一轮已释放 / 进程已死，三种都见过。
+      const why = { 'cross-boot': '上一次开机留下的', released: '上一轮已释放', dead: '进程已不在' }[claimed.tookOver.reason]
+        ?? claimed.tookOver.reason;
+      console.log(`[席位接管] ${seatFile} 里记的 pid ${claimed.tookOver.pid}（${why}），已接管。`);
+    }
     if (!claimed.ok) {
       console.error(`[启动被拒] ${claimed.reason}`);
       console.error('如果确认那个进程已经该退出了，先把它停掉再启动；不要同时跑两个带 GUI 席位的实例。');
@@ -621,11 +702,20 @@ if (isMain) {
   }
   const db = openDb(dbPath);
   const dispatchMode = env.AICOMPANY_DISPATCH_MODE ?? 'inline';
+  // 控制面关键路径日志（派活 / 终态 / 重派 / 交付）：审计在 SQLite 里，翻起来要拷库；
+  // 这里是按天轮转的文本，出问题时先翻它。目录 <workRoot>/logs/engine/YYYY-MM-DD.log。
+  const engineLog = createLogger({ dir: path.join(config.workRoot ?? process.cwd(), 'logs', 'engine') });
   // P4-6：出站通道按配置来（web / noop / stdout 内置；im / webhook 需显式 URL）。
   const engine = createEngine({
     db, config, notifier: createNotifier(config.notifier ?? ['web']), dispatchMode,
+    log: (text, level = 'info') => engineLog.log(level, text),
     // 被「你刚动过键盘」拦下的卡，4 秒后自己再试一次，而不是让看板静默等一分钟的维护心跳。
     gateRetryMs: Number(env.AICOMPANY_GATE_RETRY_MS ?? 4000),
+  });
+  // G-P5 常驻门禁：状态落 workRoot/gate-watch.json，控制面维护心跳每 60 秒喂一次。
+  // 不按 72 小时墙钟；晚上关机的大空档不计活动时间，重启后接着累计。
+  const gateWatch = createGateWatch({
+    db: engine.db, config: engine.config, workRoot: engine.workRoot, env,
   });
   const server = createServer({
     engine, port, host, bridgeToken: env.AICOMPANY_BRIDGE_TOKEN ?? null,
@@ -633,8 +723,25 @@ if (isMain) {
     guiPauseFile: env.AICOMPANY_GUI_PAUSE ?? null,
     guiSeat: seat,
     deferRequests: env.AICOMPANY_REQUEST_ASYNC === '1',
+    gateWatch,
   });
+  // 进程刚起来，库里不该还有 status='running' 的 run —— 那是上一个进程留下的尸体。
+  // 不收掉它会一直占着并发名额与「这台席位正忙」的判断，重启后新卡派不下去。
+  try {
+    const orphans = engine.recoverOrphanRuns?.() ?? 0;
+    if (orphans) console.log(`[启动] 收掉 ${orphans} 条上次进程遗留的 running run（按中断记账，不动任务卡状态）`);
+  } catch (error) {
+    console.log(`[启动] 收尸失败：${String(error.message ?? error)}`);
+  }
+  // 先采一次基线，看板一打开就有「从哪开始累计」的时间点；之后由维护心跳每 60 秒续。
+  try {
+    const first = gateWatch.sample();
+    console.log(`[G-P5] 常驻门禁启动：${first.gate.level} · ${first.gate.reason}`);
+  } catch (error) {
+    console.log(`[G-P5] 首次采样失败：${String(error.message ?? error)}`);
+  }
   const shutdown = () => {
+    try { gateWatch.stop(); } catch { /* 落盘失败不挡退出 */ }
     try { seat?.release(); } catch { /* 释放失败不影响退出 */ }
     // 挂着「等会儿再试」的定时器必须带走，否则退出前还会朝一个正在关的库写事件。
     try { engine.close(); } catch { /* 引擎没这方法就当没有 */ }
@@ -652,6 +759,12 @@ if (isMain) {
       engine.reconcile({ olderThanMs: Math.max(15_000, maintenanceSec * 1000) })
         .then((r) => { if (r.requeued) console.log(`[维护心跳] 重新投递 ${r.requeued} 张卡`); })
         .catch((error) => console.log(`[维护心跳] 失败：${String(error.message ?? error)}`));
+      try {
+        const g = gateWatch.sample();
+        if (g.gate.level === 'pass') console.log(`[G-P5] 达标：${g.gate.reason}`);
+      } catch (error) {
+        console.log(`[G-P5] 采样失败：${String(error.message ?? error)}`);
+      }
     }, maintenanceSec * 1000);
     if (typeof maintenanceTimer.unref === 'function') maintenanceTimer.unref();
     server.on('close', () => clearInterval(maintenanceTimer));

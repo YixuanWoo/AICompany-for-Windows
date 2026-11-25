@@ -26,7 +26,7 @@ function tmpRoot(t) {
 }
 
 const suggestion = (over = {}) => ({
-  title: 'yitai 每周体检',
+  title: 'demo-editor 每周体检',
   rrule: 'FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=30',
   timezone: 'Asia/Shanghai',
   assignee: 'doubao',
@@ -117,7 +117,7 @@ function makeJob(over = {}) {
   return {
     schema: 'aicompany.recurring/v1',
     jobId: 'JOB-weekly', jobVersion: 1,
-    title: 'yitai 每周体检', kind: 'inspection',
+    title: 'demo-editor 每周体检', kind: 'inspection',
     owner: 'ceo', assignee: 'doubao', reportsTo: 'engineering', status: 'active',
     trigger: { type: 'cron', rrule: 'FREQ=WEEKLY;BYDAY=MO;BYHOUR=20;BYMINUTE=30', timezone: 'Asia/Shanghai' },
     misfirePolicy: 'run_once', misfireGraceMin: 720, overlapPolicy: 'skip',
@@ -172,7 +172,7 @@ test('CR-2 · 老 job 没写 reviewBy：照旧能建卡，不炸、也不硬塞�
 
 test('CR-3 · CEO 提排班不写 reviewBy：默认工程岗，并在审批单上写清是谁审', async (t) => {
   const { db, engine } = setup(t, { cycle: suggestion() });
-  await engine.submit({ text: '给 yitai 定运行节奏，只排班不派卡' });
+  await engine.submit({ text: '给 demo-editor 定运行节奏，只排班不派卡' });
   await pumpAll(engine);
 
   const ap = db.prepare("SELECT * FROM approvals WHERE kind = 'recurring_create' AND status = 'pending'").get();
@@ -194,16 +194,22 @@ test('CR-4 · 方向性长期任务：CEO 可以写 reviewBy: ceo，系统照办
   assert.match(job.reviewNote, /项目走向/);
 });
 
-test('CR-5 · reviewBy 写成执行人自己：拒单，不出审批（不许自己审自己）', async (t) => {
+test('CR-5 · reviewBy 写成执行人自己：不再拒单，自动往上抬一级（2026-11-18 改）', async (t) => {
   const { db, engine } = setup(t, { cycle: suggestion({ reviewBy: 'doubao' }) });
-  await engine.submit({ text: '给 yitai 排班' });
+  await engine.submit({ text: '给 demo-editor 排班' });
   await pumpAll(engine);
 
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM approvals WHERE kind = 'recurring_create'").get().n, 0,
-    '自己审自己的排班不能送到董事会面前');
-  const hit = db.prepare("SELECT * FROM audit WHERE action = 'recurring_suggestion_rejected'").get();
-  assert.ok(hit, '拒单要留痕，否则董事会只看到「什么都没发生」');
-  assert.match(hit.newValue, /自己审自己/);
+  // 旧行为：整条建议被静默丢掉，董事会只看到「完成」而库里什么都没有。
+  // 新行为：规则仍然成立（不能自己审自己），但方式是「抬一级」——doubao 的上级是 engineering，
+  // 所以这条排班照常出单，只是审的人从「执行人自己」换成了它的上级，并留痕说明为什么换了。
+  const ap = db.prepare("SELECT * FROM approvals WHERE kind = 'recurring_create' AND status = 'pending'").get();
+  assert.ok(ap, '撞车要抬级，不是把活扔掉');
+  const job = JSON.parse(ap.requestJson).payload.job;
+  assert.equal(job.assignee, 'doubao');
+  assert.equal(job.reviewBy, 'engineering', '审的人 = 执行人的上级（reportsTo）');
+  const esc = db.prepare("SELECT * FROM audit WHERE action = 'review_by_escalated'").get();
+  assert.ok(esc, '抬级必须留痕，否则董事会不知道审的人为什么变了');
+  assert.match(esc.newValue, /doubao→engineering/);
 });
 
 test('CR-6 · 卡上写死审查人后，执行人自报 land 会被拦下（不能绕过别人审）', async (t) => {

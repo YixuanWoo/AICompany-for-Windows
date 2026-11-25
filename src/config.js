@@ -128,7 +128,7 @@ export function applyConfigRules(config) {
             errors.push(`projects.${id}.deliverSubdir 只能是项目文件夹下的相对子目录（不能绝对路径、不能带 ..）`);
           }
         }
-        // 落盘前的占用检查：这些进程在跑就先不写（例：译台开着会锁住译稿）。
+// 落盘前的占用检查：这些进程在跑就先不写（例：编辑器开着会锁住目标文件）。
         const blockers = entry?.deliverBlockers;
         if (blockers !== undefined) {
           if (!Array.isArray(blockers) || blockers.some((b) => typeof b !== 'string' || !b.trim())) {
@@ -231,6 +231,36 @@ export function normalizeConfig(config) {
     cooldownSec: config.runPolicy?.cooldownSec ?? DEFAULTS.cooldownSec,
     maxRunHours: config.runPolicy?.maxRunHours ?? DEFAULTS.maxRunHours,
     staleEventMinutes: config.runPolicy?.staleEventMinutes ?? DEFAULTS.staleEventMinutes,
+    // 2026-11-17 稳定性加固（默认关，保持老配置 / 老测试语义；公司档里显式打开）：
+    //   escalateToBoss：卡走不下去时先交给汇报线上的「人」（上级 agent）处置，只有汇报线到顶才出审批单。
+    //   stuckMinutes：卡在同一状态沉浸超过这么多分钟 → 看门狗补投 / 向上汇报。0 = 关。
+    //   parentWaitMinutes：父卡已经派了子卡，却还占着自己的会话干等 —— 超过这么多分钟就由引擎
+    //     把那趟 run 按中断收账、并把父卡正式置为「等子卡」，让子卡能被唤醒。0 = 关。
+    escalateToBoss: config.runPolicy?.escalateToBoss === true,
+    stuckMinutes: Number(config.runPolicy?.stuckMinutes ?? 0),
+    parentWaitMinutes: Number(config.runPolicy?.parentWaitMinutes ?? 0),
+    // 验收该由中层审时，等它多久才转总经理兜底（2026-11-17）。
+    // 0 = 不等待（老语义：补审一律归 CEO）；公司档里给 20 分钟，让中层真的有机会审自己派的活。
+    seatReviewFallbackMinutes: Number(config.runPolicy?.seatReviewFallbackMinutes ?? 0),
+    // 验收久悬的第二道兜底（2026-11-22）：让路（人在用电脑）不扣补审额度以后，
+    // 额度可能永远用不完，卡就能无声地一直等。超过这么多分钟仍停在待验收，就报一次董事会。
+    // 0 = 关（老配置行为不变）。
+    reviewEscalateMinutes: Number(config.runPolicy?.reviewEscalateMinutes ?? 0),
+    // 证据层（2026-11-18）：引擎不再只信「run 挂着 running」。
+    //   evidenceEnabled：总开关。默认 false = 老行为完全不变；公司档显式打开。
+    //   ackTimeoutSec：派出去多久还没系统级回执（dispatch.json）→ 判定「没送到」。
+    //   idleTimeoutSec：有回执但这么久没有任何 agent 侧活动证据 → 先探证据，再中断重派。
+    //   maxDispatchAttempts：同一张卡最多重派几次（含首次），用完就向上开处置卡。
+    evidenceEnabled: config.runPolicy?.evidenceEnabled === true,
+    ackTimeoutSec: Number(config.runPolicy?.ackTimeoutSec ?? DEFAULTS.ackTimeoutSec),
+    idleTimeoutSec: Number(config.runPolicy?.idleTimeoutSec ?? DEFAULTS.idleTimeoutSec),
+    maxDispatchAttempts: Number(config.runPolicy?.maxDispatchAttempts ?? DEFAULTS.maxDispatchAttempts),
+    // 心跳续命（2026-11-19）：adapter 还在写 run-heartbeat.json 说明这一趟仍在它的轮询里，
+    // 不是宕机。这种时候不重派（重派只会把同一活干两遍）。
+    //   heartbeatGraceSec：心跳多新才算「还在轮询」
+    //   seatBudgetSlackSec：席位自己承诺的 maxMinutes 到了以后再宽限多久，仍无产出才升级
+    heartbeatGraceSec: Number(config.runPolicy?.heartbeatGraceSec ?? DEFAULTS.heartbeatGraceSec),
+    seatBudgetSlackSec: Number(config.runPolicy?.seatBudgetSlackSec ?? DEFAULTS.seatBudgetSlackSec),
   };
   // 席位与担任者是两件事，必须分开写清楚：
   //   post   = 岗位名（总经理 / 执行），席位本身的名字，稳定不变

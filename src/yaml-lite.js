@@ -62,6 +62,17 @@ function parseList(lines, start, indent) {
   let i = start;
   while (i < lines.length && lines[i].indent === indent && lines[i].content.startsWith('- ')) {
     const rest = lines[i].content.slice(2).trim();
+    // 2026-11-23：支持「纯标量」列表项。project.yaml 的 redlines / acceptance / memory.focus
+    // 都是「- 一句中文」（没有英文冒号），原来一律按 map 解析会直接抛错，
+    // 项目规范因此无法被结构化读取。带 "key: value" 的项仍走原逻辑。
+    const isMapItem = /^[^:\s][^:]*:(\s|$)/.test(rest);
+    if (!isMapItem) {
+      out.push(parseScalar(rest));
+      i += 1;
+      // 标量项不该有子块；真出现了就丢弃，避免缩进对不上造成死循环。
+      while (i < lines.length && lines[i].indent > indent) i += 1;
+      continue;
+    }
     const block = [{ indent: indent + 2, content: rest, lineNo: lines[i].lineNo }];
     i += 1;
     while (i < lines.length && lines[i].indent > indent) {

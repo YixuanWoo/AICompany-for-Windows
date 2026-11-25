@@ -606,13 +606,13 @@ test('P4-8 · 改验收必须 replan 人审：未声明拒绝，声明后挂起�
   const { engine, db, taskId } = await suspend(t);
   await assert.rejects(() => engine.submitDecision({
     changeRequestId: `CR-${taskId}`, taskId, decidedBy: 'ceo',
-    decision: 'resume', newAcceptance: ['产物存在且带术语表'], needsHumanApproval: false,
+    decision: 'resume', newAcceptance: ['产物存在且带词条表'], needsHumanApproval: false,
     reason: '验收条件变了',
   }), /needsHumanApproval/);
 
   const out = await engine.submitDecision({
     changeRequestId: `CR-${taskId}`, taskId, decidedBy: 'ceo',
-    decision: 'resume', newAcceptance: ['产物存在且带术语表'], needsHumanApproval: true,
+    decision: 'resume', newAcceptance: ['产物存在且带词条表'], needsHumanApproval: true,
     reason: '验收条件变了',
   });
   assert.equal(out.status, 'awaiting_approval');

@@ -1,144 +1,170 @@
 # AICompany
 
-一套**不含任何具体 AI 产品的公司制度引擎**：任务状态机、循环任务、调度、配额、人审与审计，外加**双帽协作**与**执行中动态改道**。岗位编制、汇报线、每位员工用什么方式触发，全部由你自己的 `company.yaml` 决定——**换一份配置就是另一家公司，源码一行不用改**。
+**中文** | [English](#english)
 
-> **默认用户入口是内置的 Web Board**：`npm start` 后浏览器打开 `http://127.0.0.1:3100` 就能下任务、审批、验收，**不需要任何 IM 账号、外部服务，也不需要服务器**。不配任何环境变量也能跑，会自动用本地假 agent 演示（不联网、不烧额度）。飞书等 IM 只是「手机端远程」的**可选** `Channel` 插件，删掉它公司照常运转；agent 之间的通信渠道只有控制面，跟用哪个前端无关（任务书 §4.2 / §6B.8）。P2 起多了可选的 bridge 拉模式，但**本地单机演示仍是默认、一等公民**。
+一套**不绑定任何具体 AI 产品**的公司制度引擎：任务状态机、循环任务、调度、配额、审批、审计，加上**双帽协作**与**执行中改道**。岗位编制、汇报线、每个员工用什么方式干活，全部写在 `company.yaml` 里——**换一份配置就是另一家公司，源码一行不用改**。
 
-> 本项目计划开源。`examples/profiles/windows-local.yaml` 是**作者本人**的配置（DSH 当 CEO、WorkBuddy、豆包、Hermes、飞书远程入口），**只是示例，不是默认值、不是依赖、不是安装前提**。
+> A protocol-first, zero-dependency "company" engine for AI agents. Agents are pluggable seats described in YAML; the engine only knows capabilities and a unified `execute()` interface, never product names.
 
-| 项 | 内容 |
+- 默认入口是内置 Web Board：`npm start` 后打开 `http://127.0.0.1:3100`，下任务、审批、验收、看 Run 全在浏览器里，**不需要 IM 账号、不需要云服务器、不配任何环境变量也能跑**。
+- 技术栈只有 Node 22 + 内置 `node:sqlite` + 内置单页看板，**零外部依赖**，不装 Docker / Redis / pm2。
+
+The default entry point is the built-in Web Board: run `npm start`, then open `http://127.0.0.1:3100` to create tasks, approve, accept deliverables and inspect runs — all in the browser. **No IM account, no cloud server, no environment variables required.** The stack is just Node 22 + built-in `node:sqlite` + a built-in single-page board — **zero runtime dependencies**, no Docker / Redis / pm2.
+
+## 它想解决的三件事 / Three problems it solves
+
+| 问题 Problem | 做法 Approach |
 |---|---|
-| 状态 | **v1.0 设计定稿**；**P0 协议冻结 + P1 最小闭环 + P2 控制面分层 / bridge / 循环 L2 + P3 GUI 型 adapter + P4 治理 / 完整档 + P5 试运行观测 / 调参均已完成并自主验收通过**，零依赖可运行（`npm test` **251/251**；`npm start` 可开 Web Board，`npm run soak` 可做长跑体检）；**已能天天用**：`prod` 档常驻 3100 直投 GUI 席位、`npm run task -- "…"` 一句话下单、抢键鼠的代价有四道可选闸（暂停 / 时段 / 静置 / 锁屏），真机 4 单连跑全 done（`docs/P6-天天用.md`）；**Windows 常驻已就绪**（`npm run win:install` 装开机自启，隐藏运行 + 崩溃重启 + 每 5 分钟巡检 + 托盘）；**G-P5「连续 3 天」如实留空**：口径已按用户拍板 B+C 备齐（soak 含模拟 GUI 席位 + 生产库看门狗），只差挂满 72 小时真实墙钟 |
-| 创建 | 2026-11-15 |
-| 主文档 | [`docs/开发任务书.md`](docs/开发任务书.md) — 唯一技术文档，已完成全文一致性复核 |
-| 版本沿革 | v0.1 → v0.2（§6A 循环任务）→ v0.3（§6B 配置驱动 / 可移植）→ v0.4（Web Board 为默认主入口）→ **v1.0（§6C 交互 / §6D 中途变更 + 全文复核定稿）** |
-| 分层 | 用户接入层（Web Board 内置 + 可选 channel）· 引擎层固定（状态机 / 循环 / 调度 / 配额 / 审计）· 适配层可插拔 · 配置层用户填 |
-| 用户入口 | **统一 API（REST + SSE/WS）是契约**；Web Board 是默认客户端；飞书 / CLI / 其它 IM 都是可选客户端 |
-| 配置 | `config/company.yaml`（YAML + `${ENV}` 插值）；`clients` 与 `notifier` 分开配；仓库只提交 `company.example.yaml` |
-| 技术选型 | Node 22 ESM + 内置 `node:sqlite` + 内置单页 Web Board + 内置调度例程，**零外部依赖**；不装 Docker / WSL2 / Redis / pm2 / cron；消息通道与 agent 触发方式均可换（与 §10 原定 TypeScript / 第三方库的实现偏差见 `docs/P0-协议冻结说明.md` / `docs/P1-最小闭环说明.md` / `docs/P2-交付说明.md` / `docs/P3-交付说明.md` / `docs/P4-交付说明.md` / `docs/P5-交付说明.md`） |
+| 「agent 说做完了，其实没做」"The agent says done, but it isn't" | **证据层**：完成必须带磁盘产物（公司任务目录或项目交付目录），引擎按文件时间戳 / 进程 / 日志三层判定，没证据不认完成，超时判死前先附现场。**Evidence layer**: completion requires an on-disk artifact (task or project delivery directory); the engine judges by file timestamps / process / logs. No evidence, no completion. |
+| 「任务卡住了，没人管」"A task is stuck and nobody notices" | **升级与巡检**：执行人连续失败或超时 → 自动升级到上级卡；上级接手前先判断下级**还在不在动**，在动就让它继续，而不是重做。**Escalation & patrol**: repeated failures or timeouts escalate to the boss's card; before taking over, check whether the subordinate is **still making progress** — if so, let it continue instead of redoing the work. |
+| 「agent 之间互相甩锅 / 重复领活」"Agents blame each other or claim the same task" | **控制面单一事实源**：所有派活、状态、审计走同一套 API 与 SQLite，幂等键、租约互斥、汇报线拦截都在引擎里，不在提示词里。**Single source of truth**: all dispatch, state and audit go through one API and SQLite; idempotency keys, lease exclusion and reporting-line checks live in the engine, not in prompts. |
 
-## 三步接自己的 agent
-
-1. **选触发形态**：有 CLI → `process` / `cli-acp`；有 HTTP → `http`；只有 GUI → `gui-template`；完全封闭、只能定时查消息 → `polling`。都不合适就按任务书 §6B.7 写一个 adapter 包。
-2. **填 `config/company.yaml`**：列岗位、`reportsTo`、`capabilities`、每个岗位用哪个 `adapter` 及参数、额度；命令与凭据一律写成 `${ENV_VAR}`。
-3. **跑起来**：`npm run doctor`（检查配置）→ `npm start` → **浏览器打开 `http://127.0.0.1:3100` 提第一条需求**。`clients: [web]` + `notifier: [noop]` 时零外部凭据即可跑通最小闭环；`npm test` 跑全套验收。
-
-> 需要手机端远程时，才额外配一个 IM `Channel`；不配完全不影响使用。
-
-## 日常只用记三条
-
-| 我要干的事 | 敲什么 / 点哪里 |
-|---|---|
-| **下单** | `npm run task -- "把 X 做了" --wait`（不加 `--wait` 就不等你） |
-| **看结果** | 浏览器 `http://127.0.0.1:3100`，任务表最后一列「看结果」 |
-| **让它别抢我键盘** | 同一页顶部状态条「暂停 GUI」，点一下立刻停手，恢复后自动重投 |
+## 快速开始 / Quick start
 
 ```bash
-# 装一次就开机自启（隐藏运行 + 崩溃重启 + 每 5 分钟巡检），再立刻起一次
-npm run win:install            # = install.ps1（默认 -Profile prod）
-npm run win:start              # = start.ps1 -Profile prod
-
-# 不想装成计划任务、只想前台跑一下（日志落 work-prod/logs/，挂了自动重启）
-npm run start:prod             # = node src/runner.js --profile prod
+# 需要 Node >= 22 / Requires Node >= 22
+npm start                      # 控制面 + Web Board，默认 3100 / control plane + board, port 3100 by default
 ```
 
-`prod`（3100 / `company.prod.yaml` / `work-prod/`）和 `demo`（3199 / 示例配置 / `work/`）是两套**互不干扰**的档位，端口、库、计划任务、日志各自独立；装起停查都带 `-Profile`。踩过的坑与硬边界见 `docs/P6-天天用.md`。
+打开 `http://127.0.0.1:3100`，在顶部「提需求」提交第一条任务。默认示例配置会用本地假 agent 跑通闭环，不联网、不烧额度。
+Open `http://127.0.0.1:3100` and submit your first task via "提需求" (Submit request) at the top. The default example config runs the full loop with a local dummy agent — no network, no token cost.
 
-## 两种运行形态（P2 起，本地演示仍是一等公民）
+```bash
+npm run doctor -- config/company.example.yaml   # 体检：配置 / 席位 / 路径 / 凭据 / health check: config, seats, paths, credentials
+npm test                                       # 全量测试（node --test，400+ 条）/ full suite (node --test, 400+ cases)
+```
 
-| 形态 | 怎么开 | 适合谁 |
-|---|---|---|
-| **inline（默认，本机单机）** | `npm start` | 没服务器、就想在自己电脑上跑。不配任何环境变量，Docker / WSL2 / Redis / 消息队列全不需要 |
-| **bridge（可选，拉模式）** | 终端 1：`AICOMPANY_DISPATCH_MODE=bridge npm start`；终端 2：`npm run bridge` | 想把控制面和干活的 agent 分开跑。断网期间任务排队、开机自动补领，一张活不会被领两次 |
+Windows 上想常驻（开机自启、崩溃重启、托盘）：
+To run as a Windows background service (start on login, restart on crash, tray icon):
 
-两者共用**同一套 `/api`** 和同一个 Web Board。**没有部署到任何真服务器，也不要求你有服务器**——P2 的「服务器化」只是代码分层；将来真要放远程，改配置即可，不用重写。跨机器时才需要显式配 `AICOMPANY_BRIDGE_TOKEN`。详见 `docs/P2-交付说明.md`。Windows 本地安装 / 开机自启 / 托盘等优化按计划单独排期，当前未做。
+```bash
+npm run win:install    # 装计划任务，隐藏运行 / register scheduled task, run hidden
+npm run win:start
+npm run win:status
+```
 
-## 用户入口
+## 接自己的 agent：三步 / Bring your own agent in 3 steps
 
-| 客户端 | 地位 | 用途 |
-|---|---|---|
-| **内置 Web Board** | **默认主入口，第一版就有** | 电脑前下任务 / 审批 / 评论 / 验收 / 协作 / 看 Runs 与循环任务 |
-| 飞书 / 其它 IM bot | 可选 `Channel`（入站）+ `Notifier`（出站） | 手机端远程，一条消息提需求、收简报 |
-| CLI / 脚本 | 可选 | 自动化、批处理 |
+1. **选触发形态**：有命令行 → `process` / `cli-acp`；有 HTTP 接口 → `http`；只有图形界面 → `gui-template`；封闭到只能被轮询 → `polling`。都不合适就写一个 adapter 包（见 `docs/开发任务书.md` §6B.7）。
+   **Pick a trigger shape**: CLI → `process` / `cli-acp`; HTTP endpoint → `http`; GUI only → `gui-template`; poll-only → `polling`. If none fit, write an adapter package (see `docs/开发任务书.md` §6B.7).
+2. **写配置**：从 `config/company.example.yaml` 复制一份，列岗位、`reportsTo`、`capabilities`、每岗用哪个 `adapter` 与参数、额度。命令和凭据一律写 `${ENV_VAR}`。
+   **Write the config**: copy `config/company.example.yaml`, list posts, `reportsTo`, `capabilities`, the `adapter` and params per post, and quotas. Put all commands and credentials in `${ENV_VAR}`.
+3. **跑起来**：`npm run doctor -- <你的配置>` → `npm start` → 浏览器提需求。
+   **Run it**: `npm run doctor -- <your config>` → `npm start` → submit a request in the browser.
 
-三者**只读写同一套统一 API**，共用幂等键、能力校验与审计。三个通信方向必须分开：**入站 `Channel` / 出站 `Notifier` / 机机 `adapter`**；飞书只出现在前两者，**绝不参与 agent 唤醒**——唤醒由控制面事件监听 → `adapter.execute()` 发起。
+adapter 只有五种通用形态，引擎**不认识任何产品名和岗位名**：
+There are only five generic adapter shapes; the engine **knows no product names or job titles**:
 
-## v1.0 新增的两件事
-
-| 章节 | 解决什么 | 一句话 |
-|---|---|---|
-| **§6C 交互模式、身份码与协作空间** | 「我戴董事长帽」和「我戴员工帽」是两种事 | 提交时显式选 `delegate / direct / cowork / meeting`：`direct` 指名直投跳过 CEO 那次决策但仍经控制面，`cowork / meeting` 走 `WorkThread` 不建任务卡；`agentId` 是稳定席位码，`addressedTo`（交付、唤醒）与 `cc`（抄送、零唤醒）绝不复用同一字段 |
-| **§6D 执行中的动态调整** | 「活干到一半发现方向不对」 | `ChangeRequest` 刹车 → `awaiting_decision` 挂起并存现场快照 → 沿汇报线由 CEO 决策（改目标须 `replan` 人审）→ `resume` **带着半成品续做**；四种出口 `resume / redo / derive / cancel` + `revision` 指令版本化 |
-
-两章都**不做 LLM 意图分类器**：模式与 `ChangeRequest.kind` 一律由显式字段判定。第一版按最小档起步（§18 D11/D12），完整档落在 P4，但**协议字段在 P0 一次定死**。
-
-## 作者本人的示例编制（不是默认配置）
-
-| 岗位 | 作者用谁担任 | 触发方式 |
-|---|---|---|
-| CEO / 总经理 | DSH | 控制面事件 → `adapter`（bridge 拉取 / IM 推送可选）→ `headless --session-id` |
-| 技术负责人 / 救火队 | WorkBuddy | CLI + 任务包 |
-| 基层执行 | 豆包 | GUI 自动化，完成报告落文件 |
-| 常驻运维 + 控制面宿主 | Hermes（服务器） | 本地执行 / cron |
-| 编制外只读巡检 | today | 定时读统一 API 的状态与事件，不派活 |
-
-这五个具体实现放在 `examples/adapters/`，可整体删除；它们分别映射到下面的通用型。
-
-## 内置通用 adapter（按触发形态分，不按产品分）
-
-| `type` | 触发形态 |
+| `type` | 触发形态 Trigger shape |
 |---|---|
-| `process` | spawn 任意命令，收 stdout / 退出码 |
-| `http` | POST webhook，外部服务回调写回结果 |
-| `cli-acp` | spawn CLI 并解析 JSONL / ACP 事件流 |
-| `gui-template` | 激活窗口 → 快捷键 → 输入 → 轮询报告文件 → 截图留证 |
-| `polling` | 不推；外部脚本自己拉 inbox、领活、回写 |
+| `process` | spawn 任意命令，收 stdout / 退出码 / spawn any command, collect stdout / exit code |
+| `http` | POST webhook，外部服务回调写结果 / POST webhook, external service calls back with the result |
+| `cli-acp` | spawn CLI 并解析 JSONL / ACP 事件流 / spawn CLI and parse JSONL / ACP event stream |
+| `gui-template` | 激活窗口 → 快捷键 → 输入 → 轮询报告文件 → 截图留证（Windows）/ focus window → hotkey → paste → poll report file → screenshot (Windows) |
+| `polling` | 不推送；外部脚本自己拉 inbox、领活、回写 / no push; external script pulls inbox, claims tasks, writes back |
 
-引擎只认统一 `execute()` 接口与能力标签（`plan / delegate / review / execute / escalate / readOnly`），**不认任何产品名或岗位名**；`adapter` 类型拼错会拒绝启动并列出可用类型，不会静默降级。
+## 核心概念 / Core concepts
 
-## 文档目录
+- **任务卡 Task card**：`T-xxxx`，带验收标准、难度、预算，状态机从 `pending` 到 `done` 全程有审计。/ `T-xxxx`, with acceptance criteria, difficulty and budget; the state machine audits every step from `pending` to `done`.
+- **席位 Seat**：一个岗位的担任者，一个 agent 一份配置；同一个人可以既当 CEO 又当执行（**双帽**），但提交时必须显式选模式：`delegate`（走汇报线）/ `direct`（点名直投）/ `cowork` / `meeting`（后两者不建卡，走 WorkThread）。/ A post's occupant, one config per agent; the same agent can be both CEO and executor (**dual hat**), but submission must pick a mode explicitly: `delegate` (via reporting line) / `direct` (addressed) / `cowork` / `meeting` (the latter two create no card, use WorkThread).
+- **Run**：席位的一次执行尝试，独立目录、独立日志；失败会打出 `reason`，报告不合格会被整份打回重跑。/ One execution attempt by a seat, with its own directory and log; failures record a `reason`, and a rejected report is sent back whole for a rerun.
+- **升级 Escalation**：同一张卡连续 2 次返工 → 转上级；上级卡只做「接管 / 改派 / 上报」，不默认重做。/ Two consecutive reworks on one card → escalate to the boss; the boss card only "take over / reassign / escalate up", never redo by default.
+- **项目 Project**：任务可以挂到项目上，`rootDir` + 可选 `deliverSubdir` 决定产物落到哪，验收通过后自动复制落盘并记校验和。/ Tasks can attach to projects; `rootDir` + optional `deliverSubdir` decide where artifacts land; after acceptance they are copied to disk with a checksum recorded.
+- **门禁 Gate**：试运行指标（活动时长、任务数、异常率、脏状态）由控制面每 60 秒采样，达标自动钉住，看板「观测与运维」可见。/ Pilot metrics (active time, task count, error rate, dirty state) are sampled every 60s by the control plane and pinned automatically once thresholds are met; visible in the board's "Observability & Ops".
 
-- `docs/开发清单.md` — **做一项打勾一项的执行清单**（54 项）；当前 **53/54，P0–P5 的步骤已全部完成并验收通过，P6 真实 GUI 接入已实测跑通（含每任务独立新会话）、「能天天用」已投产、G3 难度分流与 G2 完成即触发均已达成**；只剩 G-P5（真实 72 小时墙钟）如实留空。P7 项目层（注册 / 必选 / 规范注入 / 记忆 / 落盘 / 看板）已完成，不计入 54 项（G6 随 P3、G7 / G8 的 P4 档与 G-附加 随 P4 补齐证据后勾选）
-- `docs/P0-协议冻结说明.md` — P0 交付说明：8 份协议、3 份契约、25 个端点、写死的规矩、自主验收记录与偏差说明
-- `docs/P1-最小闭环说明.md` — P1 交付说明：通俗解释、新增与修改的文件、真实 HTTP 冒烟记录、7 处选型偏差、未打勾项与下一步
-- `docs/P2-交付说明.md` — P2 交付说明：不部署真服务器的说明、本地演示为何保留、bridge 拉模式、循环 L2、6 个修掉的坑、两遍真实启动冒烟、13 处偏差与边界
-- `docs/P3-交付说明.md` — P3 交付说明：GUI 型 adapter「只认文件、绝不读屏」的通俗解释、互斥锁与文件轮询、G-P3 门禁 10 连发（注入 1 故障 9/10 达标）、真实 HTTP 落盘冒烟、7 处边界与偏差
-- `docs/P4-交付说明.md` — P4 交付说明：四组能力（管人管钱 / 该人拍板 / 能查账 / 两条完整档）的通俗解释、新增与修改的文件、**11 个修掉的坑**（含冒烟才发现的 2 个）、真实 HTTP 9 组冒烟、7 处边界与如实交代
-- `docs/P5-交付说明.md` — P5 交付说明：五项指标口径、§6C / §6D 四项结论、11 条脏状态规则、**cooldown 原来是没实现的**、调参与留痕、today 席位去留决议、**G-P5 为什么没打勾**（压缩跑 ≠ 真实 72 小时）与你自己怎么补
-- `docs/Windows常驻说明.md` — Windows 常驻用法：一条命令装自启、三层自愈（server 崩 / runner 被杀 / 孤儿接管）、日志在哪、故障对照表、**边界（休眠会冻结、托盘图标未在真机点过）**
-- `docs/P6-真实接入实测.md` — **真机实测：任务真的发给「豆包工作」**。完整链路、22.6 秒跑完的证据（产物 183 字节 + 控制面自算 sha256）、**真机上才暴露的 7 个坑**、`Ctrl+N` 实测不新建会话的现场发现与三个处理方向、硬边界（抢键鼠 / 覆盖剪贴板 / 必须前台 / 只认文件）
-- `docs/G3-难度分流.md` — **难度分流怎么做、怎么用**：难度三档与席位上限、三条派活规则（接不住不派 / 刚够用优先 / 人点名也拦）、CEO 拆活改派与挂起、看板与 API 用法、11 条回归 + 7 组真实 HTTP 冒烟、三条边界（难度不会自己判 / 不保证质量 / 不是硬隔离）
-- `docs/P6-天天用.md` — **「能天天用」交付说明**：日常三条命令、四道代价闸门、`deferred` 与 `blocked` 为什么要分开、Windows 前台锁的根因与修法、档位（profile）为什么隔离、席位占位防双开、**今天 4 单真机证据**（46s / 41.6s / 102s / 92s，`session: fresh` + 剪贴板还原 + 焦点还原）、边界与排障
-- `docs/下一步计划.md` — **剩余活怎么排**：四类事分开（等时间 / 小改 / 架构改动 / 真机配套）、G2 → G-P5 的先后与原因、另外三条接入（dsh / 我 / hermes）现状、上服务器的触发条件、**8 步推进顺序**
-- `docs/开发任务书.md` — 唯一技术文档，含：背景与 G1–G8 目标、术语、岗位编制、总体架构与时序（**§4.2 四层与三向通信拆分**）、现成资产、协议规范（**§6 开头列出 P0 要冻结的 8 份 schema**）、**§6A 循环任务与长期任务**、**§6B 配置驱动与开源可移植性**（含 **§6B.8 统一 API / Web Board / Channel / Notifier**）、**§6C 交互模式 / 身份码 / WorkThread / 会议**、**§6D 中途变更 / ChangeRequest / 挂起决策 / `revision`**、控制面设计、adapter 方案、bridge、技术选型、开发步骤与门禁、代码规模、时间计划、测试、风险、合规、待拍板事项、附录。
+## 架构 / Architecture
 
-## 当前进度与下一步
+四层，越往上越可换：/ Four layers, more replaceable as you go up:
 
-- [x] 架构调研与可行性核实（Paperclip 制度、Windows 阻塞、许可证）
-- [x] 作者本机现成资产只读核实（任务包协议、飞书链路、定时补投经验）
-- [x] 开发任务书 v0.1 → v0.2 → v0.3 → v0.4
-- [x] **v1.0 — §6C / §6D 写入 + 全文一致性复核完成，设计定稿**
-- [ ] 待拍板：§18 的 D1–D7、D9–D13（**均有默认倾向，未否决即按倾向执行**；D8 已定）
-- [x] **开发第一步 = P0 协议冻结（已完成，44/44 测试通过）**：8 份 JSON Schema（task / progress / completion / recurring / cycle-summary / change-request / decision / thread）+ `company.yaml` 配置 schema + adapter / `Channel` / `Notifier` / 统一 API 契约 + 正反例与 `validate()` + CEO 四类输出格式。**这一步不写任何 adapter**（任务书 §12 P0）；交付与验收见 `docs/P0-协议冻结说明.md`
-- [x] **P1 最小闭环（已完成，全量 63/63 测试通过）**：SQLite 状态机 / 事件去重 / Run Policy / 统一 API + Web Board + SSE / `cli-acp` + `process` adapter / 报告打回重跑 / 文本简报 / §6C 三模式 / §6D 最小档。真实 HTTP 冒烟一次提交自动 9 步办完；交付与验收见 `docs/P1-最小闭环说明.md`
-- [x] **P2（已完成，全量 95/95 测试通过）**：控制面分层（**未部署真服务器**）+ `/api/bridge/*` 拉模式 / lease 互斥 / 心跳补投 + 循环引擎 L2 + 内置调度 / 日志轮转 / 零依赖守护；本地 `npm start` 演示完整保留，真实启动两遍冒烟跑通。交付与验收见 `docs/P2-交付说明.md`
-- [x] **P3 GUI 型 adapter（已完成，全量 126/126 测试通过）**：`gui-template` 通用 adapter + `testEnvironment()` 六项检查 + GUI 全局互斥锁 + 参数化窗口步骤（源码零写死标题 / 按键）+ 强制槽位提示词模板 + 文件轮询 / schema / checksum / 越界校验 + 超时截图留证（**只新增文件、绝不删除**）+ 中途变道交控制面不判失败；G-P3 门禁 10 连发注入 1 故障 9/10 达标。真实窗口操作命令全部由配置提供，**未碰任何真实窗口焦点**（Windows 专项后续）。交付与验收见 `docs/P3-交付说明.md`
-- [x] **P4 治理 + 完整档（已完成，全量 156/156 测试通过）**：配额 80% / 100% 阈值与周期重置、三道常规人审门禁 + 两类按需人审、汇报线与跨子树拦截、Activity / Runs / Audit 查询与看板时间线、返工 2 次转救火席位、可选通道插件、§6C 完整档（meeting 三档 / autoAssign / promote 单向 / TTL）、§6D 完整档（挂起 + 只读快照 + 四种出口 + `revision` + `replan` 人审 + 24h 提醒 / 72h 取消）、循环 L3 与清理红线（`deletedCount` 恒 0）。真实 HTTP 9 组冒烟全过。交付与验收见 `docs/P4-交付说明.md`
-- [x] **P5 试运行观测（步骤已完成，全量 178/178 测试通过；G-P5 待真实 3 天）**：五项指标（误唤醒 / 空转 Run / 报告不合格率 / GUI 失败率 / 额度消耗，每项口径写进报告）、§6C / §6D 四项结论、11 条可机检脏状态规则、cooldown 与并发上限补齐（原来 cooldown 根本没实现）、调参白名单 + `audit` 旧值新值 + 覆盖层持久化、压缩时钟 120 小时长跑零脏、真实墙钟驱动器 `npm run soak:real`（**压缩模式永不判通过**）。压缩跑只能证明逻辑不脏，不能代替真实 72 小时——所以 G-P5 不打勾。交付与验收见 `docs/P5-交付说明.md`
-  - [x] **G-P5 口径备齐 B+C（2026-11-16，用户拍板）**：`npm run soak:real` 现在每个 interval 投一张卡（含模拟驱动 GUI 席位，不碰真键鼠，5 种工况覆盖闸门/剪贴板/deferred/失败）；另加 `npm run prod-watch:72h -- --out <runId>` 每 60 秒只读扫生产真库跑脏检测。两份报告合流才算「天天用」的证据。只差挂满 72h，详见 `docs/下一步计划.md` §6.3.1
-- [x] **P6 真实 GUI 接入 + 「能天天用」投产（交付时 223/223，现 251/251）**：控制面直投「豆包工作」的真机链路跑通（每任务独立新会话、剪贴板与焦点还原、只认磁盘文件判完成）；`prod` 档常驻（登录自启 + 5 分钟巡检 + 崩溃重启）、一句话下单 `npm run task -- "…"`、看板看结果 / 取消 / 暂停 GUI、四道可选代价闸（暂停 / 时段 / 静置 / 锁屏）、GUI 席位全局占位防双开。**真机 4 单连跑全 done**（46s / 41.6s / 102s / 92s，均 `session: fresh`），前台锁「静默拒绝」用三次重试 + 轻敲 Alt 破解。交付与验收见 `docs/P6-真实接入实测.md` / `docs/P6-天天用.md`
-- [x] **G3 难度分流**：任务卡 `difficulty`（easy / normal / hard）+ 席位 `maxDifficulty`（不写＝不设限），派活「接不住不派 / 刚够用优先 / 人点名也拦」，CEO 拆活接不了就改派或挂起。见 `docs/G3-难度分流.md`
-- [ ] **后续（等你发话）**：git 基线提交 → **P7 项目层与项目记忆**（7 项，另计）→ **G2 完成即触发** → 代码冻结挂 **G-P5** 72 小时 → 清单 **54/54** → 接 dsh / 我 / hermes（配置活）。顺序依据见 `docs/下一步计划.md` §6
-- [x] Windows 常驻（隐藏启动 / 崩溃重启 / 开机自启 / 每 5 分钟巡检 / 托盘脚本）；**托盘图标与看板三处新 UI 未在真机逐点**，其余接口层已实测
+```
+用户接入层   Web Board（内置）/ 可选 IM Channel / CLI
+     │  统一 REST + SSE API（契约）
+引擎层       状态机 · 调度 · 循环 · 配额 · 审批 · 审计 · 证据 · 升级
+     │  统一 adapter.execute()
+适配层       process / http / cli-acp / gui-template / polling（可插拔）
+     │
+配置层       company.yaml（岗位、汇报线、能力、额度、路径）
 
-## 约定
+Access layer   Web Board (built-in) / optional IM Channel / CLI
+     │  unified REST + SSE API (contract)
+Engine layer   state machine · scheduling · recurring · quota · approval · audit · evidence · escalation
+     │  unified adapter.execute()
+Adapter layer  process / http / cli-acp / gui-template / polling (pluggable)
+     │
+Config layer   company.yaml (posts, reporting lines, capabilities, quotas, paths)
+```
 
-- 引擎源码**零产品名、零本机绝对路径**，只认能力标签（任务书 §6B.2 / §6B.11，两条 grep 挂 CI）。
-- **Web Board 与统一 API 属于核心包**；飞书等外部 channel 是可选插件，禁用后机机链路与循环任务必须仍全绿。
-- **第三方 adapter / channel 以控制面进程权限运行、不在沙箱内**，工具审批管不到它；使用者自行审核来源、锁定版本。
-- 凭据只走环境变量，不写进任务卡、日志、报告或仓库；`config/*.yaml` 不入库，`.env.example` 只放变量名。
-- **四种交互模式由显式字段选择**，不做 LLM 意图分类器；`addressedTo` 与 `cc` 严格分开；`cowork / meeting` 不建卡、不进任务状态机，只能单向 `promote`（§6C）。
-- **中途改道走 `ChangeRequest` → `awaiting_decision` → 决策 → `resume`**；改 `instructions` / `acceptance` / 预算须 `replan` 人审；`revision` 只由控制面 +1；挂起态必须从补偿扫描里排除（§6D）。
-- **定期清理类循环只扫描出报告，绝不自动删除；每轮重新确认，删除必须派生独立一次性任务卡**（§6A.9）。
-- 只借鉴 Paperclip 的**制度设计思想**（思想不受版权保护），不 fork 其源码；若将来改为 fork，需按 §17.5 保留三份 MIT 声明。不使用其名称或 logo。
-- `LICENSE` 尚未创建，等决定开源时再建；目前未初始化 git、未发布。
+三个通信方向严格分开：入站 `Channel`、出站 `Notifier`、机机唤醒 `adapter`。控制面是唯一事实源，IM 只是可选前端，删掉它公司照常运转。
+Three communication directions are strictly separated: inbound `Channel`, outbound `Notifier`, machine-to-machine wake-up `adapter`. The control plane is the single source of truth; IM is only an optional front end — remove it and the company still runs.
+
+## 目录结构 / Directory layout
+
+```
+src/            引擎（状态机、调度、证据、升级、gate-watch、看板）/ engine (state machine, scheduling, evidence, escalation, gate-watch, board)
+src/web/        board.html 单页看板 / board.html single-page board
+src/adapters.js 五种通用 adapter / five generic adapters
+tests/          node --test 测试 / node --test suite
+scripts/        下单、巡检、常驻安装、桥接等脚本 / task submit, patrol, service install, bridge scripts
+config/         company.example.yaml 示例配置 + schema / example config + schema
+docs/           设计文档与交付说明 / design docs and delivery notes
+work/           运行产物（已 gitignore）/ runtime artifacts (gitignored)
+```
+
+## 文档 / Documentation
+
+- `docs/开发任务书.md` — 唯一技术文档（协议、配置、架构、门禁、边界）/ the single technical spec (protocol, config, architecture, gates, boundaries)
+- `docs/证据层-有证据的running-20261118.md` — 完成判定为什么必须有磁盘证据 / why completion must have on-disk evidence
+- `docs/升级去向-巡检而非重做-20261124.md` — 卡住了怎么升级，上级接手先看什么 / how to escalate when stuck, what the boss checks first
+- `docs/开发清单.md` / `docs/下一步计划.md` — 实现进度与剩余工作 / implementation progress and remaining work
+- `docs/Windows常驻说明.md` — 计划任务、自愈、日志位置 / scheduled task, self-healing, log locations
+
+## 边界，先说清楚 / Boundaries, up front
+
+- **不判断质量**。引擎保证流程和证据，产物好不好得人来验收。/ **No quality judgement.** The engine guarantees process and evidence; a human must accept whether the artifact is any good.
+- **GUI 席位会抢键鼠**。`gui-template` 必须在真实前台窗口操作，同一台机器同时只允许一个 GUI 席位干活（引擎有全局互斥），并建议配合暂停 / 时段 / 静置 / 锁屏四道闸。/ **GUI seats take over keyboard and mouse.** `gui-template` operates a real foreground window; only one GUI seat may work at a time per machine (global mutex in the engine). Pair it with the four gates: pause / allowed hours / idle / screen lock.
+- **不是沙箱**。第三方 adapter 以控制面进程权限运行，审批管不到它，来源和版本自己审。/ **Not a sandbox.** Third-party adapters run with the control plane's process privileges; approval does not constrain them — review their origin and version yourself.
+- **强依赖 Windows 的部分**（计划任务、托盘、GUI 自动化）在 Linux / macOS 只能跑 `process` / `http` / `cli-acp` / `polling`。/ **Windows-dependent features** (scheduled tasks, tray, GUI automation) — on Linux / macOS only `process` / `http` / `cli-acp` / `polling` work.
+- 任务卡、报告、审计里的时间一律 UTC，看板按本地时区显示。/ Timestamps in cards, reports and audit are always UTC; the board displays in local time.
+
+---
+
+<a id="english"></a>
+
+## English
+
+A protocol-first, zero-dependency "company" engine for AI agents: task state machine, recurring tasks, scheduling, quotas, approvals and audit, plus **dual-hat collaboration** and **mid-execution redirection**. The org chart, reporting lines and how each employee works are all described in `company.yaml` — **swap the config and it is a different company, without touching a line of source code**.
+
+- Default entry point: the built-in Web Board. Run `npm start` and open `http://127.0.0.1:3100` to submit tasks, approve, accept deliverables and inspect runs in the browser. No IM account, no cloud server, no env vars needed.
+- Stack: Node 22 + built-in `node:sqlite` + a built-in single-page board. Zero external dependencies — no Docker, Redis or pm2.
+
+### Quick start
+
+```bash
+npm start                                              # control plane + board on port 3100
+npm run doctor -- config/company.example.yaml          # health check: config, seats, paths, credentials
+npm test                                               # full node --test suite (400+ cases)
+```
+
+On Windows, to run as a background service (start on login, restart on crash, tray icon): `npm run win:install`, `npm run win:start`, `npm run win:status`.
+
+### Three problems it solves
+
+1. **"The agent says done, but it isn't"** — an evidence layer requires an on-disk artifact and judges by timestamps / process / logs; no evidence means no completion.
+2. **"A task is stuck and nobody notices"** — repeated failures or timeouts escalate to the boss's card, which first checks whether the subordinate is still making progress before taking over.
+3. **"Agents blame each other or claim the same task"** — one API and SQLite are the single source of truth; idempotency keys, lease exclusion and reporting-line checks are enforced in the engine.
+
+### Bring your own agent
+
+Pick a trigger shape (`process`, `cli-acp`, `http`, `gui-template`, `polling`), copy `config/company.example.yaml` to define posts, reporting lines, capabilities, adapters and quotas (keep commands and credentials in `${ENV_VAR}`), then run `npm run doctor -- <your config>` and `npm start`. The engine never knows product names or job titles — it only sees capabilities and `adapter.execute()`.
+
+### Concepts
+
+A **task card** (`T-xxxx`) carries acceptance criteria, difficulty and budget, audited from `pending` to `done`. A **seat** is a post's occupant; one agent may hold both CEO and executor hats (**dual hat**) but must choose a mode on submission: `delegate`, `direct`, `cowork` or `meeting` (the last two use WorkThread, no card). A **run** is one execution attempt with its own directory and log. **Escalation** moves a twice-reworked card to the boss, who may take over, reassign or escalate — never redo by default. A **project** binds tasks to a `rootDir` (+ optional `deliverSubdir`) for artifact delivery with checksums. **Gates** sample pilot metrics every 60 seconds and pin them once thresholds are met.
+
+### Boundaries
+
+The engine does not judge quality — a human accepts deliverables. GUI seats take over keyboard and mouse, so only one may run per machine (global mutex), with pause / hours / idle / lock gates recommended. Third-party adapters are not sandboxed and run at the control plane's privilege level. Windows-only features (scheduled tasks, tray, GUI automation) are unavailable on Linux / macOS. All timestamps are UTC; the board displays local time.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

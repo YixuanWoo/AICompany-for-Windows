@@ -280,6 +280,14 @@ export function createRecurring({ db, notifier, now = nowIso }) {
     job.nextFireAt = job.trigger?.rrule
       ? nextFireAt(job.trigger.rrule, at, job.trigger.timezone ?? 'UTC')
       : null;
+    // 一次性定时（maxCycles=1）这一轮就是最后一轮：当场收工，别让它挂成「active · 下次明天」
+    // 骗董事会——否则看板上会显示一条「还会再触发」的假计划。
+    const maxCycles = job.termination?.maxCycles ?? null;
+    if (Number.isInteger(maxCycles) && maxCycles <= cycleNo) {
+      job.status = 'ended';
+      job.nextFireAt = null;
+      writeAudit(db, { actor: 'scheduler', action: 'job_ended_by_max_cycles', newValue: `${jobId}#${cycleNo}` });
+    }
     saveJob(job, { lastFiredAt: at });
     return {
       created: true, taskId, cycleNo, jobVersion: job.jobVersion,
@@ -367,7 +375,7 @@ export function createRecurring({ db, notifier, now = nowIso }) {
       // 首次触发时 lastFiredAt 为空，只能拿 nextFireAt 当搜索起点。
       // 但 occurrencesBetween 是**左开区间**（candidate > from），直接传 nextFireAt 会把这一刻的触发点
       // 自己排除掉 —— 于是「第一次触发」永远不建卡、也不留审计，nextFireAt 却照常前进一整周。
-      // 2026-11-16 20:30 的 yitai 周体检就是这么静默没跑的（tick 走完、lastFiredAt 写了、卡是 0 张）。
+      // 2026-11-16 20:30 的 周体检就是这么静默没跑的（tick 走完、lastFiredAt 写了、卡是 0 张）。
       // 往前挪 1 秒，把触发点本身重新纳入区间。
       const from = job.lastFiredAt
         ?? (job.nextFireAt
@@ -400,7 +408,7 @@ export function createRecurring({ db, notifier, now = nowIso }) {
   // 卡到终态时回调这里：**先收账，再决定要不要派生下一轮**。
   // 收账（completeCycle）必须对所有触发类型都做 —— 否则 cron 型 job 的 cycles.status
   // 会永远停在 todo，下一轮到点时被 overlapPolicy=skip 当成「上一轮还没完」而直接跳过。
-  // 2026-11-16 的 yitai 周体检就踩了这个：卡早就 done，轮次却一直 todo，
+  // 2026-11-16 的 周体检就踩了这个：卡早就 done，轮次却一直 todo，
   // 下周一 20:30 会被自己的上一轮挡住。派生下一轮只有 onCompletion 型才做（cron 归调度器）。
   const pendingCompletions = new Map();
   function onTaskTerminal({ taskId, status, runId = null, now: atArg } = {}) {

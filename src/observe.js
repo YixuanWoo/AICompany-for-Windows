@@ -252,12 +252,24 @@ export const DIRTY_RULES = Object.freeze([
   ['terminal_rewoken', '已终态的任务之后又被唤醒跑了一次'],
 ]);
 
-export function detectDirty({ db, config, workRoot = null, now = new Date() }) {
+export function detectDirty({ db, config, workRoot = null, now = new Date(), since = null }) {
   const issues = [];
   const add = (code, detail, extra = {}) => issues.push({ code, detail, ...extra });
-  const tasks = db.prepare('SELECT * FROM tasks ORDER BY rowid').all();
-  const taskIds = new Set(tasks.map((t) => t.taskId));
-  const runs = db.prepare('SELECT * FROM runs ORDER BY rowid').all();
+  const allTasks = db.prepare('SELECT * FROM tasks ORDER BY rowid').all();
+  const taskIds = new Set(allTasks.map((t) => t.taskId));
+  const sinceMs = since ? Date.parse(since) : null;
+  // 常驻门禁只判「观察窗口内」的状态：窗口之前就已终态、且之后再没动过的老卡，
+  // 不拿来当今天的脏数据（否则历史上的 12 张无报告卡会让新门禁永远过不了）。
+  // 非终态卡无论如何都算——它们现在还在系统里，是真问题。
+  const tasks = sinceMs
+    ? allTasks.filter((t) => (t.updatedAt && Date.parse(t.updatedAt) >= sinceMs)
+      || (t.status !== 'done' && t.status !== 'cancelled'))
+    : allTasks;
+  const allRuns = db.prepare('SELECT * FROM runs ORDER BY rowid').all();
+  // 窗口内开跑的 Run；另外 running 的 Run 不管什么时候开跑都算当前脏。
+  const runs = sinceMs
+    ? allRuns.filter((r) => (r.startedAt && Date.parse(r.startedAt) >= sinceMs) || r.status === 'running')
+    : allRuns;
   const maxRunHours = config?.runPolicy?.maxRunHours ?? 2;
   const staleEventMin = config?.runPolicy?.staleEventMinutes ?? 10;
 

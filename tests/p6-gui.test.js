@@ -445,3 +445,29 @@ test('P6 · 运行参数要进审计：否则「这次在不在新会话里跑�
     db.close();
   }
 });
+
+test('P6 · 证据层：GUI 真发出去之后必须落 dispatch 回执与 ack 模板', async (t) => {
+  const root = tmpRoot(t);
+  const config = guiConfig(root, { reportMode: 'draft', maxMinutes: 20, pollIntervalMs: 0, maxPolls: 200 });
+  const driver = {
+    kind: 'receipt-probe', clipboard: '',
+    async activateWindow() {}, async foregroundTitle() { return WINDOW; },
+    async hotkey() {}, async paste() {}, async press() {}, async screenshot() { return Buffer.from('x'); },
+    async setClipboard(text) { this.clipboard = text; },
+    async send({ paths }) {
+      fs.writeFileSync(path.join(paths.outputDir, 'hello.md'), '# 产物\n', 'utf8');
+      fs.writeFileSync(path.join(paths.taskDir, 'report.draft.json'),
+        JSON.stringify({ status: 'success', summary: '写了 hello.md' }), 'utf8');
+    },
+  };
+  const adapter = createGuiAdapter({ lock: createGuiLock(), driver, wait: noWait, config });
+  const out = await adapter.execute(makeCtx(config, 'T-RECEIPT', 'R-RECEIPT'));
+  assert.equal(out.status, 'success', out.result?.reason ?? '');
+
+  const dir = path.join(root, 'tasks', 'T-RECEIPT');
+  const receipt = JSON.parse(fs.readFileSync(path.join(dir, 'dispatch.json'), 'utf8'));
+  assert.equal(receipt.runId, 'R-RECEIPT', '送达回执必须归属本趟 run，不能拿上一轮的顶账');
+  assert.equal(receipt.via, 'gui');
+  const ack = fs.readFileSync(path.join(dir, 'ack.md'), 'utf8');
+  assert.match(ack, /收到｜预计/, '派单时必须预置一行回执模板，agent 只需改一行');
+});

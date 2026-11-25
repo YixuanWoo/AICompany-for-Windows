@@ -55,7 +55,7 @@ interaction.defaultMode: delegate       默认「董事会 → CEO → 员工」
 | 能力 | 说明 |
 |---|---|
 | **一次拆多张卡** | CEO 输出 `tasks: [...]`（最多 8 张），引擎逐张建卡、逐张派活；有一张派不出去就整单挂起，不做"半单" |
-| **CEO 改判项目** | 你下单不选项目时，CEO 可以在卡里写 `project: "benny"`，子卡就落到那个项目；写了不存在/没规范的项目会被拒并留审计 |
+| **CEO 改判项目** | 你下单不选项目时，CEO 可以在卡里写 `project: "demo"`，子卡就落到那个项目；写了不存在/没规范的项目会被拒并留审计 |
 | **建议建项目** | 输出 `projectSuggestion` → 引擎出一张 `project_create` 审批单（同一张卡只出一张，不刷屏） |
 | **拆解说明可见** | CEO 的 `summary` 写进审计（`ceo_plan`），同时挂在子卡上，看板任务列表里直接显示"CEO：…" |
 
@@ -79,7 +79,7 @@ interaction.defaultMode: delegate       默认「董事会 → CEO → 员工」
 
 发生了什么：
 
-1. 父卡 `T-81114618` 派给 CEO → CEO 跑一轮（18 秒），产出：项目归属判断（一次性只读巡检，不归 benny 也不建议新建）+ 1 张卡 + 派给 `ceo-agent`；
+1. 父卡 `T-81114618` 派给 CEO → CEO 跑一轮（18 秒），产出：项目归属判断（一次性只读巡检，不归 demo 也不建议新建）+ 1 张卡 + 派给 `ceo-agent`；
 2. 子卡 `T-dbbd7e4a` 自动建、自动派给研发工位 → 员工真的去读盘、盘点目录（跑了 3 分钟）；
 3. 员工交活 → 自动进 `in_review` → 自动叫 CEO 验收；
 4. CEO 验收时**自己重算了三个文件的 sha256**、比了各卡 mtime、还发现"父卡 T-81114618 在 tasks 下没有目录"这件事并如实标注 → `verdict: pass`；
@@ -91,7 +91,7 @@ interaction.defaultMode: delegate       默认「董事会 → CEO → 员工」
 human   create_task  T-81114618
 ceo     wake         issue_assigned:R-f36220b5
 ceo     run_params   {"transport":"webhook-exec","mode":"ceo","sessionId":"aiceo-ceo-T-81114618-plan","turn":1}
-ceo     ceo_plan     这是一次性只读巡检，不归档到 benny…派 ceo-agent 以一张只读卡完成，只查不改。
+ceo     ceo_plan     这是一次性只读巡检，不归档到 demo…派 ceo-agent 以一张只读卡完成，只查不改。
 ceo     tasks_created 1 张：T-dbbd7e4a｜项目 (一次性)
 ceo-agent wake       issue_assigned:R-43c36bef
 ceo     wake         review_requested:R-aa4fd191

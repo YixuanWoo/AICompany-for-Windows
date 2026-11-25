@@ -67,12 +67,24 @@ export function isInsideOutput(outputDir, artifact) {
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+// 2026-11-23 落盘改造：产物有两种合法形态 ——
+//   ① output/ 下的相对路径（无项目的一次性任务，沿用旧规矩）；
+//   ② **项目落点内的绝对路径**（项目产物直接落项目目录，不进 output/）。
+// 其它位置一律拒。用 path.relative 判断，避免 D:/proj-evil 被当成 D:/proj 的子目录。
+export function isInsideAllowedRoots(outputDir, artifact, writeDir = null) {
+  const raw = String(artifact ?? '');
+  if (!path.isAbsolute(raw)) return isInsideOutput(outputDir, raw);
+  if (!writeDir) return false;
+  const rel = path.relative(path.resolve(writeDir), path.resolve(raw));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
 // outputDir 的上一级就是 taskDir；artifact 里的 output/ 前缀相对 taskDir 解析。
 function pathsParent(outputDir) {
   return path.dirname(outputDir);
 }
 
-export function verifyReport({ report, paths, taskId, runId }) {
+export function verifyReport({ report, paths, taskId, runId, writeDir = null }) {
   const errors = [];
   const checked = validate('completion', report);
   for (const error of checked.errors) errors.push(error);
@@ -90,11 +102,13 @@ export function verifyReport({ report, paths, taskId, runId }) {
   if (artifacts.length === 0) errors.push('artifacts 为空，没有可回收产物');
   const computed = {};
   for (const artifact of artifacts) {
-    if (!isInsideOutput(paths.outputDir, artifact)) {
-      errors.push(`产物越界（只能写 output/）：${artifact}`);
+    if (!isInsideAllowedRoots(paths.outputDir, artifact, writeDir)) {
+      errors.push(`产物越界（只能写项目落点${writeDir ? ` ${writeDir}` : ''} 或 output/）：${artifact}`);
       continue;
     }
-    const absolute = path.resolve(path.dirname(paths.outputDir), String(artifact).replace(/\\/g, '/'));
+    const absolute = path.isAbsolute(String(artifact))
+      ? path.resolve(String(artifact))
+      : path.resolve(path.dirname(paths.outputDir), String(artifact).replace(/\\/g, '/'));
     if (!fs.existsSync(absolute)) { errors.push(`产物不存在：${artifact}`); continue; }
     if (fs.statSync(absolute).size === 0) { errors.push(`产物为空：${artifact}`); continue; }
     computed[artifact] = sha256File(absolute);
@@ -141,10 +155,13 @@ export function writeChangeRequest(paths, crId, data) {
 // 它同时当一个可靠的构建脚本。所以拆开：agent 只写一份三字段的极简报告，
 // 证据（文件是否存在、大小、校验和）由控制面自己扫。
 //
-// 三条不放水的纪律：
-//   1. artifacts 一律由扫描 output/ 得出，**绝不采信 draft 里声明的清单**；
+// 四条不放水的纪律（2026-11-23 落盘改造后）：
+//   1. 产物默认由扫描 output/ 得出；席位报了 draft.deliverables 时改用这份清单，
+//      但**每一条都要控制面亲自核实**（绝对路径、在项目落点内、存在且非空、checksum 自算），
+//      不是它说有什么就认什么；
 //   2. draft 说 failed / blocked 就按失败走，不补全成 success；
-//   3. output/ 里没有非空文件，一律不算成功（空文件也不算）。
+//   3. output/ 没有非空文件、又没报 deliverables，一律不算成功（空文件也不算）；
+//   4. 项目产物落项目目录，output/ 只放任务卡、进度、报告这类公司自己的文件。
 export const DRAFT_REPORT_NAME = 'report.draft.json';
 
 // 草稿的位置：正位是任务目录；员工偶尔会误写进 output/（T-3ff55213 事故）。
@@ -205,7 +222,7 @@ export function scanOutputFiles(paths) {
 }
 
 export function buildCompletionFromDraft({
-  paths, taskId, runId, agent, revision = 1, now = () => new Date().toISOString(),
+  paths, taskId, runId, agent, revision = 1, writeDir = null, now = () => new Date().toISOString(),
 }) {
   // 只认本轮写的草稿：上一轮的 draft 说 success 也不能拿来交卷（T-906d3686）。
   const draft = readDraft(paths, { minMtimeMs: runStartedAt(paths, runId) });
@@ -222,12 +239,42 @@ export function buildCompletionFromDraft({
     };
   }
 
-  const files = scanOutputFiles(paths);
-  if (files.length === 0) {
-    return {
-      ok: false, kind: 'no_artifacts', draft,
-      reason: `draft 说成功，但 output/ 里没有任何非空文件（空文件不算）`,
-    };
+  // 2026-11-23 落盘改造：项目产物落在**项目自己的目录**，不进 output/。
+  // 席位在 draft.deliverables 里报「真正交付了哪几个文件」（绝对路径），控制面逐个核对：
+  // 必须在项目落点内、真实存在且非空；checksum 一律控制面自己算，不采信它自报的 hash。
+  // 有 deliverables 就不再拿「output/ 里有没有文件」否决这份完成信号 ——
+  // output/ 只放任务卡、进度、报告这类公司自己的文件。
+  // 没报 deliverables 的旧卡仍按老办法扫 output/，行为不变。
+  const declared = Array.isArray(draft.deliverables) ? draft.deliverables : [];
+  let files;
+  let source = 'output-scan';
+  if (declared.length) {
+    source = 'manifest';
+    files = [];
+    const problems = [];
+    for (const item of declared) {
+      const p = typeof item === 'string' ? item : item?.path;
+      if (!p || !path.isAbsolute(String(p))) { problems.push(`不是绝对路径：${p ?? '(空)'}`); continue; }
+      if (writeDir && !isInsideAllowedRoots(paths.outputDir, p, writeDir)) { problems.push(`不在项目落点内：${p}`); continue; }
+      let st = null;
+      try { st = fs.statSync(p); } catch { st = null; }
+      if (!st?.isFile() || st.size === 0) { problems.push(`不存在或为空：${p}`); continue; }
+      files.push({ abs: String(p), artifact: String(p).replace(/\\/g, '/'), size: st.size });
+    }
+    if (files.length === 0) {
+      return {
+        ok: false, kind: 'deliverables_invalid', draft,
+        reason: `deliverables 报了 ${declared.length} 条但没有一条能核实：${problems.join('；')}`,
+      };
+    }
+  } else {
+    files = scanOutputFiles(paths);
+    if (files.length === 0) {
+      return {
+        ok: false, kind: 'no_artifacts', draft,
+        reason: `draft 说成功，但 output/ 里没有任何非空文件（空文件不算），也没有报 deliverables`,
+      };
+    }
   }
 
   const checksum = {};
@@ -247,9 +294,9 @@ export function buildCompletionFromDraft({
     artifacts: files.map((f) => f.artifact),
     checksum,
     acceptanceResults: [{
-      rule: '控制面核实：产物真实存在且非空',
+      rule: source === 'manifest' ? '控制面核实：deliverables 指向的项目产物真实存在且非空' : '控制面核实：产物真实存在且非空',
       pass: true,
-      detail: `${files.length} 个文件，共 ${files.reduce((n, f) => n + f.size, 0)} 字节`,
+      detail: `${source === 'manifest' ? '按 manifest 核对，' : ''}${files.length} 个文件，共 ${files.reduce((n, f) => n + f.size, 0)} 字节`,
     }],
     // usage 是自由对象，把「这份报告是谁写的」记在这里，不污染固定字段。
     usage: {
@@ -259,8 +306,8 @@ export function buildCompletionFromDraft({
     },
     finishedAt: now(),
   };
-  const verified = verifyReport({ report, paths, taskId, runId });
-  return { ok: true, kind: 'completion', report, verified, files, draft };
+  const verified = verifyReport({ report, paths, taskId, runId, writeDir });
+  return { ok: true, kind: 'completion', report, verified, files, draft, source };
 }
 
 export function writeCompletion(paths, report) {
@@ -270,6 +317,7 @@ export function writeCompletion(paths, report) {
 
 export async function pollForReport({
   paths, config = {}, taskId, runId, maxPolls = null, wait = null, now = () => new Date().toISOString(),
+  onPoll = null, writeDir = null,
 }) {
   const intervalMs = config.pollIntervalMs ?? 3000;
   const limit = maxPolls ?? Math.max(1, Math.ceil(((config.maxMinutes ?? 1) * 60000) / intervalMs));
@@ -282,6 +330,16 @@ export async function pollForReport({
     const pending = listChangeRequests(paths).find((x) => x.data?.severity === 'needsDecision');
     if (pending) {
       return { kind: 'change_request', data: pending.data, file: pending.file, polls: i, at: now() };
+    }
+    // ①b P2-4（2026-11-23）：席位主动「停手」信号 blocked.json。
+    //     比让它反复乱试、或干等 60 分钟超时都便宜；只认本轮写的（早于开工时刻的算上一轮残留）。
+    const blockedFile = path.join(paths.taskDir, 'blocked.json');
+    let blockedSt = null;
+    try { blockedSt = fs.statSync(blockedFile); } catch { blockedSt = null; }
+    if (blockedSt && blockedSt.size > 0 && (startedAt == null || blockedSt.mtimeMs >= startedAt)) {
+      let blockedData = null;
+      try { blockedData = JSON.parse(fs.readFileSync(blockedFile, 'utf8')); } catch { blockedData = null; }
+      return { kind: 'blocked', data: blockedData, file: blockedFile, polls: i, at: now() };
     }
     // ② 再看完成报告（终态，写完即收）。
     if (fs.existsSync(paths.reportPath)) {
@@ -298,7 +356,7 @@ export async function pollForReport({
       const staleFromPreviousRun = data?.taskId === taskId
         && data?.runId != null && data.runId !== runId;
       if (!staleFromPreviousRun) {
-        const verified = verifyReport({ report: data, paths, taskId, runId });
+        const verified = verifyReport({ report: data, paths, taskId, runId, writeDir });
         return {
           kind: verified.ok ? 'completion' : 'invalid_report',
           data, verified, polls: i, at: now(),
@@ -307,6 +365,9 @@ export async function pollForReport({
     }
     // ③ progress.json 只是覆盖写的进度，绝不触发事件、绝不唤醒任何人。
     if (fs.existsSync(paths.progressPath)) progressSeen = true;
+    // ③b 证据心跳：adapter 还活着、还在盯着这个任务目录（不等于 agent 在产出，只是机器侧证据）。
+    //     抛异常一律吞掉：心跳失败绝不能把一次正常的轮询变成失败。
+    if (onPoll) { try { onPoll({ index: i, progressSeen }); } catch { /* ignore */ } }
     // ④ 草稿模式（聊天窗口型助手）：draft 就是它的终态信号，别傻等满 maxMinutes。
     //    但 draft 说成功、output/ 里却还没有非空文件时不算数，继续等（agent 可能还在写）。
     //    草稿被误写进 output/ 也能兜住（draftFileCandidates 有两个候选位）。
@@ -326,6 +387,11 @@ export async function pollForReport({
           return { kind: 'invalid_report', error: String(error.message ?? error), polls: i, at: now() };
         }
         if (draft.status !== 'success' || hasNonEmptyFile(paths.outputDir)) {
+          return { kind: 'draft', data: draft, polls: i, at: now() };
+        }
+        // 落盘改造：draft 报了 deliverables 就不必再等 output/ 出文件 ——
+        // 产物在项目目录里，output/ 本来就该是空的。
+        if (Array.isArray(draft.deliverables) && draft.deliverables.length > 0) {
           return { kind: 'draft', data: draft, polls: i, at: now() };
         }
       }

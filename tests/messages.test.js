@@ -30,7 +30,7 @@ function company(root, { report = {}, ceoTasks = null } = {}) {
       requireRepoForManagedCode: true, codeExtensions: ['.js', '.py'],
     },
     projects: {
-      p1: { displayName: '小王子的翻译', rootDir: path.join(root, 'proj'), deliverSubdir: '交付', memoryLimit: 5 },
+      p1: { displayName: '示例项目', rootDir: path.join(root, 'proj'), deliverSubdir: '交付', memoryLimit: 5 },
     },
     agents: [
       {
@@ -41,7 +41,7 @@ function company(root, { report = {}, ceoTasks = null } = {}) {
           config: {
             result: (ctx) => (ctx.wakeReason === 'review_requested'
               ? { type: 'review', verdict: 'pass', reason: '可以' }
-              : { type: 'task-create', summary: '派一张', tasks: ceoTasks ?? [{ title: '整理术语表', assignee: 'doubao' }] }),
+              : { type: 'task-create', summary: '派一张', tasks: ceoTasks ?? [{ title: '整理词条表', assignee: 'doubao' }] }),
           },
         },
       },
@@ -55,13 +55,13 @@ function company(root, { report = {}, ceoTasks = null } = {}) {
               const paths = buildTaskPaths(root, ctx.task.taskId);
               fs.mkdirSync(paths.outputDir, { recursive: true });
               const file = path.join(paths.outputDir, 'terms.md');
-              fs.writeFileSync(file, '术语表', 'utf8');
+              fs.writeFileSync(file, '词条表', 'utf8');
               return {
                 schema: 'aicompany.completion/v1',
                 taskId: ctx.task.taskId, runId: ctx.runId, agent: 'doubao',
                 revision: ctx.task.revision, status: 'success',
                 summary: `完成：${ctx.task.title}`,
-                boardNote: '术语表理好了，42 条，按原文出现顺序排的。',
+                boardNote: '词条表理好了，42 条，按原文出现顺序排的。',
                 artifacts: ['output/terms.md'],
                 checksum: { 'output/terms.md': sha256File(file) },
                 acceptanceResults: [{ rule: '产物非空', pass: true }],
@@ -89,7 +89,7 @@ function setup(t, opts = {}) {
   // 项目要有规范文件才允许派活（没有规范的项目等于没有工地）。
   const specDir = path.join(root, 'projects', 'p1');
   fs.mkdirSync(specDir, { recursive: true });
-  fs.writeFileSync(path.join(specDir, 'project.yaml'), 'name: 小王子的翻译\n', 'utf8');
+  fs.writeFileSync(path.join(specDir, 'project.yaml'), 'name: 示例项目\n', 'utf8');
   // 落盘目录必须事先存在：引擎不会替你到处建野目录。
   fs.mkdirSync(path.join(root, 'proj'), { recursive: true });
   const db = openDb(':memory:');
@@ -104,7 +104,7 @@ const childOf = (db) => db.prepare('SELECT * FROM tasks WHERE parentTaskId IS NO
 
 test('M1 · 干完活：消息箱出现一条人话，讲清谁、干了什么、结果如何', async (t) => {
   const { db, engine } = setup(t);
-  await engine.submit({ text: '把第 3 章译稿整理成术语对照表', project: 'p1' });
+  await engine.submit({ text: '把第 3 份交付文件整理成词条对照表', project: 'p1' });
   await pumpAll(engine);
 
   const msgs = listMessages(db);
@@ -112,8 +112,8 @@ test('M1 · 干完活：消息箱出现一条人话，讲清谁、干了什么�
   const m = msgs[0];
   assert.equal(m.kind, 'done');
   assert.match(m.title, /^完成：/);
-  assert.match(m.body, /豆包（执行） 干完了：整理术语表/);
-  assert.match(m.body, /术语表理好了，42 条/, 'boardNote 要优先于 summary 展示');
+  assert.match(m.body, /豆包（执行） 干完了：整理词条表/);
+  assert.match(m.body, /词条表理好了，42 条/, 'boardNote 要优先于 summary 展示');
   assert.match(m.body, /你不用管/, '结尾要告诉人「要不要动手」');
   assert.ok(!m.body.includes('completion.json'), '内部文件名不许出现在给人的消息里');
   assert.ok(!m.body.includes('output/'), '产物相对路径也不摆出来');
@@ -121,11 +121,11 @@ test('M1 · 干完活：消息箱出现一条人话，讲清谁、干了什么�
 
 test('M2 · 产物落盘后，消息补一句「放进哪个文件夹」', async (t) => {
   const { db, engine, root } = setup(t);
-  await engine.submit({ text: '整理术语表', project: 'p1' });
+  await engine.submit({ text: '整理词条表', project: 'p1' });
   await pumpAll(engine);
 
   const body = listMessages(db)[0].body;
-  assert.match(body, /已经放进「小王子的翻译」/, `消息里要有落盘位置，实际：${body}`);
+  assert.match(body, /已经放进「示例项目」/, `消息里要有落盘位置，实际：${body}`);
   assert.ok(fs.existsSync(path.join(root, 'proj', '交付', 'terms.md')), '文件真被放进项目文件夹了');
 });
 
@@ -148,7 +148,7 @@ test('M3 · 卡住了：消息说清原因，并告诉人「它已经停下来�
 
 test('M4 · 董事会直投：落盘结案，一条消息，不惊动总经理', async (t) => {
   const { db, engine } = setup(t);
-  await engine.submit({ mode: 'direct', addressedTo: 'doubao', text: '整理术语表', project: 'p1' });
+  await engine.submit({ mode: 'direct', addressedTo: 'doubao', text: '整理词条表', project: 'p1' });
   await pumpAll(engine);
 
   const msgs = listMessages(db);
@@ -161,7 +161,7 @@ test('M4 · 董事会直投：落盘结案，一条消息，不惊动总经理',
 
 test('M5 · 已读未读：计数准、单条能标、全部能清', async (t) => {
   const { db, engine } = setup(t);
-  await engine.submit({ mode: 'direct', addressedTo: 'doubao', text: '整理术语表', project: 'p1' });
+  await engine.submit({ mode: 'direct', addressedTo: 'doubao', text: '整理词条表', project: 'p1' });
   await pumpAll(engine);
   await engine.submit({ mode: 'direct', addressedTo: 'doubao', text: '再整理一遍', project: 'p1' });
   await pumpAll(engine);
@@ -202,11 +202,11 @@ test('M7 · 总经理只回话：消息只有那条回复，不再重复播报�
 test('M8 · 组合器：审查通过时先说「谁看过了」，不再冒充「刚干完」', () => {
   const out = composeDoneMessage({
     config: { agents: [{ id: 'doubao', postTitle: '执行', holderName: '豆包' }, { id: 'ceo', postTitle: '总经理' }] },
-    task: { title: '整理术语表', assignee: 'doubao' },
+    task: { title: '整理词条表', assignee: 'doubao' },
     report: { boardNote: '42 条术语理好了', artifacts: [] },
     reviewedBy: 'ceo',
   });
-  assert.match(out.body, /看过了，没问题：整理术语表/);
+  assert.match(out.body, /看过了，没问题：整理词条表/);
   assert.match(out.body, /它说：42 条术语理好了/);
 });
 

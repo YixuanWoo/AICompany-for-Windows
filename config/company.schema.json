@@ -184,6 +184,17 @@
     "workRoot": {
       "type": "string"
     },
+    "bridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "bridge / seat 拉模式总开关（2026-11-18 停用）。enabled=false 时 /api/bridge/* 一律 503，代码保留不删。",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "true = 允许 bridge / seat 客户端来领活；false = 一律拒绝，任务只走控制面直派"
+        }
+      }
+    },
     "quota": {
       "type": "object",
       "additionalProperties": false,
@@ -532,6 +543,69 @@
         "staleEventMinutes": {
           "type": "integer",
           "minimum": 1
+        },
+        "escalateToBoss": {
+          "type": "boolean",
+          "description": "卡走不下去时先交给汇报线上的上级（agent）处置，只有汇报线到顶才出人审批单（2026-11-17 稳定性加固）"
+        },
+        "stuckMinutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "卡在同一状态停留超过这么多分钟就触发心跳看门狗（补投 / 向上汇报）；0 = 关"
+        },
+        "parentWaitMinutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "父卡派出子卡后仍占着会话干等，超过这么多分钟由引擎中断该 run 并置为等子卡；0 = 关"
+        },
+        "seatReviewFallbackMinutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "验收该由中层席位审时，等它这么多分钟仍未审才转总经理兜底；0 = 不等待（补审一律归 CEO）"
+        },
+        "reviewEscalateMinutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "验收久悬的第二道兜底：让路（人在用电脑）不计补审额度后，超过这么多分钟仍停在待验收就报一次董事会（自动补审继续）；0 = 关"
+        },
+        "evidenceEnabled": {
+          "type": "boolean",
+          "description": "证据层总开关：开启后引擎按 dispatch/ack/活动/交付四级证据判断 run 是否真在干活（2026-11-18）"
+        },
+        "ackTimeoutSec": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "派出去这么多秒仍未观测到系统级启动回执（dispatch.json）→ 判定进程没起来，中断并重派"
+        },
+        "idleTimeoutSec": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "进程已启动但这么多秒没有任何 agent 侧活动证据 → 先探证据，仍无则中断重派"
+        },
+        "maxDispatchAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "同一张卡最多派几次（含首次）；用尽后向上开处置卡交给上级 agent"
+        },
+        "heartbeatGraceSec": {
+          "type": "integer",
+          "minimum": 30,
+          "description": "adapter 的 run-heartbeat.json 多新才算「这一趟还在轮询」；新鲜时不重派（2026-11-19 心跳续命）"
+        },
+        "seatBudgetSlackSec": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "席位自己承诺的 maxMinutes 到了之后再宽限多久；仍无产出则直接收掉并向上收束，不再重派"
+        },
+        "noProgressAlertMinutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "心跳在、但产出心跳（run-progress.json）过期超过这么多分钟 → 报一次董事会提醒（不打断）；0 = 关闭"
+        },
+        "noProgressStopMinutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "再久这么多分钟仍零产出 → 判疑似中途等人：收掉这一趟、卡置「等人配合」，不再等满 60 分钟；0 = 关闭"
         }
       }
     },
@@ -612,6 +686,22 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "selfWork": {
+          "type": "object",
+          "description": "「自己做还是派下去」的尺子：只作为提示词判据，不做硬拦截。超出范围必须派卡。",
+          "properties": {
+            "maxFiles": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "单点小改允许的文件数上限，默认 1。"
+            },
+            "maxLines": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "单点小改允许的改动行数上限，默认 40。"
+            }
           }
         }
       }
