@@ -963,6 +963,12 @@ export function createEngine({
   // Run Policy（任务书 §7.3）：每次唤醒前依次检查。返回带 code，便于试运行统计误唤醒。
   // code 取值：missing / agent_inactive / terminal / suspended / dependency / quota / concurrent / cooldown / bridge_offline
   const COOLDOWN_EXEMPT = new Set(['decision', 'review_requested', 'escalation', 'replan']);
+  // 2026-11-25 真机（T-82f1f5ce 同一件事被连派三趟、烧三倍 token）：
+  // blocked 卡已不在正常流程里（被挡住 / 等人决策）。除了「人或上级明确把它往前推」的理由，
+  // 任何自动唤醒都必须拒绝 —— 否则一张停下来的卡会被事件反复叫起来重做同一件事。
+  const BLOCKED_EXEMPT = new Set([
+    'decision', 'rework', 'manual_redispatch', 'manual', 'escalation', 'replan',
+  ]);
   // 「派卡」类唤醒：受卡间依赖与 bridge 在线约束；治理类唤醒不受（否则半路的卡永远走不完）。
   const BRIDGE_GATED_REASONS = new Set([
     'issue_assigned', 'compensation', 'rework', 'checkout', 'bridge_checkout',
@@ -979,6 +985,13 @@ export function createEngine({
     }
     if (task?.status === 'awaiting_decision' && wakeReason !== 'decision') {
       return { ok: false, code: 'suspended', reason: '任务挂起等决策，除决策出口外一律拒绝唤醒' };
+    }
+    // 2026-11-25：blocked 卡同样不许被自动唤起（见 BLOCKED_EXEMPT 注释）。
+    if (task?.status === 'blocked' && !BLOCKED_EXEMPT.has(wakeReason)) {
+      return {
+        ok: false, code: 'blocked',
+        reason: `任务被挡住（wakeReason=${wakeReason}），等人决策或上级推进前不再派`,
+      };
     }
     // 卡间依赖：前置卡没 done 就不许开跑。防的是「CEO 拆了 4 张，接管还没做完，发布脚本已经发布」。
     // 只挡派卡类唤醒（review / 决策 / 返工是同一张卡自己的流程，与前置无关）。
@@ -2795,7 +2808,10 @@ export function createEngine({
   //   ② 最后一张子卡到终态 → 自动拼总汇报，按父卡自己的路由送审。
   // 有这两条，「8 张子卡完成 = 总任务完成」才真的成立：
   // 总任务是在子卡全收尾之后才出现在总经理面前的，而不是拆完卡那一刻。
-  const CHILD_CLOSED = ['done', 'blocked', 'cancelled'];
+  // 2026-11-25：blocked 不再算「收尾」。事故 T-50974384：子卡被 GUI 闸门临时挡成 blocked，
+  // 父卡据此当成「1 张没成」去验收，被 CEO 打回后父子两路同时对同一份产物动手。
+  // 现在 blocked 仍在「没回来」，父卡继续等；子卡自己会被 gate_retry / 处置卡放回来。
+  const CHILD_CLOSED = ['done', 'cancelled'];
   const STATUS_WORD = { done: '完成', blocked: '卡住了', cancelled: '取消', in_progress: '在做', in_review: '待验收' };
 
   function childrenOf(taskId) {
@@ -3843,6 +3859,22 @@ export function createEngine({
         actor: agentId, action: 'change_requested_from_gui',
         newValue: String(result.changeRequestId ?? '(缺 id)'), runId: outcome.runId,
       });
+      // 2026-11-25 真机（T-82f1f5ce，CLI 席位）：这里原来只 return，卡留在 in_progress、手上又没有 running run，
+      // 维护心跳 60 秒后就把它当成「躺着的卡」再补派一趟 —— 同一张卡连续跑了三趟 CLI，烧掉三倍 token。
+      // 变更请求的本质是「等人拍板」，不是「再试一次」：置 blocked + humanWait，心跳只扫 todo/in_progress，
+      // 从此不会再自动重投；人处理完变更请求后手动重派即可（blocked → todo 是合法跳转）。
+      const freshTask = taskById(task.taskId);
+      if (freshTask && !['done', 'cancelled', 'blocked', 'awaiting_decision'].includes(freshTask.status)) {
+        const crId = String(result.changeRequestId ?? submitted?.crId ?? '').slice(0, 120);
+        transition(db, task.taskId, 'blocked', agentId, outcome.runId);
+        db.prepare('UPDATE tasks SET humanWait = 1, humanWaitNote = ?, humanWaitAt = ? WHERE taskId = ?')
+          .run(`等变更请求决策（${crId || '未给 id'}）：已停手，不再自动重派，避免同一张卡重复烧 token`.slice(0, 200), nowIso(), task.taskId);
+        writeAudit(db, {
+          actor: agentId, action: 'blocked_on_change_request',
+          newValue: `${crId || '(缺 id)'}｜卡转等人决策，不再自动重投`,
+          runId: outcome.runId, taskId: task.taskId,
+        });
+      }
       return submitted;
     }
     if (payload.wakeReason === 'escalation') {
@@ -4563,6 +4595,39 @@ export function createEngine({
         const rounds = db.prepare("SELECT COUNT(*) AS n FROM runs WHERE taskId = ? AND wakeReason = 'review_requested'")
           .get(task.taskId).n;
         if (rounds <= 1) {
+          // ★ 父子卡不许同时返工（2026-11-25 事故 T-50974384）：
+          //   父卡被打回时，若它名下还有没关的卡，要重做的是那张子卡。
+          //   父卡只下指令、不上场——否则父卡和子卡两路同时对同一份产物动手，还互抢 GUI 锁。
+          const kidsOpen = childrenOf(task.taskId).filter((k) => !CHILD_CLOSED.includes(k.status));
+          if (kidsOpen.length) {
+            // 挑一张「没在跑的活卡」把意见挂上去；正在跑的不要打扰，等它自己交活。
+            const idleKid = kidsOpen
+              .filter((k) => ['todo', 'in_progress', 'blocked', 'backlog'].includes(k.status))
+              .find((k) => !db.prepare("SELECT 1 AS n FROM runs WHERE taskId = ? AND status = 'running' LIMIT 1").get(k.taskId));
+            db.prepare('UPDATE tasks SET waitingChildren = 1, updatedAt = ? WHERE taskId = ?').run(nowIso(), task.taskId);
+            if (idleKid) {
+              if (idleKid.status === 'blocked' || idleKid.status === 'backlog' || idleKid.status === 'paused') {
+                transition(db, idleKid.taskId, 'todo', 'ceo', outcome.runId);
+              }
+              emitEvent({
+                type: 'issue_assigned', taskId: idleKid.taskId, agentId: idleKid.assignee,
+                payload: { wakeReason: 'rework', reviewNote: rejectReason || null, fromParent: task.taskId },
+                dedupeKey: `parent-rework:${task.taskId}:${idleKid.taskId}:${outcome.runId}`,
+              });
+              writeAudit(db, {
+                actor: 'ceo', action: 'parent_rework_delegated',
+                newValue: `${task.taskId}→${idleKid.taskId}|${rejectReason || '(CEO 未写原因)'}`,
+                runId: outcome.runId, taskId: task.taskId,
+              });
+            } else {
+              writeAudit(db, {
+                actor: 'ceo', action: 'parent_rework_wait',
+                newValue: `${task.taskId}|子卡仍在动：${kidsOpen.map((k) => `${k.taskId}(${k.status})`).join(',')}`.slice(0, 300),
+                runId: outcome.runId, taskId: task.taskId,
+              });
+            }
+            return;
+          }
           emitEvent({
             type: 'issue_assigned', taskId: task.taskId, agentId: task.assignee,
             payload: { wakeReason: 'rework', reviewNote: rejectReason || null },

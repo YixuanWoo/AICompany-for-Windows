@@ -122,7 +122,7 @@ function fail(status, reason, extra = {}) {
   const shell = {
     schema: 'aicompany.completion/v1',
     taskId: extra.taskId ?? null, runId: extra.runId ?? null, agent: extra.agent ?? 'unknown',
-    revision: extra.revision ?? 1, status, summary: reason,
+    revision: extra.revision ?? 1, status, summary: reason, reason,
     artifacts: [], checksum: {}, acceptanceResults: [], usage: { quotaUnits: 0 },
     finishedAt: new Date().toISOString(),
   };
@@ -208,8 +208,23 @@ async function main() {
   };
   lastDigest = sample();
 
+  // 终端原始输出落盘（2026-11-25：子卡在 CLI 上跑满 60 分钟零产物，而 stdout 只留在内存里，
+  // 事后完全看不到 CLI 卡在哪一步。这一行是给「下次卡住」留的现场：tasks/<taskId>/cli-raw.log）。
+  const rawLog = path.join(taskDir, 'cli-raw.log');
+  try { if (fs.statSync(rawLog).size > 20 * 1024 * 1024) fs.writeFileSync(rawLog, ''); } catch { /* 首次运行没有这个文件 */ }
+  // 2026-11-25 真机，这是「CLI 席位唤不醒」的真凶：
+  //   豆包 CLI 发现新版本（2.37.2 → 2.38.2），启动第一屏就问「是否现在更新？[Y/N]」。
+  //   pty 里没有人按键，它就原地死等 —— 进程活着、心跳照跳、一个文件不写，跑满 maxMinutes 被掐。
+  //   这里自动答 N：本趟正在干活，升级会重启 CLI 把这一趟丢掉；升级交给人另找时间做。
+  let updateAnswered = 0;
   child.onData((data) => {
+    try { fs.appendFileSync(rawLog, data); } catch { /* 落盘失败不影响干活 */ }
     stdout += data;
+    const clean0 = String(data).replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+    if (updateAnswered < 2 && (/是否现在更新|\[Y\/N\]|Update now/i.test(clean0))) {
+      updateAnswered += 1;
+      try { child.write('N\r'); } catch { /* 写不进去就靠 MAX 兜住 */ }
+    }
     // 去掉 ANSI 转义后逐行找结果；其余是 [cli-chat] 日志，忽略即可。
     const clean = String(data).replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\r/g, '');
     for (const line of clean.split(/\n/)) {
@@ -288,7 +303,8 @@ async function main() {
   // 越界优先：这一趟已经被掐断，交上位去定，绝不按「完成」交卷。
   if (guardTrip) {
     return fail('failed',
-      `越界改动已中断：动了 ${guardTrip.files.slice(0, 6).join(', ')}（席位不允许改 src/scripts/config）。已记 out-of-scope.json`,
+      `任务期间 src/scripts/config 出现改动：动了 ${guardTrip.files.slice(0, 6).join(', ')}。` +
+      '已掐断这一趟并记 out-of-scope.json。注意：控制面维护时人/助手也会同时改代码，未必是本席位所为，由上级核对。',
       base);
   }
   const outScopeNote = outOfScope.length
